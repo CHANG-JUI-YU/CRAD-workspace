@@ -1,0 +1,26 @@
+{
+  "name": "@card-workspace/project",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run test"
+  },
+  "dependencies": {
+    "@card-workspace/schemas": "workspace:*",
+    "fast-json-patch": "3.1.1",
+    "yaml": "2.8.3",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@card-workspace/testing": "workspace:*"
+  }
+}

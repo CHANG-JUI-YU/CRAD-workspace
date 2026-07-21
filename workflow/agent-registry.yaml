@@ -1,0 +1,190 @@
+schema_version: 1
+agents:
+  - id: director
+    kind: director
+    agent_file: .opencode/prompts/director.md
+    skill: director-orchestration
+    personality: director
+    capabilities: [workspace.initialize, workspace.discover, workflow.direct, workflow.read, artifact.read, task.execute, blueprint.propose, facts.review, source.approve, forge.preview, forge.publish, card.inspect, plugin.read, plugin.template]
+    input_contracts: [workflow-state@2, review-report@1, card-inspection@1]
+    output_contracts: [workflow-state@2, proposal@1]
+    extensions:
+      delegates: [source-researcher, fact-curator, zhuji-creator, palette-creator, relationship-creator, character-critic, greetings-creator, greetings-critic, mode-conversion, card-import-analyst, world-lore-creator, world-lore-critic, mvu-creator, mvu-critic, ejs-creator, ejs-critic, html-creator, html-critic]
+      references: [.agents/skills/director-orchestration/references/workflow-routing.md]
+      fixtures: [.agents/skills/director-orchestration/fixtures/routing.yaml]
+  - id: source-researcher
+    kind: source-researcher
+    agent_file: .opencode/prompts/source-researcher.md
+    skill: source-research
+    personality: source-researcher
+    capabilities: [workflow.read, source.research]
+    input_contracts: [workflow-state@2]
+    output_contracts: []
+    extensions:
+      references: [.agents/skills/source-research/references/source-policy.md]
+      fixtures: [.agents/skills/source-research/fixtures/query.yaml]
+  - id: fact-curator
+    kind: fact-curator
+    agent_file: .opencode/prompts/fact-curator.md
+    skill: fact-curation
+    personality: fact-curator
+    capabilities: [workflow.read, task.execute, source.process, facts.propose, facts.read]
+    input_contracts: [workflow-state@2]
+    output_contracts: [facts-curation-summary@1]
+    extensions: { references: [.agents/skills/fact-curation/references/extraction.md], fixtures: [.agents/skills/fact-curation/fixtures/candidates.yaml] }
+  - id: zhuji-creator
+    kind: zhuji-creator
+    agent_file: .opencode/prompts/zhuji-creator.md
+    skill: zhuji-creation
+    personality: zhuji-creator
+    capabilities: [workflow.read, task.execute, task.clarify, facts.read, character.propose]
+    input_contracts: [blueprint@1]
+    output_contracts: [proposal@1]
+    extensions:
+      references:
+        - .agents/skills/zhuji-creation/references/generation-guide.md
+        - .agents/skills/zhuji-creation/references/example-proposal.md
+        - .agents/skills/zhuji-creation/references/module-appearance.md
+        - .agents/skills/zhuji-creation/references/module-inner-nature.md
+        - .agents/skills/zhuji-creation/references/module-extension.md
+        - .agents/skills/zhuji-creation/references/module-trait-refinement.md
+        - .agents/skills/zhuji-creation/references/module-trait-dialogue.md
+        - .agents/skills/zhuji-creation/references/module-scene-dialogue.md
+        - .agents/skills/zhuji-creation/references/module-self-introduction.md
+      fixtures: [.agents/skills/zhuji-creation/fixtures/proposal.yaml]
+  - id: palette-creator
+    kind: palette-creator
+    agent_file: .opencode/prompts/palette-creator.md
+    skill: palette-creation
+    personality: palette-creator
+    capabilities: [workflow.read, task.execute, task.clarify, facts.read, character.propose]
+    input_contracts: [blueprint@1]
+    output_contracts: [proposal@1]
+    extensions: { references: [.agents/skills/palette-creation/references/generation-guide.md], fixtures: [.agents/skills/palette-creation/fixtures/proposal.yaml] }
+  - id: character-critic
+    kind: character-critic
+    agent_file: .opencode/prompts/character-critic.md
+    skill: character-critique
+    personality: character-critic
+    capabilities: [workflow.read, task.execute, facts.read, review.submit]
+    input_contracts: [blueprint@1, proposal@1, relationships@1]
+    output_contracts: [review-report@1]
+    extensions: { references: [.agents/skills/character-critique/references/negative-rules.md], fixtures: [.agents/skills/character-critique/fixtures/review.yaml] }
+  - id: relationship-creator
+    kind: relationship-creator
+    agent_file: .opencode/prompts/relationship-creator.md
+    skill: relationship-creation
+    personality: relationship-creator
+    capabilities: [workflow.read, task.execute, task.clarify, facts.read, relationships.propose]
+    input_contracts: [blueprint@1, character@1, zhuji@1, palette@1, relationships@1]
+    output_contracts: [proposal@1]
+    extensions: { references: [.agents/skills/relationship-creation/references/generation-guide.md], fixtures: [.agents/skills/relationship-creation/fixtures/proposal.yaml] }
+  - id: greetings-creator
+    kind: greetings-creator
+    agent_file: .opencode/prompts/greetings-creator.md
+    skill: greetings-creation
+    personality: greetings-creator
+    capabilities: [workflow.read, task.execute, task.clarify, facts.read, greetings.propose]
+    input_contracts: [blueprint@1, character@1, world@1]
+    output_contracts: [proposal@1]
+    extensions: { references: [.agents/skills/greetings-creation/references/generation-guide.md], fixtures: [.agents/skills/greetings-creation/fixtures/proposal.yaml] }
+  - id: greetings-critic
+    kind: greetings-critic
+    agent_file: .opencode/prompts/greetings-critic.md
+    skill: greetings-critique
+    personality: greetings-critic
+    capabilities: [workflow.read, task.execute, review.submit]
+    input_contracts: [blueprint@1, greetings@1]
+    output_contracts: [review-report@1]
+    extensions: { references: [.agents/skills/greetings-critique/references/negative-rules.md], fixtures: [.agents/skills/greetings-critique/fixtures/review.yaml] }
+  - id: mode-conversion
+    kind: mode-conversion
+    agent_file: .opencode/prompts/mode-conversion.md
+    skill: mode-conversion
+    personality: mode-conversion
+    capabilities: [workflow.read, task.execute, facts.read, conversion.propose]
+    input_contracts: [character@1, zhuji@1, palette@1]
+    output_contracts: [proposal@1]
+    extensions: { references: [.agents/skills/mode-conversion/references/conversion-map.md], fixtures: [.agents/skills/mode-conversion/fixtures/proposal.yaml] }
+  - id: card-import-analyst
+    kind: card-import-analyst
+    agent_file: .opencode/prompts/card-import-analyst.md
+    skill: card-import-analysis
+    personality: card-import-analyst
+    capabilities: [workflow.read, task.execute, card.import, import.analyze]
+    input_contracts: [card-inspection@1]
+    output_contracts: [proposal@1]
+    extensions: { references: [.agents/skills/card-import-analysis/references/import-mapping.md], fixtures: [.agents/skills/card-import-analysis/fixtures/analysis.yaml, .agents/skills/card-import-analysis/fixtures/legacy-card.yaml] }
+  - id: world-lore-creator
+    kind: world-lore-creator
+    agent_file: .opencode/prompts/world-lore-creator.md
+    skill: world-lore-creation
+    personality: world-lore-creator
+    capabilities: [workflow.read, task.execute, task.clarify, facts.read, world.propose]
+    input_contracts: [blueprint@1]
+    output_contracts: [proposal@1]
+    extensions: { references: [.agents/skills/world-lore-creation/references/generation-guide.md], fixtures: [.agents/skills/world-lore-creation/fixtures/proposal.yaml] }
+  - id: world-lore-critic
+    kind: world-lore-critic
+    agent_file: .opencode/prompts/world-lore-critic.md
+    skill: world-lore-critique
+    personality: world-lore-critic
+    capabilities: [workflow.read, task.execute, facts.read, review.submit]
+    input_contracts: [blueprint@1, world@1]
+    output_contracts: [review-report@1]
+    extensions: { references: [.agents/skills/world-lore-critique/references/negative-rules.md], fixtures: [.agents/skills/world-lore-critique/fixtures/review.yaml] }
+  - id: mvu-creator
+    kind: mvu-creator
+    agent_file: .opencode/prompts/mvu-creator.md
+    skill: mvu-creation
+    personality: mvu-creator
+    capabilities: [workflow.read, plugin.read, task.execute, task.clarify, plugin.mvu.propose]
+    input_contracts: [blueprint@1]
+    output_contracts: [plugin-proposal@1]
+    extensions: { references: [.agents/skills/mvu-creation/references/generation.md] }
+  - id: mvu-critic
+    kind: mvu-critic
+    agent_file: .opencode/prompts/mvu-creator-critic.md
+    skill: mvu-critique
+    personality: mvu-creator-critic
+    capabilities: [workflow.read, plugin.read, task.execute, facts.read, review.submit]
+    input_contracts: [blueprint@1, plugin-proposal@1]
+    output_contracts: [review-report@1]
+    extensions: { references: [.agents/skills/mvu-critique/references/negative-rules.md] }
+  - id: ejs-creator
+    kind: ejs-creator
+    agent_file: .opencode/prompts/ejs-creator.md
+    skill: ejs-creation
+    personality: ejs-creator
+    capabilities: [workflow.read, plugin.read, task.execute, task.clarify, plugin.ejs.propose]
+    input_contracts: [blueprint@1, plugin-proposal@1]
+    output_contracts: [plugin-proposal@1]
+    extensions: { references: [.agents/skills/ejs-creation/references/generation.md] }
+  - id: ejs-critic
+    kind: ejs-critic
+    agent_file: .opencode/prompts/ejs-creator-critic.md
+    skill: ejs-critique
+    personality: ejs-creator-critic
+    capabilities: [workflow.read, plugin.read, task.execute, facts.read, review.submit]
+    input_contracts: [blueprint@1, plugin-proposal@1]
+    output_contracts: [review-report@1]
+    extensions: { references: [.agents/skills/ejs-critique/references/negative-rules.md] }
+  - id: html-creator
+    kind: html-creator
+    agent_file: .opencode/prompts/html-creator.md
+    skill: html-creation
+    personality: html-creator
+    capabilities: [workflow.read, plugin.read, task.execute, task.clarify, plugin.html.propose]
+    input_contracts: [blueprint@1, plugin-proposal@1]
+    output_contracts: [plugin-proposal@1]
+    extensions: { references: [.agents/skills/html-creation/references/generation.md] }
+  - id: html-critic
+    kind: html-critic
+    agent_file: .opencode/prompts/html-creator-critic.md
+    skill: html-critique
+    personality: html-creator-critic
+    capabilities: [workflow.read, plugin.read, task.execute, facts.read, review.submit]
+    input_contracts: [blueprint@1, plugin-proposal@1]
+    output_contracts: [review-report@1]
+    extensions: { references: [.agents/skills/html-critique/references/negative-rules.md] }
+extensions: {}

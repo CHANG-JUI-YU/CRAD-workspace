@@ -1,0 +1,10 @@
+work_title: Example Work
+character_names: [Example Character]
+aliases: []
+language: en
+allowed_domains: [example.com]
+result_count: 8
+candidates:
+  - title: Example Character - Official
+    url: https://example.com/characters/example
+    snippet: Discovery metadata only.

@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+test-results/
+playwright-report/
+.legacy-v1/
+.superpowers/
+.transactions/
+projects/
+reference/
+exports/*
+!exports/.gitkeep
+*.tmp
+*.log
+.DS_Store
+Thumbs.db

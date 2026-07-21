@@ -1,0 +1,29 @@
+{
+  "name": "@card-workspace/ingestion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run test"
+  },
+  "dependencies": {
+    "@card-workspace/adapters-ccv3": "workspace:*",
+    "@card-workspace/adapters-png": "workspace:*",
+    "@card-workspace/project": "workspace:*",
+    "@card-workspace/schemas": "workspace:*",
+    "js-tiktoken": "1.0.21",
+    "yaml": "2.8.3",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@card-workspace/testing": "workspace:*"
+  }
+}

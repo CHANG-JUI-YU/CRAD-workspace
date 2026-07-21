@@ -1,0 +1,26 @@
+{
+  "name": "@card-workspace/plugins",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run test"
+  },
+  "dependencies": {
+    "@card-workspace/schemas": "workspace:*",
+    "css-tree": "3.1.0",
+    "parse5": "7.3.0",
+    "typescript": "5.8.3"
+  },
+  "devDependencies": {
+    "@card-workspace/testing": "workspace:*"
+  }
+}

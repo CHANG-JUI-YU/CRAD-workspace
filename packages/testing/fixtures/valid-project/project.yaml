@@ -1,0 +1,26 @@
+schema_version: 1
+id: valid-project
+title: 有效測試專案
+kind: character_card
+characters:
+  - id: alice
+    display_name: 愛麗絲
+    mode: zhuji
+    role: primary
+  - id: bob
+    display_name: 鮑伯
+    mode: palette
+    role: supporting
+card:
+  name: 有效測試角色卡
+  profile: minimal_worldbook
+  avatar: assets/avatar.png
+output:
+  json: true
+  png: true
+  v2_backfill: false
+policies:
+  profile: workspace-default
+  strict_publish: true
+plugins: []
+extensions: {}

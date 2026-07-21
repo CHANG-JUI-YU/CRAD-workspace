@@ -1,0 +1,25 @@
+schema_version: 1
+project_id: valid-project
+entry_kind: original
+purpose: 有效測試專案
+characters:
+  - id: alice
+    display_name: 愛麗絲
+    mode: zhuji
+    core_concept: 測試角色
+  - id: bob
+    display_name: 鮑伯
+    mode: palette
+    core_concept: 測試配角
+world:
+  enabled: false
+  categories: []
+  fact_refs: []
+greetings:
+  enabled: true
+  character_ids:
+    - alice
+  requirements: []
+fact_refs: []
+unresolved_decisions: []
+extensions: {}

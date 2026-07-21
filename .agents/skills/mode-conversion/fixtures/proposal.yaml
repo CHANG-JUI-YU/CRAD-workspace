@@ -1,0 +1,6 @@
+kind: conversion_proposal
+source_mode: zhuji
+target_mode: palette
+mappings:
+  - { source: modules.2, target: personality_palette.undercoat, provenance: authored, expected_loss: none }
+unmapped: []

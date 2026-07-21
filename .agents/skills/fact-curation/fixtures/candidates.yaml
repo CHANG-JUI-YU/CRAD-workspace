@@ -1,0 +1,26 @@
+schema_version: 1
+source_id: novel
+source_revision_id: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+chunk_set_id: novel-set-1
+chunk_id: novel-chunk-1
+chunk_hash: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+job_id: job-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+input_revision: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+candidates:
+  - schema_version: 1
+    subject: character
+    predicate: residence
+    value: 港城
+    classification: source_fact
+    confidence: 1
+    coverage_dimensions: [background]
+    scope: { character_ids: [character], extensions: {} }
+    valid_time: { extensions: {} }
+    evidence:
+      - id: evidence-residence
+        quote: 角色在事件發生時居住於港城。
+        extensions: {}
+    status: submitted
+    extensions: {}
+created_at: 2026-07-18T00:00:00.000Z
+extensions: {}

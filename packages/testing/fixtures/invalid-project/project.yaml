@@ -1,0 +1,11 @@
+schema_version: 1
+id: INVALID PROJECT
+title: ""
+kind: character_card
+characters:
+  - id: same
+    display_name: 第一人
+    mode: zhuji
+  - id: same
+    display_name: 第二人
+    mode: palette

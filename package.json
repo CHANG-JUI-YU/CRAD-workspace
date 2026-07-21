@@ -1,0 +1,36 @@
+{
+  "name": "card-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=20.17 <21"
+  },
+  "scripts": {
+    "agent-lint": "pnpm --filter @card-workspace/workflow agent-lint ../..",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "test:e2e": "pnpm --filter @card-workspace/dashboard e2e",
+    "dashboard": "node packages/cli/dist/index.js dashboard",
+    "check": "pnpm build && pnpm lint && pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.32.0",
+    "@types/node": "20.19.9",
+    "@vitest/coverage-v8": "3.2.4",
+    "eslint": "9.32.0",
+    "eslint-plugin-react-hooks": "5.2.0",
+    "fast-check": "4.2.0",
+    "globals": "16.3.0",
+    "tsx": "4.20.3",
+    "typescript": "5.8.3",
+    "typescript-eslint": "8.38.0",
+    "vite": "6.4.3",
+    "vitest": "3.2.4"
+  }
+}

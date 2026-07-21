@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "project_id": "valid-project",
+  "workflow_definition_id": "original-v1",
+  "entry_kind": "original",
+  "stage": "intake",
+  "revision": 0,
+  "artifacts": [],
+  "gates": [],
+  "tasks": [],
+  "decisions": [],
+  "extensions": {}
+}

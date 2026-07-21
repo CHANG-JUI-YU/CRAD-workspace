@@ -1,0 +1,7 @@
+kind: module_proposal
+mode: palette
+sections:
+  basic_information: 基礎信息摘要
+  personality_palette: { undercoat: 底色, main_tone: 主色調, accent: 點綴, derivatives: [] }
+  tri_faceted: []
+  reinterpretation: 二次解釋摘要

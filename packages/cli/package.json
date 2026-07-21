@@ -1,0 +1,28 @@
+{
+  "name": "@card-workspace/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "card-workspace": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run test"
+  },
+  "dependencies": {
+    "@card-workspace/adapters-ccv3": "workspace:*",
+    "@card-workspace/compiler": "workspace:*",
+    "@card-workspace/diagnostics": "workspace:*",
+    "@card-workspace/dashboard-server": "workspace:*",
+    "@card-workspace/ingestion": "workspace:*",
+    "@card-workspace/project": "workspace:*",
+    "@card-workspace/schemas": "workspace:*",
+    "@card-workspace/workflow": "workspace:*",
+    "commander": "14.0.0"
+  },
+  "devDependencies": {
+    "@card-workspace/testing": "workspace:*"
+  }
+}

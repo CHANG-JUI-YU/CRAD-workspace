@@ -1,0 +1,36 @@
+{
+  "name": "@card-workspace/dashboard-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "card-workspace-dashboard": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run test"
+  },
+  "dependencies": {
+    "@card-workspace/compiler": "workspace:*",
+    "@card-workspace/adapters-png": "workspace:*",
+    "@card-workspace/diagnostics": "workspace:*",
+    "@card-workspace/ingestion": "workspace:*",
+    "@card-workspace/plugins": "workspace:*",
+    "@card-workspace/project": "workspace:*",
+    "@card-workspace/schemas": "workspace:*",
+    "@card-workspace/workflow": "workspace:*",
+    "@fastify/static": "8.3.0",
+    "fastify": "5.10.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@card-workspace/testing": "workspace:*"
+  }
+}

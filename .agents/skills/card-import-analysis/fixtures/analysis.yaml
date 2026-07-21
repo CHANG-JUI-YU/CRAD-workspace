@@ -1,0 +1,15 @@
+schema_version: 1
+id: import-analysis-example
+owner: card-import-analyst
+base_workflow_revision: 3
+value:
+  kind: import_analysis
+  mappings:
+    - source_field: /data/name
+      target_contract: blueprint@1
+      target_field: /characters/0/display_name
+      summary: Card name maps deterministically to the imported character display name.
+  losses: []
+  recommendations:
+    - Retain the immutable inspection report before choosing a disposition.
+extensions: {}

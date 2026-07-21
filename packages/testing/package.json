@@ -1,0 +1,22 @@
+{
+  "name": "@card-workspace/testing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run test --passWithNoTests"
+  },
+  "dependencies": {
+    "@card-workspace/adapters-png": "workspace:*",
+    "@card-workspace/schemas": "workspace:*",
+    "yaml": "2.8.3"
+  }
+}

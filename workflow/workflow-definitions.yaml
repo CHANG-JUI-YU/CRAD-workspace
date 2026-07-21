@@ -1,0 +1,37 @@
+schema_version: 1
+definitions:
+  - id: original-v1
+    entry_kind: original
+    stages: [intake, blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, plugin_mvu_authoring, plugin_mvu_review, plugin_ejs_authoring, plugin_ejs_review, plugin_html_authoring, plugin_html_review, content_review, compile_preview, publish_review, published]
+    required_gates: [blueprint, content, publish]
+    tasks:
+      - { id: create-blueprint, kind: create-blueprint, agent_kind: director, stage: blueprint, capabilities: [blueprint.propose], output_contract: proposal@1, max_attempts: 3 }
+      - { id: create-zhuji, kind: create-character, agent_kind: zhuji-creator, stage: authoring, capabilities: [character.propose, task.clarify], output_contract: proposal@1, max_attempts: 3 }
+      - { id: create-palette, kind: create-character, agent_kind: palette-creator, stage: authoring, capabilities: [character.propose, task.clarify], output_contract: proposal@1, max_attempts: 3 }
+      - { id: create-relationships, kind: create-relationships, agent_kind: relationship-creator, stage: authoring, capabilities: [relationships.propose, task.clarify], output_contract: proposal@1, max_attempts: 3 }
+      - { id: create-world-before, kind: create-world, agent_kind: world-lore-creator, stage: pre_world_authoring, capabilities: [world.propose, task.clarify], output_contract: proposal@1, max_attempts: 3 }
+      - { id: review-world-before, kind: review-world, agent_kind: world-lore-critic, stage: pre_world_review, capabilities: [review.submit], output_contract: review-report@1, max_attempts: 3 }
+      - { id: review-character, kind: review-character, agent_kind: character-critic, stage: semantic_review, capabilities: [review.submit], output_contract: review-report@1, max_attempts: 3 }
+      - { id: create-greetings, kind: create-greetings, agent_kind: greetings-creator, stage: greetings_authoring, capabilities: [greetings.propose, task.clarify], output_contract: proposal@1, max_attempts: 3 }
+      - { id: review-greetings, kind: review-greetings, agent_kind: greetings-critic, stage: content_review, capabilities: [review.submit], output_contract: review-report@1, max_attempts: 3 }
+      - { id: create-world-after, kind: create-world, agent_kind: world-lore-creator, stage: post_world_authoring, capabilities: [world.propose, task.clarify], output_contract: proposal@1, max_attempts: 3 }
+      - { id: review-world-after, kind: review-world, agent_kind: world-lore-critic, stage: post_world_review, capabilities: [review.submit], output_contract: review-report@1, max_attempts: 3 }
+  - id: source-adaptation-v1
+    entry_kind: source_adaptation
+    stages: [intake, source_processing, facts_review, blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, plugin_mvu_authoring, plugin_mvu_review, plugin_ejs_authoring, plugin_ejs_review, plugin_html_authoring, plugin_html_review, content_review, compile_preview, publish_review, published]
+    required_gates: [facts, blueprint, content, publish]
+    tasks:
+      - { id: curate-facts, kind: curate-facts, agent_kind: fact-curator, stage: source_processing, capabilities: [source.process, facts.propose, facts.read], output_contract: facts-curation-summary@1, max_attempts: 3 }
+  - id: card-import-v1
+    entry_kind: card_import
+    stages: [intake, blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, plugin_mvu_authoring, plugin_mvu_review, plugin_ejs_authoring, plugin_ejs_review, plugin_html_authoring, plugin_html_review, content_review, compile_preview, publish_review, published]
+    required_gates: [blueprint, content, publish]
+    tasks:
+      - { id: analyze-import, kind: analyze-import, agent_kind: card-import-analyst, stage: blueprint, capabilities: [import.analyze], output_contract: proposal@1, max_attempts: 3 }
+  - id: mode-conversion-v1
+    entry_kind: mode_conversion
+    stages: [intake, blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, plugin_mvu_authoring, plugin_mvu_review, plugin_ejs_authoring, plugin_ejs_review, plugin_html_authoring, plugin_html_review, content_review, compile_preview, publish_review, published]
+    required_gates: [blueprint, content, publish]
+    tasks:
+      - { id: convert-mode, kind: convert-mode, agent_kind: mode-conversion, stage: authoring, capabilities: [conversion.propose], output_contract: proposal@1, max_attempts: 3 }
+extensions: {}

@@ -1,0 +1,272 @@
+schema_version: 1
+rules:
+  - capability: workflow.read
+    tools: [workflow_status]
+    stages: [intake, source_processing, facts_review, blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, content_review, compile_preview, publish_review, published]
+    mutation: false
+    requires_task: false
+  - capability: artifact.read
+    tools: [project_artifact_list, project_artifact_read]
+    stages: [intake, source_processing, facts_review, blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, content_review, compile_preview, publish_review, published]
+    mutation: false
+    requires_task: false
+  - capability: workflow.direct
+    tools: [workflow_start]
+    stages: [intake]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [workflow_advance]
+    stages: [source_processing, facts_review, blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, content_review, compile_preview, publish_review]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [world_authoring_begin]
+    stages: [published]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [world_revision_begin]
+    stages: [pre_world_review, post_world_review, semantic_review, content_review, compile_preview, publish_review, published]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [workflow_approve_gate, workflow_reject_gate]
+    stages: [facts_review, blueprint, content_review, publish_review]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [source_intake_local, source_intake_retrieved]
+    stages: [intake, source_processing]
+    mutation: true
+    requires_task: false
+  - capability: source.research
+    tools: [source_research_submit_candidates, source_research_fetch_approved]
+    stages: [intake]
+    mutation: true
+    requires_task: false
+  - capability: source.research
+    tools: [source_research_status]
+    stages: [intake]
+    mutation: false
+    requires_task: false
+  - capability: source.approve
+    tools: [source_research_approve]
+    stages: [intake]
+    mutation: true
+    requires_task: false
+  - capability: source.approve
+    tools: [source_research_status]
+    stages: [intake]
+    mutation: false
+    requires_task: false
+  - capability: workflow.direct
+    tools: [workflow_answer_interview]
+    stages: [intake]
+    mutation: true
+    requires_task: false
+  - capability: task.execute
+    tools: [task_claim, task_submit, task_fail, task_release]
+    stages: [source_processing, blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, content_review]
+    mutation: true
+    requires_task: true
+  - capability: task.execute
+    tools: [task_context]
+    stages: [source_processing, blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, content_review]
+    mutation: false
+    requires_task: true
+  - capability: task.clarify
+    tools: [task_request_clarification]
+    stages: [pre_world_authoring, authoring, post_world_authoring, greetings_authoring]
+    mutation: true
+    requires_task: true
+  - capability: workflow.direct
+    tools: [task_resolve_clarification]
+    stages: [pre_world_authoring, authoring, post_world_authoring, greetings_authoring]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [greetings_revision_begin]
+    stages: [content_review, compile_preview, publish_review, published]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [character_revision_begin]
+    stages: [semantic_review, content_review, compile_preview, publish_review, published]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [character_expansion_begin]
+    stages: [semantic_review, content_review, compile_preview, publish_review, published]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [character_expansion_blueprint_update]
+    stages: [blueprint]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [character_review_retry_begin]
+    stages: [semantic_review]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [task_recovery_begin]
+    stages: [blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, content_review]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [task_repair_resume]
+    stages: [blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, content_review]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [source_processing_repair_begin]
+    stages: [source_processing]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [facts_recuration_begin]
+    stages: [facts_review]
+    mutation: true
+    requires_task: false
+  - capability: source.process
+    tools: [source_create_chunks, source_get_chunk_task]
+    stages: [source_processing]
+    mutation: true
+    requires_task: true
+  - capability: facts.propose
+    tools: [fact_submit_candidates, fact_finalize_curation]
+    stages: [source_processing]
+    mutation: true
+    requires_task: true
+  - capability: facts.read
+    tools: [fact_query, provenance_trace, provenance_verify]
+    stages: [source_processing, facts_review, blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, content_review]
+    mutation: false
+    requires_task: true
+  - capability: facts.review
+    tools: [fact_review, conflict_resolve]
+    stages: [facts_review]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [facts_review_status]
+    stages: [facts_review]
+    mutation: false
+    requires_task: false
+  - capability: workflow.direct
+    tools: [facts_candidate_identity_migrate]
+    stages: [facts_review]
+    mutation: true
+    requires_task: false
+  - capability: blueprint.propose
+    tools: [blueprint_precheck_record, blueprint_submit_proposal]
+    stages: [blueprint]
+    mutation: true
+    requires_task: true
+  - capability: character.propose
+    tools: [character_submit_proposal]
+    stages: [authoring]
+    mutation: true
+    requires_task: true
+  - capability: relationships.propose
+    tools: [character_submit_proposal]
+    stages: [authoring]
+    mutation: true
+    requires_task: true
+  - capability: world.propose
+    tools: [world_submit_proposal]
+    stages: [pre_world_authoring, post_world_authoring, authoring]
+    mutation: true
+    requires_task: true
+  - capability: greetings.propose
+    tools: [greetings_submit_proposal]
+    stages: [greetings_authoring]
+    mutation: true
+    requires_task: true
+  - capability: review.submit
+    tools: [review_submit_report]
+    stages: [pre_world_review, semantic_review, post_world_review, plugin_mvu_review, plugin_ejs_review, plugin_html_review, content_review]
+    mutation: true
+    requires_task: true
+  - capability: conversion.propose
+    tools: [conversion_submit_proposal]
+    stages: [authoring]
+    mutation: true
+    requires_task: true
+  - capability: import.analyze
+    tools: [import_submit_analysis]
+    stages: [blueprint]
+    mutation: true
+    requires_task: true
+  - capability: forge.preview
+    tools: [project_validate, project_plan, project_simulate, card_audit, roundtrip_verify]
+    stages: [compile_preview, publish_review]
+    mutation: false
+    requires_task: false
+  - capability: forge.preview
+    tools: [project_compile_preview]
+    stages: [compile_preview, published]
+    mutation: true
+    requires_task: false
+  - capability: forge.publish
+    tools: [project_publish]
+    stages: [publish_review, published]
+    mutation: true
+    requires_task: false
+    requires_gate: publish
+  - capability: card.import
+    tools: [card_import]
+    stages: [intake, blueprint]
+    mutation: true
+    requires_task: true
+  - capability: card.inspect
+    tools: [card_inspect_local, card_import_disposition]
+    stages: [blueprint]
+    mutation: true
+    requires_task: false
+  - capability: card.inspect
+    tools: [card_import_report]
+    stages: [blueprint]
+    mutation: false
+    requires_task: false
+  - capability: plugin.read
+    tools: [plugin_selection_resolve, plugin_revision_preview, plugin_proposal_preview, template_list, template_read]
+    stages: [plugin_mvu_authoring, plugin_mvu_review, plugin_ejs_authoring, plugin_ejs_review, plugin_html_authoring, plugin_html_review, content_review, compile_preview, publish_review, published]
+    mutation: false
+    requires_task: false
+  - capability: workflow.direct
+    tools: [plugin_revision_begin]
+    stages: [content_review, compile_preview, publish_review, published]
+    mutation: true
+    requires_task: false
+  - capability: plugin.mvu.propose
+    tools: [plugin_proposal_submit]
+    stages: [plugin_mvu_authoring]
+    mutation: true
+    requires_task: true
+
+  - capability: plugin.ejs.propose
+    tools: [plugin_proposal_submit]
+    stages: [plugin_ejs_authoring]
+    mutation: true
+    requires_task: true
+
+  - capability: plugin.html.propose
+    tools: [plugin_proposal_submit]
+    stages: [plugin_html_authoring]
+    mutation: true
+    requires_task: true
+
+  - capability: workflow.direct
+    tools: [plugin_review_decide]
+    stages: [plugin_mvu_review, plugin_ejs_review, plugin_html_review]
+    mutation: true
+    requires_task: false
+  - capability: plugin.template
+    tools: [template_import, template_save_from_artifact]
+    stages: [plugin_mvu_authoring, plugin_mvu_review, plugin_ejs_authoring, plugin_ejs_review, plugin_html_authoring, plugin_html_review, content_review, compile_preview, publish_review, published]
+    mutation: true
+    requires_task: false
+extensions: {}
