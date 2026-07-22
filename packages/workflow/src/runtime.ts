@@ -268,11 +268,13 @@ export function advanceConfiguredWorkflow(options: {
     : target.startsWith("plugin_")
       ? materializePluginTasks(target, blueprint, inputArtifacts, state)
     : materializeOriginalTasks(target, blueprint, inputArtifacts, worldOnly, runId, reviewWorldAtContent, greetingsRunId, characterRunId, expansion !== undefined);
+  const existingIds = new Set(effectiveTasks.map((item) => item.id));
+  const dedupedTasks = tasks.filter((item) => !existingIds.has(item.id));
   return workflowStateSchema.parse({
     ...state,
     stage: target,
     revision: state.revision + 1,
-    tasks: [...effectiveTasks, ...tasks],
+    tasks: [...effectiveTasks, ...dedupedTasks],
   });
 }
 
@@ -1099,7 +1101,7 @@ export function beginCharacterRevision(options: {
     });
   });
   const taskIds = new Set(revisionTasks.map((item) => item.id));
-  if (options.state.tasks.some((item) => taskIds.has(item.id) || item.id === `review-characters-${options.runId}`)) {
+  if (options.state.tasks.some((item) => taskIds.has(item.id) || item.id === `review-characters-${options.runId}` || item.id === `revise-greetings-${options.runId}` || item.id === `review-greetings-${options.runId}`)) {
     workflowFail("CHARACTER_REVISION_RUN_EXISTS", `Character revision run 已存在：${options.runId}`);
   }
   const selectedRevisions = targets.map((target) => {
@@ -1599,11 +1601,18 @@ export function beginWorldRevision(options: {
       summary: options.reason,
       extensions: { run_id: options.runId, task_ids: revisionTasks.map((item) => item.id), artifact_ids: options.artifactIds },
     }],
-    extensions: {
-      ...options.state.extensions,
-      world_revision_run_id: options.runId,
-      world_revision_review_stage: reviewStage,
-      ...(reviewStage === "post_world_review" && options.blueprint.greetings.enabled ? { greetings_revision_run_id: options.runId } : {}),
-    },
+    extensions: (() => {
+      const ext = {
+        ...options.state.extensions,
+        world_revision_run_id: options.runId,
+        world_revision_review_stage: reviewStage,
+      } as Record<string, unknown>;
+      if (reviewStage === "post_world_review" && options.blueprint.greetings.enabled) {
+        ext.greetings_revision_run_id = options.runId;
+      } else {
+        delete ext.greetings_revision_run_id;
+      }
+      return ext;
+    })(),
   });
 }
