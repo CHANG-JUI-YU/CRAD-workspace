@@ -45,7 +45,7 @@ const text = z.string().trim().min(1);
 const textList = z.array(text);
 const corpusBoundary = /[，。！？；：,.!?;:\n…]/u;
 const readableCorpus = text
-  .refine((value) => [...value].length >= 30, "語料必須至少 30 字")
+  .refine((value) => [...value].length >= 20, "語料必須至少 20 字")
   .refine((value) => corpusBoundary.test(value), "語料必須使用自然標點斷句")
   .refine(
     (value) => value.split(corpusBoundary).every((segment) => [...segment].length <= 60),
@@ -229,14 +229,14 @@ export const zhujiExtensionDataSchema = z.object({
     人物外在表現的人格定位: text,
     能力興趣: z.object({
       職業: text, 天賦: textList, 技能與特長: textList, 日常興趣: textList,
-      喜歡的事物: textList.min(3).max(5), 討厭厭惡的事物: textList.min(3).max(5), 嗜好: textList.max(3),
+      喜歡的事物: textList.min(3), 討厭厭惡的事物: textList.min(3), 嗜好: textList.min(1),
     }).strict(),
   }).strict(),
   背景設定與成長經歷: z.object({
     背景簡要概括: text,
     家庭環境: z.object({ 當前家庭成員與關係: text, 當前家庭背景: text, 人物對家庭的感受與態度: text }).strict(),
     成長經歷: z.object({ 出生時間地點: text, 童年經歷: text, 教育程度與知識積累: text, 成長軌跡: text, 重要老師或同學: text.optional() }).strict(),
-    重要成長經歷: z.array(z.object({ 事件: text, 對人物與社會身份的影響: text }).strict()).length(3),
+     重要成長經歷: z.array(z.object({ 事件: text, 對人物與社會身份的影響: text }).strict()).min(3),
   }).strict(),
   人際關係: z.object({
     人物需求: z.object({ 人物自身的社交模式: text, 社交圈類型: text, 性格因素造成的依賴程度: text, 社會因素造成的依賴程度: text }).strict(),
@@ -361,17 +361,17 @@ export const zhujiSceneDialogueDataSchema = z.object({
     初始關係與態度: z.array(readableCorpus).min(1),
     初始認知與在意程度: z.array(readableCorpus).min(1),
     是否想要進一步關係: z.array(readableCorpus).min(1),
-    分階段好感度: z.object({
-      初始關係: z.array(readableCorpus).length(3),
-      好朋友: z.array(readableCorpus).length(3),
-      戀人未滿: z.array(readableCorpus).length(3),
-      戀人: z.array(readableCorpus).length(3),
-      摯愛: z.array(readableCorpus).length(3),
-    }).strict().optional(),
+     分階段好感度: z.object({
+       初始關係: z.array(readableCorpus).length(3).optional(),
+       好朋友: z.array(readableCorpus).length(3).optional(),
+       戀人未滿: z.array(readableCorpus).length(3).optional(),
+       戀人: z.array(readableCorpus).length(3).optional(),
+       摯愛: z.array(readableCorpus).length(3).optional(),
+     }).passthrough().optional(),
   }).strict(),
-  場景刻畫: z.array(corpusGroup("場景")).length(3),
-  情緒表現: z.array(corpusGroup("情緒")).length(3),
-  面對不同對象: z.array(corpusGroup("對象")).length(3),
+  場景刻畫: z.array(corpusGroup("場景")).min(3),
+  情緒表現: z.array(corpusGroup("情緒")).min(3),
+  面對不同對象: z.array(corpusGroup("對象")).min(3),
 }).strict();
 
 export const zhujiSelfIntroductionDataSchema = z.object({
@@ -397,15 +397,15 @@ export const zhujiSelfIntroductionDataSchema = z.object({
   }).strict(),
   能力興趣: z.object({
     職業: readableCorpus, 技能與特長: readableCorpus, 日常興趣: readableCorpus,
-    喜歡的事物: z.array(readableCorpus).min(3).max(5), 討厭厭惡的事物: z.array(readableCorpus).min(3).max(5), 嗜好: readableCorpus.optional(),
+     喜歡的事物: z.array(readableCorpus).min(3), 討厭厭惡的事物: z.array(readableCorpus).min(3), 嗜好: readableCorpus.optional(),
   }).strict(),
   背景設定與成長經歷: z.object({ 家庭環境: readableCorpus, 成長經歷: readableCorpus, 重要的人: readableCorpus.optional(), 自己對社會身份的看法: readableCorpus, 自己對社會職能的看法: readableCorpus }).strict(),
   人際關係: z.object({
     角色需求: z.object({ 角色自身的社交模式: readableCorpus, 最渴望的關係: readableCorpus, 社交圈類型: readableCorpus, 人際關係的依賴程度: readableCorpus, 對工作對象的態度: readableCorpus, 特殊感情對象: readableCorpus.optional() }).strict(),
     人物關係初始化模式: z.object({ 對新接觸者會怎麼表現: readableCorpus, 希望留下什麼印象: readableCorpus, 對新接觸者的態度與信任程度: readableCorpus, 喜歡親近什麼人: readableCorpus, 討厭什麼樣的人: readableCorpus, 好感度表現: readableCorpus }).strict(),
   }).strict(),
-  性相關: z.object({ 個人性癖: readableCorpus, 性癖對人格的影響: readableCorpus, 性幻想: readableCorpus.optional(), 性經歷: readableCorpus, 性生活: readableCorpus, 第一次性交對象: readableCorpus.optional() }).strict(),
-}).strict();
+   性相關: z.object({ 個人性癖: readableCorpus, 性癖對人格的影響: readableCorpus, 性幻想: readableCorpus.optional(), 性經歷: readableCorpus, 性生活: readableCorpus, 第一次性交對象: readableCorpus.optional() }).strict(),
+}).passthrough();
 
 const legacyObjectSection = jsonObjectSchema;
 const legacyArraySection = z.array(z.unknown());
