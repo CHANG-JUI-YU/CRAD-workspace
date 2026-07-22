@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -237,7 +237,8 @@ export async function buildProject(options: BuildProjectOptions): Promise<BuildP
   const projectRoot = loaded.projectRoot;
   const png = wantsPng && card
     ? await timed("emit_png", async () => {
-        const avatarPath = await resolveWithin(projectRoot, manifest.card.avatar);
+        const avatarRel = manifest.card.avatar ?? await autoDetectAvatar(projectRoot);
+        const avatarPath = await resolveWithin(projectRoot, avatarRel);
         const avatar = await readFile(avatarPath);
         return writeCardToPng(avatar, card, v2Backfill);
       })
@@ -380,4 +381,19 @@ export async function buildProject(options: BuildProjectOptions): Promise<BuildP
         ...(v2Backfill ? { v2Backfill } : {}),
         ...(png ? { png } : {}),
       };
+}
+
+async function autoDetectAvatar(projectRoot: string): Promise<string> {
+  const assetsDir = path.join(projectRoot, "assets");
+  const entries = await readdir(assetsDir, { withFileTypes: true });
+  const pngs = entries
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".png"))
+    .map((entry) => entry.name);
+  if (pngs.length === 0) {
+    throw new ProjectError(
+      "AVATAR_NOT_FOUND",
+      "assets/ 目錄下找不到任何 PNG 頭像，請放入頭像圖片或在 project.yaml 的 card.avatar 指定路徑",
+    );
+  }
+  return `assets/${pngs[0]}`;
 }

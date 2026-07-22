@@ -116,7 +116,7 @@ const normalizedProjectIrBaseSchema = z
       .object({
         name: z.string().min(1),
         profile: z.literal("minimal_worldbook"),
-        avatar: z.string().min(1),
+        avatar: z.string().min(1).optional(),
       })
       .strict(),
     characters: z.array(canonicalCharacterSchema),

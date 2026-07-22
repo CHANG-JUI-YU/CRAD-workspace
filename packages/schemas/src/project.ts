@@ -20,7 +20,7 @@ export const projectCardSchema = z
   .object({
     name: z.string().min(1),
     profile: z.literal("minimal_worldbook").default("minimal_worldbook"),
-    avatar: z.string().min(1).default("assets/avatar.png"),
+    avatar: z.string().min(1).optional(),
   })
   .strict();
 

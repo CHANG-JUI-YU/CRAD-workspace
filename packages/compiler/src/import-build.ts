@@ -90,7 +90,7 @@ export function importedCardToCanonicalIr(envelope: ImportedCardEnvelope): Canon
     schema_version: 1,
     project_id: projectId,
     title: `Imported ${card.data.name}`,
-    card: { name: card.data.name, profile: "minimal_worldbook", avatar: "assets/avatar.png" },
+    card: { name: card.data.name, profile: "minimal_worldbook" },
     characters: [{
       id: "imported-character",
       display_name: card.data.name,

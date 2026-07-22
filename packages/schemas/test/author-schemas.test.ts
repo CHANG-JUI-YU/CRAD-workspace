@@ -276,7 +276,7 @@ describe("正式 Project Manifest", () => {
     };
     expect(
       projectManifestSchema.parse({ ...base, card: { name: "示範卡" } }).card,
-    ).toEqual({ name: "示範卡", profile: "minimal_worldbook", avatar: "assets/avatar.png" });
+    ).toEqual({ name: "示範卡", profile: "minimal_worldbook", avatar: undefined });
     expect(projectManifestSchema.safeParse({ ...base, card_profile: {} }).success).toBe(false);
   });
 });
