@@ -215,7 +215,10 @@ export function advanceConfiguredWorkflow(options: {
       return (expansion !== undefined || characterRunId === undefined) && !worldOnly && blueprint.world.enabled && worldTiming === "after_characters";
     }
     if (stage === "greetings_authoring") {
-      return blueprint.greetings.enabled && legacyGreeting?.status !== "completed";
+      const completedGreeting = effectiveTasks.find((task) =>
+        task.id === "create-greetings" && task.status === "completed",
+      );
+      return blueprint.greetings.enabled && !completedGreeting;
     }
     if ([
       "plugin_mvu_authoring",
