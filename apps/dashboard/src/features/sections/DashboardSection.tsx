@@ -135,9 +135,9 @@ function Plugins({ projectId }: { projectId: string }) {
       <span className="status status-approved">Dashboard session · CSRF protected</span>
     </div>
     <div className="plugin-review-metrics">
-      <div><span>Active sources</span><b>{state.data?.sources.length ?? 0}</b></div>
-      <div><span>Approved artifacts</span><b>{state.data?.artifacts.length ?? 0}</b></div>
-      <div><span>Diagnostics</span><b className={state.data?.diagnostics.length ? "bad" : "good"}>{state.data?.diagnostics.length ?? 0}</b></div>
+      <div><span>Active sources</span><b>{state.data?.sources?.length ?? 0}</b></div>
+      <div><span>Approved artifacts</span><b>{state.data?.artifacts?.length ?? 0}</b></div>
+      <div><span>Diagnostics</span><b className={state.data?.diagnostics?.length ? "bad" : "good"}>{state.data?.diagnostics?.length ?? 0}</b></div>
     </div>
     <article className="plugin-revision-controls">
       <div className="plugin-review-header"><div><h2>Plugin Revision</h2><p className="empty">只提交能力選擇；implementation pin 由伺服器 registry 解析。</p></div><span className="status status-pending">Immutable intent</span></div>

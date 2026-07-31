@@ -35,7 +35,7 @@ export default defineConfig({
         statements: 85,
       },
     },
-    include: ["**/test/**/*.test.ts"],
+    include: ["**/test/**/*.test.{ts,tsx}"],
     // Coverage instrumentation makes the deterministic ingestion fixtures I/O-heavy on Windows.
     testTimeout: 60_000,
   },
