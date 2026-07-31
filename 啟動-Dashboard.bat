@@ -30,9 +30,7 @@ if not exist "node_modules" (
   if errorlevel 1 goto :failed
 )
 
-if not exist "apps\dashboard\dist\index.html" goto :build
-if not exist "packages\cli\dist\index.js" goto :build
-goto :start
+goto :build
 
 :build
 echo [SETUP] Building Dashboard...

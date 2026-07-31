@@ -1,15 +1,22 @@
-import Editor from "@monaco-editor/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { parse, stringify } from "yaml";
 
 import { apiFetch } from "../../api/client";
 import { buildPatch } from "./patch";
-import "./monaco";
 
 interface ResourceRef { project_id: string; kind: string; id: string; owner_id?: string }
 interface DocumentResult { resource: ResourceRef; format: "yaml" | "json"; value: unknown; semantic_revision: string; raw_revision: string; read_only: boolean }
 interface PatchResult { differences: unknown[]; value: unknown; after_revision: string; no_op: boolean; dry_run: boolean }
+
+const MonacoEditor = lazy(async () => {
+  const [editor] = await Promise.all([import("@monaco-editor/react"), import("./monaco")]);
+  return { default: editor.default };
+});
+
+function serialize(value: unknown, format: "yaml" | "json"): string {
+  return format === "yaml" ? stringify(value, { lineWidth: 0 }) : JSON.stringify(value, null, 2);
+}
 
 export function ResourceEditor({ resource, label }: { resource: ResourceRef; label: string }) {
   const queryClient = useQueryClient();
@@ -28,8 +35,9 @@ export function ResourceEditor({ resource, label }: { resource: ResourceRef; lab
   useEffect(() => {
     if (query.data === undefined) return;
     setDraft(query.data.value);
-    setText(query.data.format === "yaml" ? stringify(query.data.value, { lineWidth: 0 }) : JSON.stringify(query.data.value, null, 2));
+    setText(serialize(query.data.value, query.data.format));
     setPreview(undefined);
+    setParseError(undefined);
   }, [query.data]);
 
   const mutation = useMutation({
@@ -41,7 +49,7 @@ export function ResourceEditor({ resource, label }: { resource: ResourceRef; lab
       });
     },
     onSuccess: (result, dryRun) => {
-      setPreview(result);
+      setPreview(dryRun ? result : undefined);
       if (!dryRun) {
         void queryClient.invalidateQueries({ queryKey: ["document", resource] });
         void queryClient.invalidateQueries({ queryKey: ["project", resource.project_id] });
@@ -49,9 +57,18 @@ export function ResourceEditor({ resource, label }: { resource: ResourceRef; lab
     },
   });
 
+  function updateDraft(next: unknown): void {
+    if (query.data === undefined) return;
+    setDraft(next);
+    setText(serialize(next, query.data.format));
+    setParseError(undefined);
+    setPreview(undefined);
+  }
+
   function updateText(value: string | undefined): void {
     const next = value ?? "";
     setText(next);
+    setPreview(undefined);
     try {
       setDraft(query.data?.format === "yaml" ? parse(next) : JSON.parse(next));
       setParseError(undefined);
@@ -68,10 +85,10 @@ export function ResourceEditor({ resource, label }: { resource: ResourceRef; lab
   return <section className="resource-editor">
     <header><div><p className="eyebrow">TYPED DOCUMENT</p><h2>{label}</h2></div><code>{query.data.semantic_revision.slice(0, 19)}...</code></header>
     <nav className="editor-tabs"><button className={mode === "form" ? "active" : ""} onClick={() => setMode("form")}>表單</button><button className={mode === "advanced" ? "active" : ""} onClick={() => setMode("advanced")}>Advanced</button></nav>
-    {mode === "form" ? <PrimitiveForm value={draft} onChange={setDraft} /> : <div className="monaco-wrap"><Editor height="480px" language={query.data.format} theme="vs-dark" value={text} onChange={updateText} options={{ minimap: { enabled: false }, fontSize: 13, wordWrap: "on", automaticLayout: true }} /></div>}
+    {mode === "form" ? <PrimitiveForm value={draft} onChange={updateDraft} /> : <div className="monaco-wrap"><Suspense fallback={<p className="empty">載入編輯器...</p>}><MonacoEditor height="480px" language={query.data.format} theme="vs-dark" value={text} onChange={updateText} options={{ minimap: { enabled: false }, fontSize: 13, wordWrap: "on", automaticLayout: true }} /></Suspense></div>}
     {parseError && <div className="editor-error">{parseError}</div>}
     {preview && <div className="diff-summary"><b>{preview.differences.length}</b> semantic changes {preview.no_op ? "（無變更）" : ""}</div>}
-    <footer><span>{operations.length} patch operations</span><button disabled={operations.length === 0 || parseError !== undefined || mutation.isPending} onClick={() => mutation.mutate(true)}>Dry-run</button><button className="primary" disabled={preview === undefined || preview.dry_run === false || parseError !== undefined || mutation.isPending} onClick={() => mutation.mutate(false)}>確認儲存</button></footer>
+    <footer><span>{operations.length} patch operations</span><button disabled={operations.length === 0 || parseError !== undefined || mutation.isPending} onClick={() => mutation.mutate(true)}>Dry-run</button><button className="primary" disabled={preview === undefined || parseError !== undefined || mutation.isPending} onClick={() => mutation.mutate(false)}>確認儲存</button></footer>
     {mutation.error instanceof Error && <div className="editor-error">{mutation.error.message}</div>}
   </section>;
 }

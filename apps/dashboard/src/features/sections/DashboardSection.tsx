@@ -3,9 +3,9 @@ import { lazy, Suspense, useEffect, useState } from "react";
 
 import { apiFetch } from "../../api/client";
 import type { PluginDashboardState, PluginProposal, PluginRevisionIntent, PluginSelection, ProjectDetail } from "../../api/types";
-import { BuildPanel } from "../builds/BuildPanel";
 import { FactsPanel } from "../facts/FactsPanel";
 const ResourceEditor = lazy(() => import("../editor/ResourceEditor").then((module) => ({ default: module.ResourceEditor })));
+const BuildPanel = lazy(() => import("../builds/BuildPanel").then((module) => ({ default: module.BuildPanel })));
 const GraphPanel = lazy(() => import("../graphs/GraphPanel").then((module) => ({ default: module.GraphPanel })));
 
 const pluginCapabilityOptions: Array<{ plugin_id: PluginSelection["plugin_id"] ; capability: PluginSelection["capabilities"][number]; label: string }> = [
@@ -23,9 +23,9 @@ export function DashboardSection({ section, projectId, project }: { section: str
   if (section === "sources") return <Sources projectId={projectId} />;
   if (section === "facts") return <FactsPanel projectId={projectId} project={project} />;
   if (section === "planner") return <Planner projectId={projectId} />;
-  if (section === "builds") return <BuildPanel projectId={projectId} project={project} />;
+  if (section === "builds") return <Suspense fallback={<p className="empty">載入建置工具...</p>}><BuildPanel projectId={projectId} project={project} /></Suspense>;
   if (section === "plugins") return <Plugins projectId={projectId} />;
-  return null;
+  return <section className="empty"><p className="eyebrow">UNKNOWN SECTION</p><h2>找不到此工作區段</h2><p>請從左側導覽選擇有效的專案區段。</p></section>;
 }
 
 function Plugins({ projectId }: { projectId: string }) {

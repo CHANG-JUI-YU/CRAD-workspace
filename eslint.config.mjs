@@ -11,6 +11,7 @@ export default tseslint.config(
       "**/dist/**",
       "**/coverage/**",
       "**/node_modules/**",
+      "_check.mjs",
     ],
   },
   eslint.configs.recommended,

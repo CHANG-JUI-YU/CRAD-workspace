@@ -25,7 +25,9 @@ node packages/cli/dist/index.js patch demo project.yaml --patch '@patch.json' --
 node packages/cli/dist/index.js plan demo
 node packages/cli/dist/index.js simulate demo --conversation conversations/demo.txt
 node packages/cli/dist/index.js compile demo --no-publish --no-png
-node packages/cli/dist/index.js compile demo --v2-backfill
+node packages/cli/dist/index.js compile demo --no-publish --v2-backfill --preview-id preview-demo
+# 先透過 workflow gate 核准 preview-demo，再發布：
+node packages/cli/dist/index.js compile demo --preview-id preview-demo
 node packages/cli/dist/index.js audit imports/card.png
 node packages/cli/dist/index.js import imports/card.json
 node packages/cli/dist/index.js roundtrip imports/card.png

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { apiFetch } from "../../api/client";
 import type { ProjectDetail } from "../../api/types";
@@ -102,6 +102,12 @@ function CandidateReview({ projectId, candidates, facts, projectionRevision, onC
   const [selectedId, setSelectedId] = useState("");
   const selected = candidates.find((item) => item.id === selectedId) ?? candidates[0];
   const [factId, setFactId] = useState("");
+  useEffect(() => {
+    if (selectedId !== "" && candidates.some((item) => item.id === selectedId)) return;
+    const first = candidates[0];
+    setSelectedId(first?.id ?? "");
+    setFactId(first ? `fact-${first.id}` : "");
+  }, [candidates, selectedId]);
   const [rationale, setRationale] = useState("人工審核");
   const review = useMutation({
     mutationFn: (type: "accepted" | "rejected") => {
@@ -150,6 +156,17 @@ function ConflictResolution({ projectId, conflicts, facts, projectionRevision, o
   const [temporal, setTemporal] = useState("[]");
   const [scopes, setScopes] = useState("[]");
   const [rationale, setRationale] = useState("人工裁決");
+  useEffect(() => {
+    if (selectedId !== "" && conflicts.some((item) => item.id === selectedId)) return;
+    const first = conflicts[0];
+    setSelectedId(first?.id ?? "");
+    const firstIds = first?.members.flatMap((member) => member.fact_id ? [member.fact_id] : []) ?? [];
+    setType("choose_one");
+    setAccepted(firstIds[0] ?? "");
+    setRejected(firstIds.slice(1).join(", "));
+    setTemporal("[]");
+    setScopes("[]");
+  }, [conflicts, selectedId]);
   const resolve = useMutation({
     mutationFn: () => {
       if (!conflict || !projectionRevision) throw new Error("Conflict 或 projection 尚未載入");

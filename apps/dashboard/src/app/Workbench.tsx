@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { NavLink, useNavigate, useParams } from "react-router-dom";
 
 import { apiFetch } from "../api/client";
@@ -22,6 +23,18 @@ export function Workbench({ connection }: { connection: "live" | "retrying" }) {
     enabled: projectId !== undefined,
   });
   const active = projects.data?.find((item) => item.id === projectId);
+  const [verification, setVerification] = useState<string>();
+
+  async function verifyProject(): Promise<void> {
+    if (!projectId) return;
+    setVerification("Verifying...");
+    try {
+      const result = await apiFetch<{ ok: boolean; diagnostics: unknown[] }>(`/api/projects/${projectId}/health`);
+      setVerification(result.ok ? "Validation passed" : `${result.diagnostics.length} findings`);
+    } catch (error) {
+      setVerification(error instanceof Error ? error.message : String(error));
+    }
+  }
 
   return <div className="workbench">
     <header className="topbar">
@@ -31,8 +44,8 @@ export function Workbench({ connection }: { connection: "live" | "retrying" }) {
         {projects.data?.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}
       </select>
       <div className="stage"><span>STAGE</span><b>{active?.stage ?? "--"}</b></div>
-      <div className={`connection ${connection}`}>{connection === "live" ? "LIVE" : "RECONNECTING"}</div>
-      <button className="action secondary">驗證</button><button className="action">建立預覽</button>
+      <div className={`connection ${connection}`}>{connection === "live" ? "LIVE" : "RECONNECTING"}</div>{verification && <span role="status">{verification}</span>}
+      <button className="action secondary" onClick={() => void verifyProject()} disabled={!projectId}>驗證</button><button className="action" onClick={() => { if (projectId) void navigate(`/projects/${projectId}/builds`); }} disabled={!projectId}>建立預覽</button>
     </header>
 
     <aside className="nav-pane">
@@ -43,7 +56,7 @@ export function Workbench({ connection }: { connection: "live" | "retrying" }) {
     </aside>
 
     <main className="main-pane">
-      <PaneErrorBoundary name="主工作區">
+      <PaneErrorBoundary key={`${projectId ?? "root"}:${section}`} name="主工作區">
         <Section section={section} project={detail.data} loading={detail.isLoading} />
       </PaneErrorBoundary>
     </main>

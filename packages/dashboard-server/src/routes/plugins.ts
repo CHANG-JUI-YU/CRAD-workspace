@@ -22,10 +22,11 @@ import { z } from "zod";
 import type { DashboardContext } from "../context.js";
 import type { DashboardEvents } from "../events.js";
 import { dashboardFail } from "../errors.js";
+import { projectId } from "../validation.js";
 import type { DashboardSessions } from "../security/session.js";
 
 const tokenBindingSchema = z.object({
-  project_id: z.string().min(1),
+  project_id: stableIdSchema,
   proposal_id: z.string().min(1),
   proposal_revision: revisionSchema,
   decision: z.enum(["approve", "reject"]),
@@ -75,11 +76,11 @@ export function registerPluginRoutes(
   events: DashboardEvents,
 ): void {
   app.get<{ Params: { projectId: string } }>("/api/plugins/:projectId", async (request) => {
-    const loaded = await loadAuthorProject(context.projectsRoot, request.params.projectId);
+    const loaded = await loadAuthorProject(context.projectsRoot, projectId(request.params.projectId));
     return {
       ok: true,
       data: {
-        project_id: request.params.projectId,
+        project_id: projectId(request.params.projectId),
         project_kind: loaded.manifest?.kind,
         workflow_stage: loaded.workflow?.stage,
         workflow_revision: loaded.workflow?.revision,
@@ -103,7 +104,7 @@ export function registerPluginRoutes(
 
   app.post<{ Params: { projectId: string } }>("/api/plugins/:projectId/revision-preview", async (request) => {
     const input = revisionPreviewSchema.parse(request.body);
-    const loaded = await loadAuthorProject(context.projectsRoot, request.params.projectId);
+    const loaded = await loadAuthorProject(context.projectsRoot, projectId(request.params.projectId));
     if (!loaded.workflow || loaded.workflow.revision !== input.expected_workflow_revision) {
       dashboardFail("PLUGIN_REVISION_WORKFLOW_STALE", "plugin revision preview 的 workflow revision 已過期", 409);
     }
@@ -118,7 +119,7 @@ export function registerPluginRoutes(
 
   app.post<{ Params: { projectId: string } }>("/api/plugins/:projectId/revision-begin", async (request) => {
     const input = revisionBeginSchema.parse(request.body);
-    const loaded = await loadAuthorProject(context.projectsRoot, request.params.projectId);
+    const loaded = await loadAuthorProject(context.projectsRoot, projectId(request.params.projectId));
     if (!loaded.workflow || loaded.workflow.revision !== input.expected_workflow_revision) {
       dashboardFail("PLUGIN_REVISION_WORKFLOW_STALE", "plugin revision begin 的 workflow revision 已過期", 409);
     }
@@ -131,7 +132,7 @@ export function registerPluginRoutes(
       desiredSelections: selections,
       implementationPins: exactImplementationPins(selections),
     });
-    const projectRoot = await resolveWithin(context.projectsRoot, request.params.projectId);
+    const projectRoot = await resolveWithin(context.projectsRoot, projectId(request.params.projectId));
     const state = await commitWorkflowMutation(projectRoot, {
       expectedRevision: input.expected_workflow_revision,
       eventId: input.event_id,
@@ -142,7 +143,7 @@ export function registerPluginRoutes(
     const intent = pluginRevisionIntentSchema.parse(state.extensions.plugin_revision_intent);
     events.publish({
       type: "workflow.changed",
-      project_id: request.params.projectId,
+      project_id: projectId(request.params.projectId),
       resource_kind: "plugin-revision",
       resource_id: "plugin-revision-intent",
       revision: state.revision,
@@ -153,13 +154,13 @@ export function registerPluginRoutes(
   app.post<{ Params: { projectId: string } }>("/api/plugins/:projectId/decision-token", async (request) => {
     const input = tokenBindingSchema.parse({
       ...(request.body as Record<string, unknown>),
-      project_id: request.params.projectId,
+      project_id: projectId(request.params.projectId),
     });
-    const loaded = await loadAuthorProject(context.projectsRoot, input.project_id);
+    const loaded = await loadAuthorProject(context.projectsRoot, projectId(input.project_id));
     if (!loaded.workflow || loaded.workflow.revision !== input.workflow_revision) {
       dashboardFail("PLUGIN_REVIEW_WORKFLOW_STALE", "plugin review workflow revision 已過期", 409);
     }
-    const projectRoot = await resolveWithin(context.projectsRoot, input.project_id);
+    const projectRoot = await resolveWithin(context.projectsRoot, projectId(input.project_id));
     const issued = await sessions.issuePluginDecisionToken(
       projectRoot,
       input,
@@ -171,10 +172,10 @@ export function registerPluginRoutes(
 
   app.post<{ Params: { projectId: string } }>("/api/plugins/:projectId/review", async (request) => {
     const input = reviewSchema.parse(request.body);
-    if (input.proposal.project_id !== request.params.projectId) {
+    if (input.proposal.project_id !== projectId(request.params.projectId)) {
       dashboardFail("PLUGIN_REVIEW_PROJECT_MISMATCH", "proposal project_id 與 route 不一致");
     }
-    const loaded = await loadAuthorProject(context.projectsRoot, request.params.projectId);
+    const loaded = await loadAuthorProject(context.projectsRoot, projectId(request.params.projectId));
     if (!loaded.workflow || loaded.workflow.revision !== input.expected_workflow_revision) {
       dashboardFail("PLUGIN_REVIEW_WORKFLOW_STALE", "plugin review workflow revision 已過期", 409);
     }
@@ -183,7 +184,7 @@ export function registerPluginRoutes(
       request.headers["x-csrf-token"] as string | undefined,
       true,
     );
-    const projectRoot = await resolveWithin(context.projectsRoot, request.params.projectId);
+    const projectRoot = await resolveWithin(context.projectsRoot, projectId(request.params.projectId));
     const state = await decidePluginProposal({
       projectRoot,
       project: loaded,
@@ -196,7 +197,7 @@ export function registerPluginRoutes(
     });
     events.publish({
       type: "workflow.changed",
-      project_id: request.params.projectId,
+      project_id: projectId(request.params.projectId),
       resource_kind: "plugin-review",
       resource_id: input.proposal.id,
       revision: state.revision,

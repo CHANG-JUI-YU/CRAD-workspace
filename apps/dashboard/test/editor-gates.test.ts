@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -16,6 +16,7 @@ vi.mock("../src/features/editor/monaco", () => ({}));
 afterEach(() => {
   apiFetch.mockReset();
   vi.restoreAllMocks();
+  cleanup();
 });
 
 function renderWithClient(element: React.ReactElement): void {
@@ -55,7 +56,27 @@ describe("ResourceEditor", () => {
     expect(requestBody("/api/documents/patch", 0)).toMatchObject({ expected_revision: "sha256:12345678901234567890", dry_run: true });
     expect(requestBody("/api/documents/patch", 1)).toMatchObject({ expected_revision: "sha256:12345678901234567890", dry_run: false });
   });
-});
+
+  it("invalidates a dry-run when the draft changes", async () => {
+    let patchCount = 0;
+    apiFetch.mockImplementation((path) => {
+      if (path === "/api/documents/read") return Promise.resolve({ resource: { project_id: "demo", kind: "blueprint", id: "blueprint" }, format: "yaml", value: { schema_version: 1, purpose: "Old" }, semantic_revision: "sha256:12345678901234567890", raw_revision: "sha256:raw", read_only: false });
+      if (path === "/api/documents/patch") {
+        patchCount += 1;
+        return Promise.resolve({ differences: [{ path: "/purpose" }], value: { schema_version: 1, purpose: "New" }, after_revision: "sha256:new", no_op: false, dry_run: true });
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${String(path)}`));
+    });
+    renderWithClient(React.createElement(ResourceEditor, { label: "Blueprint", resource: { project_id: "demo", kind: "blueprint", id: "blueprint" } }));
+    const purpose = await screen.findByDisplayValue("Old");
+    fireEvent.change(purpose, { target: { value: "New" } });
+    fireEvent.click(screen.getByRole("button", { name: "Dry-run" }));
+    const save = screen.getByRole<HTMLButtonElement>("button", { name: "確認儲存" });
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.change(purpose, { target: { value: "Newer" } });
+    await waitFor(() => expect(save.disabled).toBe(true));
+    expect(patchCount).toBe(1);
+  });});
 
 describe("GateActions", () => {
   it("submits the exact gate inputs through the workflow API", async () => {

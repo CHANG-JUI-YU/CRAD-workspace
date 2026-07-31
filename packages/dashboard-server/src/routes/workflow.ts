@@ -1,7 +1,7 @@
 import path from "node:path";
 
 import type { FastifyInstance } from "fastify";
-import { artifactReferenceSchema, contentRevisionScopeSchema, gateRejectionRouteSchema, workflowStateSchema } from "@card-workspace/schemas";
+import { artifactReferenceSchema, contentRevisionScopeSchema, gateRejectionRouteSchema, stableIdSchema, workflowStateSchema } from "@card-workspace/schemas";
 import { loadAuthorProject } from "@card-workspace/project";
 import { beginScopedContentRevision, commitWorkflowMutation, decideGate, deriveGateSnapshot, readCompilePreview } from "@card-workspace/workflow";
 import { z } from "zod";
@@ -9,9 +9,10 @@ import { z } from "zod";
 import type { DashboardContext } from "../context.js";
 import { dashboardFail } from "../errors.js";
 import type { DashboardEvents } from "../events.js";
+import { projectId } from "../validation.js";
 
 const decisionSchema = z.object({
-  project_id: z.string().min(1),
+  project_id: stableIdSchema,
   expected_workflow_revision: z.number().int().nonnegative(),
   event_id: z.string().min(1),
   decision_id: z.string().min(1),
@@ -32,15 +33,16 @@ const decisionSchema = z.object({
 
 export function registerWorkflowRoutes(app: FastifyInstance, context: DashboardContext, events: DashboardEvents): void {
   app.get<{ Params: { projectId: string } }>("/api/workflow/:projectId", async (request) => {
-    const loaded = await loadAuthorProject(context.projectsRoot, request.params.projectId);
+    const loaded = await loadAuthorProject(context.projectsRoot, projectId(request.params.projectId));
     if (!loaded.workflow) dashboardFail("DASHBOARD_WORKFLOW_INVALID", "Workflow is unavailable");
     return { ok: true, data: loaded.workflow };
   });
 
   app.post("/api/workflow/gate", async (request) => {
     const input = decisionSchema.parse(request.body);
-    const projectRoot = path.join(context.projectsRoot, input.project_id);
-    const loaded = await loadAuthorProject(context.projectsRoot, input.project_id);
+    const id = projectId(input.project_id);
+    const projectRoot = path.join(context.projectsRoot, id);
+    const loaded = await loadAuthorProject(context.projectsRoot, id);
     if (!loaded.workflow) dashboardFail("DASHBOARD_WORKFLOW_INVALID", "Workflow is unavailable");
     const findings = input.gate_id === "publish"
       ? await publishFindings(projectRoot, input.input_revisions)
@@ -88,7 +90,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, context: DashboardC
       occurredAt: new Date().toISOString(),
       update: () => workflowStateSchema.parse(nextState),
     });
-    events.publish({ type: "gate.changed", project_id: input.project_id, resource_kind: "gate", resource_id: input.gate_id, revision: state.revision });
+    events.publish({ type: "gate.changed", project_id: id, resource_kind: "gate", resource_id: input.gate_id, revision: state.revision });
     return { ok: true, data: { workflow: state, decision: decision.decision } };
   });
 }

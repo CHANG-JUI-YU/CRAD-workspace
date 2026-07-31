@@ -197,7 +197,8 @@ async function validateJournal(projectRoot: string, relativePath: string, diagno
 function uniqueDiagnostics(items: Diagnostic[]): Diagnostic[] {
   const seen = new Set<string>();
   return items.filter((item) => {
-    const key = JSON.stringify([item.code, item.message, item.location]);
+    const location = item.location === undefined ? undefined : { ...item.location, file: item.location.file.replaceAll("\\", "/") };
+    const key = JSON.stringify([item.code, item.message, location]);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

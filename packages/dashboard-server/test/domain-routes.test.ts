@@ -182,4 +182,21 @@ describe("dashboard domain routes", () => {
     expect(roundTrip.json<{ data: { report: { status: string } } }>().data.report.status).toBe("equivalent");
     await app.close();
   });
+
+  it("rejects path-like project IDs at every dashboard path boundary", async () => {
+    const { app, cookie, csrf } = await setup();
+    const getHeaders = { host, cookie };
+    const postHeaders = { host, origin, cookie, "x-csrf-token": csrf };
+    for (const request of [
+      { method: "GET", url: "/api/projects/alias%2F..%2Fdashboard-demo", headers: getHeaders },
+      { method: "GET", url: "/api/facts/alias%2F..%2Fdashboard-demo/candidates", headers: getHeaders },
+      { method: "GET", url: "/api/sources/alias%2F..%2Fdashboard-demo", headers: getHeaders },
+      { method: "POST", url: "/api/facts/query", headers: postHeaders, payload: { project_id: "alias/../dashboard-demo", filter: {} } },
+      { method: "POST", url: "/api/planner/simulate", headers: postHeaders, payload: { project_id: "..", conversation: [] } },
+    ] as const) {
+      const response = await app.inject(request);
+      expect(response.statusCode, request.url).toBe(400);
+    }
+    await app.close();
+  });
 });

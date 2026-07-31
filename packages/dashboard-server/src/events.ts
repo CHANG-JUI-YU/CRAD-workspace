@@ -6,6 +6,10 @@ import { dashboardEventSchema, type DashboardEvent } from "@card-workspace/schem
 export class DashboardEvents {
   private readonly emitter = new EventEmitter();
 
+  constructor() {
+    this.emitter.setMaxListeners(100);
+  }
+
   publish(event: DashboardEvent): void {
     this.emitter.emit("event", dashboardEventSchema.parse(event));
   }

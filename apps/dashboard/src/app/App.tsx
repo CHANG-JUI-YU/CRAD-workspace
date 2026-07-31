@@ -11,6 +11,7 @@ const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 5_
 export function App() {
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   const [connection, setConnection] = useState<"live" | "retrying">("retrying");
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let disconnect: (() => void) | undefined;
@@ -21,10 +22,10 @@ export function App() {
       })
       .catch(() => setState("failed"));
     return () => disconnect?.();
-  }, []);
+  }, [attempt]);
 
   if (state === "loading") return <main className="startup">正在連接本機工作區...</main>;
-  if (state === "failed") return <main className="startup error">工作階段無效。請從CLI重新啟動Dashboard。</main>;
+  if (state === "failed") return <main className="startup error">工作階段無效。請從CLI重新啟動Dashboard。<button onClick={() => { setState("loading"); setAttempt((value) => value + 1); }}>重試</button></main>;
   return <QueryClientProvider client={queryClient}>
     <BrowserRouter>
       <Routes>
