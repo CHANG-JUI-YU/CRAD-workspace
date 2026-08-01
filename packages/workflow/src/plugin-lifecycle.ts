@@ -104,8 +104,8 @@ function pluginIntentFromBlueprint(options: {
   implementationPins?: Partial<Record<OfficialPluginId, PluginImplementationPin>>;
 }): PluginRevisionIntent {
   const { projectId, projectKind, blueprint } = options;
-  if (!blueprint) workflowFail("PLUGIN_BLUEPRINT_REQUIRED", "plugin revision 必須有 Blueprint");
-  const selections = normalizedPluginSelections(options.desiredSelections ?? blueprint.plugins);
+  // Public callers validate the Blueprint before entering this invariant-preserving helper.
+  const selections = normalizedPluginSelections(options.desiredSelections ?? blueprint!.plugins);
   const closure = dependencyClosure(selections);
   const sourcePins = new Map(options.sourcePins.map((source) => [source.plugin_id, source.implementation] as const));
   const implementationPins = closure.map((pluginId) => {

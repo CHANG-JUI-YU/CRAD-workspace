@@ -246,4 +246,19 @@ describe("planCanonicalProject", () => {
       "character.alice.secondary_interpretation",
     ]);
   });
-});
+  it("covers planner author overrides and fallback module ordering", async () => {
+    const { workspace } = await makeProject("zhuji");
+    const normalized = normalizeAuthorProject(await loadAuthorProject(workspace.projectsRoot, "forge-demo"));
+    if (!normalized.ir) throw new Error("normalized project missing");
+    const ir = structuredClone(normalized.ir);
+    const first = ir.nodes[0]!;
+    first.compile.activation = { type: "constant" } as never;
+    first.compile.placement = { type: "after_character" } as never;
+    first.compile.recursion = { type: "chain", incoming: true, outgoing: false, max_depth: 2, depends_on: [] } as never;
+    const unknown = { ...first, id: "character.alice.unknown-module", compile: { ...first.compile, activation: { type: "default" }, placement: { type: "default" }, recursion: { type: "default" } } };
+    ir.nodes = [first, unknown, ...ir.nodes.slice(1)];
+    const planned = planCanonicalProject(ir);
+    expect(planned.ok).toBe(true);
+    expect(planned.ir?.entries.find((entry) => entry.id === first.id)?.activation).toMatchObject({ type: "constant" });
+    expect(planned.ir?.entries.find((entry) => entry.id === first.id)?.recursion).toMatchObject({ incoming: true, max_depth: 2 });
+  });});

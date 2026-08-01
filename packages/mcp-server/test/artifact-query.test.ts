@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   canonicalJson,
@@ -11,6 +11,8 @@ import { workflowStateSchema } from "@card-workspace/schemas";
 import { commitWorkflowMutation, createCompilePreview } from "@card-workspace/workflow";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createTrustedContext } from "../src/context.js";
+import { artifactTools } from "../src/tools/artifacts.js";
 import { createMcpServer } from "../src/server.js";
 import { toolRegistry } from "../src/tool-registry.js";
 import { setupMcpWorkspace } from "./helpers.js";
@@ -192,7 +194,10 @@ describe("Director artifact query", () => {
     const invalidPreview = await readArtifact(preview.id, preview.revision);
     expect(invalidPreview.isError).toBe(true);
     expect(payload(invalidPreview).error?.code).toBe("ARTIFACT_CONTENT_INVALID");
-
+    await unlink(path.join(fixture.projectRoot, ".workflow", "results/review-blueprint/review-blueprint-1.json"));
+    const unavailableReport = await readArtifact(report.id, reportRevision);
+    expect(unavailableReport.isError).toBe(true);
+    expect(payload(unavailableReport).error?.code).toBe("ARTIFACT_CONTENT_UNAVAILABLE");
     const factPath = path.join(fixture.projectRoot, "facts/register.yaml");
     const factRaw = await readFile(factPath, "utf8");
     await writeFile(factPath, factRaw.replace("extensions: {}", "extensions:\n  tampered: true"), "utf8");
@@ -239,4 +244,33 @@ describe("Director artifact query", () => {
     await client.close();
     await server.close();
   });
+});
+
+it("covers artifact capability, invalid workflow, and projection build guards", async () => {
+  const tampered = await setupMcpWorkspace("artifact-guards");
+  cleanups.push(tampered.workspace.cleanup);
+  const factPath = path.join(tampered.projectRoot, "facts", "register.yaml");
+  const factRaw = await readFile(factPath, "utf8");
+  await writeFile(factPath, factRaw.replace("extensions: {}", "extensions:\n  tampered: true"), "utf8");
+  const { server: tamperedServer } = await createMcpServer({ environment: tampered.environment });
+  const [tamperedClientTransport, tamperedServerTransport] = InMemoryTransport.createLinkedPair();
+  await tamperedServer.connect(tamperedServerTransport);
+  const tamperedClient = new Client({ name: "artifact-guards", version: "1" });
+  await tamperedClient.connect(tamperedClientTransport);
+  const invalidProjection = await tamperedClient.callTool({ name: "project_artifact_list", arguments: { project_id: "artifact-guards" } });
+  expect(payload(invalidProjection).error?.code).toBe("ARTIFACT_CONTENT_INVALID");
+  await tamperedClient.close();
+  await tamperedServer.close();
+
+  const unauthorized = await setupMcpWorkspace("artifact-unauthorized");
+  cleanups.push(unauthorized.workspace.cleanup);
+  const unauthorizedLoaded = await loadAuthorProject(unauthorized.workspace.projectsRoot, "artifact-unauthorized");
+  const unauthorizedTrusted = await createTrustedContext({ ...unauthorized.environment, CARD_WORKSPACE_AGENT_ID: "mvu-creator" });
+  await expect(artifactTools.project_artifact_list({ trusted: unauthorizedTrusted, projectRoot: unauthorized.projectRoot, workflow: unauthorizedLoaded.workflow!, args: {} } as never)).rejects.toMatchObject({ code: "TOOL_CAPABILITY_DENIED" });
+
+  const invalidWorkflow = await setupMcpWorkspace("artifact-invalid-workflow");
+  cleanups.push(invalidWorkflow.workspace.cleanup);
+  await unlink(path.join(invalidWorkflow.projectRoot, "workflow.json"));
+  const invalidTrusted = await createTrustedContext(invalidWorkflow.environment);
+  await expect(artifactTools.project_artifact_list({ trusted: invalidTrusted, projectRoot: invalidWorkflow.projectRoot, workflow: { project_id: "artifact-invalid-workflow" }, args: {} } as never)).rejects.toMatchObject({ code: "PROJECT_INVALID" });
 });

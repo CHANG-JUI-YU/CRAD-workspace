@@ -162,4 +162,59 @@ describe("agent-lint", () => {
     expect(parsed.ok).toBe(false);
     expect(parsed.diagnostics[0]?.code).toBeTypeOf("string");
   });
+  it("covers config load failures, missing assets, and isolation diagnostics", async () => {
+    const missing = await createFixture();
+    await rm(resolve(missing, "workflow/tool-policy.yaml"));
+    expect((await lintAgentConfiguration({ root: missing })).diagnostics.map((item) => item.code)).toContain("CONFIG_READ_FAILED");
+
+    const invalidYaml = await createFixture();
+    await writeFile(resolve(invalidYaml, "workflow/tool-policy.yaml"), "[invalid", "utf8");
+    expect((await lintAgentConfiguration({ root: invalidYaml })).diagnostics.map((item) => item.code)).toContain("CONFIG_YAML_INVALID");
+
+    const invalidSchema = await createFixture();
+    await writeFile(resolve(invalidSchema, "workflow/tool-policy.yaml"), "schema_version: 1\nrules: nope\n", "utf8");
+    expect((await lintAgentConfiguration({ root: invalidSchema })).diagnostics.map((item) => item.code)).toContain("CONFIG_SCHEMA_INVALID");
+
+    const missingAsset = await createFixture();
+    await rm(resolve(missingAsset, ".opencode/prompts/director.md"));
+    expect((await lintAgentConfiguration({ root: missingAsset })).diagnostics.map((item) => item.code)).toContain("AGENT_FILE_NOT_FOUND");
+
+    const unregistered = await createFixture();
+    await replace(unregistered, "workflow/agent-registry.yaml", ".agents/skills/fact-curation/references/extraction.md", ".agents/skills/not-a-skill/references/missing.md");
+    const unregisteredCodes = (await lintAgentConfiguration({ root: unregistered })).diagnostics.map((item) => item.code);
+    expect(unregisteredCodes).toEqual(expect.arrayContaining(["REFERENCE_NOT_FOUND", "REFERENCE_UNREGISTERED"]));
+
+    const criticMutation = await createFixture();
+    await replace(criticMutation, "workflow/agent-registry.yaml", "capabilities: [workflow.read, plugin.read, task.execute, facts.read, review.submit]", "capabilities: [workflow.read, plugin.read, task.execute, facts.read, review.submit, plugin.mvu.propose]");
+    expect((await lintAgentConfiguration({ root: criticMutation })).diagnostics.map((item) => item.code)).toContain("CRITIC_MUTATION_CAPABILITY_FORBIDDEN");
+
+    const creatorReview = await createFixture();
+    await replace(creatorReview, "workflow/agent-registry.yaml", "capabilities: [workflow.read, plugin.read, task.execute, task.clarify, plugin.mvu.propose]", "capabilities: [workflow.read, plugin.read, task.execute, task.clarify, plugin.mvu.propose, review.submit]");
+    expect((await lintAgentConfiguration({ root: creatorReview })).diagnostics.map((item) => item.code)).toContain("CREATOR_REVIEW_CAPABILITY_FORBIDDEN");
+  });
+
+  it("covers missing OpenCode config, fixture assets, and unregistered references", async () => {
+    const noOpenCode = await createFixture();
+    await rm(resolve(noOpenCode, "opencode.jsonc"));
+    expect((await lintAgentConfiguration({ root: noOpenCode })).diagnostics.map((item) => item.code))
+      .toContain("OPENCODE_CONFIG_READ_FAILED");
+
+    const missingFixture = await createFixture();
+    const fixtureConfig = await loadWorkflowConfig(missingFixture);
+    const fixturePath = (fixtureConfig.registry.agents.find((agent) => (agent.extensions as Assets).fixtures?.length)?.extensions as Assets).fixtures?.[0];
+    if (!fixturePath) throw new Error("fixture path missing");
+    await rm(resolve(missingFixture, fixturePath));
+    expect((await lintAgentConfiguration({ root: missingFixture })).diagnostics.map((item) => item.code))
+      .toContain("FIXTURE_NOT_FOUND");
+
+    const unknownPersonality = await createFixture();
+    await replace(unknownPersonality, "workflow/agent-registry.yaml", "personality: director", "personality: missing-personality");
+    expect((await lintAgentConfiguration({ root: unknownPersonality })).diagnostics.map((item) => item.code))
+      .toContain("PERSONALITY_UNREGISTERED");
+
+    const unknownDelegate = await createFixture();
+    await replace(unknownDelegate, "workflow/agent-registry.yaml", "extensions: { references: [.agents/skills/fact-curation/references/extraction.md]", "extensions: { delegates: [missing-agent], references: [.agents/skills/fact-curation/references/extraction.md]");
+    expect((await lintAgentConfiguration({ root: unknownDelegate })).diagnostics.map((item) => item.code))
+      .toContain("AGENT_UNREGISTERED");
+  });
 });

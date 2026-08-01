@@ -8,17 +8,17 @@ function v3(version = "3.0") {
     spec: "chara_card_v3",
     spec_version: version,
     data: {
-      name: "愛麗絲",
+      name: "Alice",
       description: "",
       personality: "",
       scenario: "",
-      first_mes: "你好",
+      first_mes: "雿末",
       mes_example: "",
       creator_notes: "",
       system_prompt: "",
       post_history_instructions: "",
       alternate_greetings: [],
-      group_only_greetings: ["群組"],
+      group_only_greetings: ["蝢斤?"],
       tags: [],
       creator: "",
       character_version: "1",
@@ -43,7 +43,7 @@ function v3(version = "3.0") {
 }
 
 describe("card import", () => {
-  it("V1 六欄補成完整 V3 並保留未知 root", () => {
+  it("V1 ?剜?鋆?摰 V3 銝虫????root", () => {
     const result = importCharacterCard({
       name: "Legacy",
       description: "D",
@@ -58,16 +58,16 @@ describe("card import", () => {
     expect(result.passthrough).toEqual({ root: { vendor: true } });
   });
 
-  it("V2 升級補 required fields 並移除本工具降級警告", () => {
+  it("V2 ??鋆?required fields 銝衣宏?斗撌亙??霅血?", () => {
     const source = downgradeCharacterCardV3ToV2(importCharacterCard(v3()).card).card;
     const result = importCharacterCard(source);
     expect(result.source_format).toBe("v2");
     expect(result.card.data.group_only_greetings).toEqual([]);
-    expect(result.card.data.creator_notes).not.toContain("由 CCv3 降級");
+    expect(result.card.data.creator_notes).not.toContain("??CCv3 ??");
     expect(result.card.data.character_book?.entries[0]?.use_regex).toBe(false);
   });
 
-  it("future 3.x 警告但完整保存未知巢狀欄位", () => {
+  it("future 3.x 霅血?雿??港?摮?亙楷?甈?", () => {
     const result = importCharacterCard(v3("3.7"));
     expect(result.source_version).toBe("3.7");
     expect(result.diagnostics.map((item) => item.code)).toContain("IMPORT_FUTURE_V3");
@@ -83,16 +83,29 @@ describe("card import", () => {
     });
   });
 
-  it("相同 raw snapshot 產生相同 import revision", () => {
+  it("?詨? raw snapshot ?Ｙ??詨? import revision", () => {
     const raw = JSON.stringify(v3());
     expect(importCharacterCard(JSON.parse(raw), raw).raw_revision).toBe(
       importCharacterCard(JSON.parse(raw), raw).raw_revision,
     );
   });
 
-  it("可將沒有 worldbook 與 V3-only 欄位的最小卡降級", () => {
+  it("?臬?瘝? worldbook ??V3-only 甈???撠??", () => {
     const result = downgradeCharacterCardV3ToV2(importCharacterCard({ name: "Minimal" }).card);
     expect(result.card.data.character_book).toBeUndefined();
     expect(result.losses).toEqual([]);
+  });
+
+  it("covers card import format guards and raw byte revisions", () => {
+    expect(() => importCharacterCard({ spec: "chara_card_v3", spec_version: "2.0", data: {} })).toThrow();
+    const legacy = structuredClone(v3()) as Record<string, unknown>;
+    legacy.spec = "chara_card_v2";
+    legacy.spec_version = "2.0";
+    (legacy.data as Record<string, unknown>).creator_notes = "[CCv3 撠嚗3 甈?]\nNotes";
+    const v2 = importCharacterCard(legacy);
+    expect(v2.source_format).toBe("v2");
+    expect(v2.card.data.creator_notes).toContain("Notes");
+    const raw = Buffer.from("{}");
+    expect(importCharacterCard({ name: "bytes" }, raw).raw_revision).toMatch(/^sha256:[a-f0-9]{64}$/u);
   });
 });

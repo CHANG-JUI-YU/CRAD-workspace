@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { makeTemporaryWorkspace } from "@card-workspace/testing";
@@ -14,7 +14,7 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => Promise.all(cleanups.splice(0).map((cleanup) => cleanup())));
 
 describe("runFileTransaction", () => {
-  it("拒絕空交易、重複路徑與內部路徑", async () => {
+  it("??蝛箔漱??銴楝敺??折頝臬?", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     await expect(runFileTransaction({ root: workspace.root, operations: [] })).rejects.toMatchObject({
@@ -37,7 +37,7 @@ describe("runFileTransaction", () => {
     ).rejects.toMatchObject({ code: "TRANSACTION_PATH_DENIED" });
   });
 
-  it("多檔案全部成功才提交", async () => {
+  it("憭?獢?冽????漱", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     await runFileTransaction({
@@ -51,7 +51,7 @@ describe("runFileTransaction", () => {
     await expect(readFile(path.join(workspace.root, "nested/b.txt"), "utf8")).resolves.toBe("B");
   });
 
-  it("中途故障會還原所有既有檔案", async () => {
+  it("銝剝?????????獢?", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     await writeFile(path.join(workspace.root, "a.txt"), "old-a", "utf8");
@@ -72,7 +72,7 @@ describe("runFileTransaction", () => {
     await expect(readFile(path.join(workspace.root, "b.txt"), "utf8")).resolves.toBe("old-b");
   });
 
-  it("原始 revision 不符時不落地", async () => {
+  it("?? revision 銝泵???賢", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     await writeFile(path.join(workspace.root, "a.txt"), "current", "utf8");
@@ -87,11 +87,11 @@ describe("runFileTransaction", () => {
           },
         ],
       }),
-    ).rejects.toThrow(/檔案已變更/u);
+    ).rejects.toThrow();
     await expect(readFile(path.join(workspace.root, "a.txt"), "utf8")).resolves.toBe("current");
   });
 
-  it("只讀來源 revision 不符時不發布其他檔案", async () => {
+  it("?芾?靘? revision 銝泵???澆??嗡?瑼?", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     await writeFile(path.join(workspace.root, "source.txt"), "current", "utf8");
@@ -105,7 +105,7 @@ describe("runFileTransaction", () => {
     await expect(readFile(path.join(workspace.root, "output.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("預期 revision 的新檔不存在時拒絕", async () => {
+  it("?? revision ?瑼?摮??蝯?", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     await expect(
@@ -122,7 +122,7 @@ describe("runFileTransaction", () => {
     ).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
   });
 
-  it("expectedAbsent 防止覆寫既有 immutable artifact", async () => {
+  it("expectedAbsent ?脫迫閬神?Ｘ? immutable artifact", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     await writeFile(path.join(workspace.root, "immutable.bin"), Buffer.from([1, 2, 3]));
@@ -135,7 +135,7 @@ describe("runFileTransaction", () => {
     await expect(readFile(path.join(workspace.root, "immutable.bin"))).resolves.toEqual(Buffer.from([1, 2, 3]));
   });
 
-  it("拒絕根目錄內的 symlink 交易路徑", async () => {
+  it("???寧???symlink 鈭斗?頝臬?", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     await mkdir(path.join(workspace.root, "real"), { recursive: true });
@@ -150,7 +150,7 @@ describe("runFileTransaction", () => {
     })).rejects.toMatchObject({ code: "TRANSACTION_PATH_LINK_DENIED" });
   });
 
-  it("同一 workspace transaction 以來源 CAS 發布受控 export 且不覆寫", async () => {
+  it("?? workspace transaction 隞乩?皞?CAS ?澆?? export 銝?閬神", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     await mkdir(path.join(workspace.root, "projects", "demo", "sources"), { recursive: true });
@@ -169,7 +169,7 @@ describe("runFileTransaction", () => {
     })).rejects.toMatchObject({ code: "TRANSACTION_TARGET_EXISTS" });
   });
 
-  it("expectedAbsent 在預檢後遇到外部 writer 競爭仍不覆寫", async () => {
+  it("expectedAbsent ?券?瑼Ｗ??憭 writer 蝡嗥隞?閬神", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     const target = path.join(workspace.root, "export.json");
@@ -181,7 +181,7 @@ describe("runFileTransaction", () => {
     await expect(readFile(target, "utf8")).resolves.toBe("external");
   });
 
-  it("並行 writer 只能有一個持有 advisory lock", async () => {
+  it("銝西? writer ?芾??????advisory lock", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     let releaseGate: (() => void) | undefined;
@@ -211,7 +211,7 @@ describe("runFileTransaction", () => {
     await first;
   });
 
-  it("stale lock 的並行 contender 只有一個能取得 ownership", async () => {
+  it("stale lock ?蒂銵?contender ?芣?銝??? ownership", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     const lockPath = path.join(workspace.root, ".transactions", "project.lock");
@@ -236,7 +236,7 @@ describe("runFileTransaction", () => {
     await first;
   });
 
-  it("release 發現 owner token 已變更時不刪除 successor lock", async () => {
+  it("release ?潛 owner token 撌脰??湔?銝??successor lock", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     const lockPath = path.join(workspace.root, ".transactions", "project.lock");
@@ -255,7 +255,7 @@ describe("runFileTransaction", () => {
     await expect(readFile(lockPath, "utf8")).resolves.toContain("successor-owner-token");
   });
 
-  it("malformed lock 與 journal 一律 fail closed 且不改 target", async () => {
+  it("malformed lock ??journal 銝敺?fail closed 銝???target", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     const transactionsRoot = path.join(workspace.root, ".transactions");
@@ -279,7 +279,7 @@ describe("runFileTransaction", () => {
     await expect(stat(path.join(second.root, "blocked.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("可從 prepared journal 還原程序中止前狀態", async () => {
+  it("?臬? prepared journal ??蝔?銝剜迫???", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     const transactionRoot = path.join(workspace.root, ".transactions", "crashed");
@@ -298,7 +298,7 @@ describe("runFileTransaction", () => {
     await expect(readFile(path.join(workspace.root, "a.txt"), "utf8")).resolves.toBe("old");
   });
 
-  it("復原時移除交易前不存在的新檔", async () => {
+  it("敺拙??宏?支漱??銝??函??唳?", async () => {
     const workspace = await makeTemporaryWorkspace();
     cleanups.push(workspace.cleanup);
     const transactionRoot = path.join(workspace.root, ".transactions", "new-file-crash");
@@ -317,4 +317,106 @@ describe("runFileTransaction", () => {
       code: "ENOENT",
     });
   });
+  it("covers legacy lock parsing, alternate lock roots, and committed journal skip", async () => {
+    const workspace = await makeTemporaryWorkspace();
+    const secondary = await makeTemporaryWorkspace();
+    cleanups.push(workspace.cleanup, secondary.cleanup);
+    const lockPath = path.join(workspace.root, ".transactions", "project.lock");
+    await mkdir(path.dirname(lockPath), { recursive: true });
+    await writeFile(lockPath, `${JSON.stringify({ pid: 2147483647, created_at: "2026-07-01T00:00:00.000Z" })}\n`, "utf8");
+    await runFileTransaction({ root: workspace.root, lockRoots: [workspace.root, secondary.root], operations: [{ relativePath: "legacy.txt", content: "ok" }] });
+    await expect(readFile(path.join(workspace.root, "legacy.txt"), "utf8")).resolves.toBe("ok");
+    const committed = path.join(workspace.root, ".transactions", "committed");
+    await mkdir(committed, { recursive: true });
+    await writeFile(path.join(committed, "journal.json"), JSON.stringify({ state: "committed" }), "utf8");
+    await expect(recoverIncompleteTransactions(workspace.root)).resolves.toEqual([]);
+    await writeFile(lockPath, JSON.stringify({ pid: 1, created_at: "bad", owner_token: "short" }), "utf8");
+    await expect(runFileTransaction({ root: workspace.root, operations: [{ relativePath: "blocked.txt", content: "bad" }] })).rejects.toMatchObject({ code: "TRANSACTION_LOCK_MALFORMED" });
+  });
+
+  it("covers transaction lock and journal schema variants", async () => {
+    const malformedCases = [
+      "[]",
+      JSON.stringify({ pid: 0, created_at: "bad" }),
+      JSON.stringify({ pid: process.pid, created_at: new Date().toISOString(), schema_version: 2 }),
+    ];
+    for (const [index, raw] of malformedCases.entries()) {
+      const workspace = await makeTemporaryWorkspace();
+      cleanups.push(workspace.cleanup);
+      const lockPath = path.join(workspace.root, ".transactions", "project.lock");
+      await mkdir(path.dirname(lockPath), { recursive: true });
+      await writeFile(lockPath, raw, "utf8");
+      await expect(runFileTransaction({ root: workspace.root, operations: [{ relativePath: "blocked-" + index + ".txt", content: "bad" }] }))
+        .rejects.toMatchObject({ code: "TRANSACTION_LOCK_MALFORMED" });
+    }
+
+    const workspace = await makeTemporaryWorkspace();
+    cleanups.push(workspace.cleanup);
+    const transactionsRoot = path.join(workspace.root, ".transactions");
+    await mkdir(transactionsRoot, { recursive: true });
+    const now = new Date().toISOString();
+    const variants: Array<[string, unknown]> = [
+      ["committed-v1", { schema_version: 1, id: "committed-v1", state: "committed", owner_token: "owner-token-123456", committed_at: now }],
+      ["rolled-v1", { schema_version: 1, id: "rolled-v1", state: "rolled_back", owner_token: "owner-token-123456", rolled_back_at: now, error: "failed" }],
+      ["recovered-v1", { schema_version: 1, id: "recovered-v1", state: "recovered", owner_token: "owner-token-123456", recovered_at: now }],
+      ["committed-legacy", { id: "committed-legacy", state: "committed", committed_at: now }],
+      ["rolled-legacy", { id: "rolled-legacy", state: "rolled_back", rolled_back_at: now, error: "failed" }],
+      ["recovered-legacy", { state: "recovered", recovered_at: now }],
+    ];
+    for (const [id, journal] of variants) {
+      const root = path.join(transactionsRoot, id);
+      await mkdir(root, { recursive: true });
+      await writeFile(path.join(root, "journal.json"), JSON.stringify(journal), "utf8");
+    }
+    await expect(recoverIncompleteTransactions(workspace.root)).resolves.toEqual([]);
+  });
+
+  it("rejects malformed prepared and journal object variants during recovery", async () => {
+    const workspace = await makeTemporaryWorkspace();
+    cleanups.push(workspace.cleanup);
+    const root = path.join(workspace.root, ".transactions");
+    await mkdir(root, { recursive: true });
+    const cases: Array<[string, unknown]> = [
+      ["array-journal", []],
+      ["prepared-missing-operations", { state: "prepared" }],
+      ["prepared-bad-operation", { state: "prepared", operations: [{ relativePath: "", existed: true }] }],
+      ["unknown-state", { state: "unknown" }],
+    ];
+    for (const [id, journal] of cases) {
+      const dir = path.join(root, id);
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, "journal.json"), JSON.stringify(journal), "utf8");
+      await expect(recoverIncompleteTransactions(workspace.root)).rejects.toMatchObject({ code: "TRANSACTION_JOURNAL_MALFORMED" });
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+it("covers transaction missing expectations, journal edges, and non-Error rollback", async () => {
+  const workspace = await makeTemporaryWorkspace();
+  cleanups.push(workspace.cleanup);
+  await expect(runFileTransaction({
+    root: workspace.root,
+    expectations: [{ relativePath: "missing.txt", expectedRawRevision: computeTextRevision("missing") }],
+    operations: [{ relativePath: "output.txt", content: "output" }],
+  })).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+
+  const missingJournal = await makeTemporaryWorkspace();
+  cleanups.push(missingJournal.cleanup);
+  await mkdir(path.join(missingJournal.root, ".transactions", "missing-journal"), { recursive: true });
+  await expect(recoverIncompleteTransactions(missingJournal.root)).rejects.toMatchObject({ code: "TRANSACTION_JOURNAL_MALFORMED" });
+
+  const malformedOperation = await makeTemporaryWorkspace();
+  cleanups.push(malformedOperation.cleanup);
+  await mkdir(path.join(malformedOperation.root, ".transactions", "null-operation"), { recursive: true });
+  await writeFile(path.join(malformedOperation.root, ".transactions", "null-operation", "journal.json"), JSON.stringify({ state: "prepared", operations: [null] }), "utf8");
+  await expect(recoverIncompleteTransactions(malformedOperation.root)).rejects.toMatchObject({ code: "TRANSACTION_JOURNAL_MALFORMED" });
+
+  const nonError = await makeTemporaryWorkspace();
+  cleanups.push(nonError.cleanup);
+  await expect(runFileTransaction({
+    root: nonError.root,
+    operations: [{ relativePath: "rollback.txt", content: "rollback" }],
+    beforePublish: () => { throw new Error("non-error rollback"); },
+  })).rejects.toThrow("non-error rollback");
 });

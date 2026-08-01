@@ -20,7 +20,9 @@ import {
   intakeLocalSource,
   listChunkSets,
   normalizeText,
+  normalizedRangeToLineRange,
   normalizedRangeToSourceByteRange,
+  normalizedRangeToSourceCharacterRange,
   sourceByteRangeToNormalizedRange,
   sourceCharacterRangeToNormalizedRange,
   sourceRevision,
@@ -197,4 +199,61 @@ describe("chunk store", () => {
     expect(manifest.sources[0].current_chunk_set.chunk_set_id).toBe(first.manifest.id);
     await expect(readFile(path.join(projectRoot, "sources/journals/source-events.jsonl"), "utf8")).resolves.toBe(journalBefore);
   });
+
+  it("rejects unsupported profiles and projection integrity drift", () => {
+    const input = projection("One sentence. ".repeat(4_000) + "\n\nSecond sentence!\n# Chapter\nThird sentence?");
+    expect(() => createChunkSet({ projection: input, profile: profile({ tokenizer_id: "other" }) })).toThrow(/cl100k_base/u);
+    expect(() => createChunkSet({ projection: { ...input, line_map: undefined } as typeof input })).toThrow(/line map/u);
+    expect(() => createChunkSet({ projection: { ...input, line_map: { ...input.line_map!, normalized_character_count: input.text.length + 1 } } })).toThrow(/line map/u);
+    expect(() => createChunkSet({ projection: { ...input, normalized_hash: `sha256:${"f".repeat(64)}` } })).toThrow(/hash/u);
+    const sentenceChunks = createChunkSet({ projection: input, profile: profile({ target_tokens: 5_000, overlap_tokens: 500 }) });
+    expect(sentenceChunks.chunks.length).toBeGreaterThan(1);
+  });
+});
+
+it("covers line-map terminal boundaries, empty ranges, and invalid offsets", () => {
+  const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("Alpha\r\n😀Beta", "utf8")]);
+  const normalized = normalizeText(bytes);
+  const end = normalized.text.length;
+  expect(normalizedRangeToSourceByteRange(normalized.text, normalized.lineMap, [0, end])).toEqual([3, bytes.length]);
+  expect(sourceByteRangeToNormalizedRange(normalized.text, normalized.lineMap, [0, bytes.length])).toEqual([0, end]);
+  expect(sourceCharacterRangeToNormalizedRange(normalized.lineMap, [0, normalized.lineMap.source_character_count])).toEqual([0, end]);
+  expect(normalizedRangeToLineRange(normalized.lineMap, [0, 0])).toEqual([1, 1]);
+  expect(() => sourceByteRangeToNormalizedRange(normalized.text, normalized.lineMap, [1, 2])).toThrow(/BOM/u);
+  expect(() => sourceByteRangeToNormalizedRange(normalized.text, normalized.lineMap, [11, 12])).toThrow(/UTF-8 character|offset/u);
+  expect(() => normalizedRangeToLineRange(normalized.lineMap, [-1, 0])).toThrow();
+  expect(() => normalizedRangeToSourceCharacterRange(normalized.text, normalized.lineMap, [end + 1, end + 1])).toThrow();
+});
+
+it("covers chunk store missing, identity, and immutable content guards", async () => {
+  const { projectRoot, intake } = await projectWithSource("word ".repeat(2_000));
+  await expect(listChunkSets(projectRoot, "novel", intake.revision.id)).resolves.toEqual([]);
+  const artifacts = createChunkSet({ projection: intake.projection, profile: profile() });
+  await expect(getChunkSet(projectRoot, "novel", intake.revision.id, artifacts.manifest.id)).rejects.toMatchObject({ code: "CHUNK_SET_NOT_FOUND" });
+  await storeChunkSet({ projectRoot, artifacts, actor: "tester" });
+  const root = path.join(projectRoot, "sources/chunks/novel", intake.revision.id.slice("sha256:".length), artifacts.manifest.id);
+  const manifestPath = path.join(root, "manifest.json");
+  const manifestRaw = await readFile(manifestPath, "utf8");
+  await writeFile(manifestPath, manifestRaw.replace(artifacts.manifest.id, "chunk-set-wrong"), "utf8");
+  await expect(getChunkSet(projectRoot, "novel", intake.revision.id, artifacts.manifest.id)).rejects.toMatchObject({ code: "CHUNK_SET_IDENTITY_MISMATCH" });
+  await writeFile(manifestPath, manifestRaw, "utf8");
+  const chunkId = artifacts.manifest.chunk_ids[0]!;
+  const chunkPath = path.join(root, chunkId + ".json");
+  const chunkRaw = await readFile(chunkPath, "utf8");
+  await writeFile(chunkPath, chunkRaw.replace(chunkId, "chunk-wrong"), "utf8");
+  await expect(getChunkSet(projectRoot, "novel", intake.revision.id, artifacts.manifest.id)).rejects.toMatchObject({ code: "CHUNK_IDENTITY_MISMATCH" });
+  await writeFile(chunkPath, chunkRaw, "utf8");
+  const chunkValue = JSON.parse(chunkRaw) as Record<string, unknown>;
+  chunkValue.content = "tampered";
+  await writeFile(chunkPath, JSON.stringify(chunkValue), "utf8");
+  await expect(verifyChunkSet(projectRoot, "novel", intake.revision.id, artifacts.manifest.id)).rejects.toMatchObject({ code: "CHUNK_SET_CONTENT_MISMATCH" });
+});
+
+it("covers empty chunk profiles and profile schema guards", () => {
+  const empty = createChunkSet({ projection: projection("") });
+  expect(empty.chunks).toEqual([]);
+  expect(() => createChunkSet({
+    projection: projection("??"),
+    profile: { ...profile(), target_tokens: 1, overlap_tokens: 1 } as ChunkProfile,
+  })).toThrow();
 });

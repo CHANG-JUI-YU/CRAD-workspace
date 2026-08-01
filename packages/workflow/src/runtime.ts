@@ -1391,8 +1391,8 @@ export function resumeTaskAfterRepair(options: {
         run_id: options.runId,
         task_id: target.id,
         recovery_of: target.extensions.recovery_of,
-        prior_failure_category: priorFailure?.category,
-        prior_failure_summary: priorFailure?.summary ?? target.failure_summary,
+        ...(priorFailure?.category ? { prior_failure_category: priorFailure.category } : {}),
+        ...(priorFailure?.summary ?? target.failure_summary ? { prior_failure_summary: priorFailure?.summary ?? target.failure_summary } : {}),
       },
     }],
   });

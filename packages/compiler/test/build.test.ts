@@ -484,4 +484,20 @@ describe("buildProject", () => {
       layer: "workspace",
     }));
   });
+
+  it("covers build preview CAS guards and option fallbacks", async () => {
+    const workspace = await makeBuildProject({ json: false, png: false, v2_backfill: false });
+    const result = await buildProject({ workspaceRoot: workspace.root, projectId: "build-demo", strict: false, tokenBudget: 10 });
+    await expect(buildProject({
+      workspaceRoot: workspace.root,
+      projectId: "build-demo",
+      expectedInputRevision: "sha256:" + "0".repeat(64),
+    })).rejects.toMatchObject({ code: "BUILD_PREVIEW_INPUT_STALE" });
+    await expect(buildProject({
+      workspaceRoot: workspace.root,
+      projectId: "build-demo",
+      expectedArtifactHashes: {},
+    })).rejects.toMatchObject({ code: "BUILD_PREVIEW_HASH_STALE" });
+    expect(result.manifest.artifacts.length).toBeGreaterThan(0);
+  });
 });

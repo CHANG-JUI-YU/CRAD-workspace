@@ -1,7 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { initializeProject, loadAuthorProject, paletteModuleFiles } from "@card-workspace/project";
+import { initializeProject, loadAuthorProject, paletteModuleFiles, zhujiModuleFiles } from "@card-workspace/project";
 import { projectManifestSchema, workflowStateSchema } from "@card-workspace/schemas";
 import { makeTemporaryWorkspace } from "@card-workspace/testing";
 import { afterEach, describe, expect, it } from "vitest";
@@ -112,5 +112,103 @@ describe("mode conversion", () => {
       .rejects.toMatchObject({ code: "CONVERSION_TARGET_INCOMPLETE" });
     await expect(apply(baseProposal, { expectedSemanticLoss: [] })).rejects.toMatchObject({ code: "CONVERSION_SEMANTIC_LOSS_UNDECLARED" });
     await expect(apply(baseProposal, { expectedTargetRevisions: {} })).rejects.toMatchObject({ code: "CONVERSION_EXPECTED_ABSENT_REQUIRED" });
+    const sourceProject = await loadAuthorProject(workspace.projectsRoot, "conversion-errors");
+    const staleModeModules = sourceProject.characters[0]!.modules.filter((module) => module.mode === "zhuji");
+    await expect(apply({ ...baseProposal, value: { ...baseProposal.value, source_mode: "palette", target_mode: "zhuji", modules: staleModeModules } }))
+      .rejects.toMatchObject({ code: "CONVERSION_PROPOSAL_INVALID" });
+    const zhujiModules = zhujiModuleFiles.map((item) => ({
+      schema_version: 1 as const, mode: "zhuji" as const, module: item.kind,
+      title: item.title, content: "stale source mode",
+    }));
+    await expect(apply({
+      ...baseProposal,
+      value: { ...baseProposal.value, source_mode: "palette", target_mode: "zhuji", modules: zhujiModules },
+    })).rejects.toMatchObject({ code: "CONVERSION_PROPOSAL_INVALID" });
+
+    await commitWorkflowMutation(projectRoot, {
+      expectedRevision: 1, eventId: "conversion-contract", actor: "engine", occurredAt: "2026-07-14T00:02:00.000Z",
+      update: (state) => workflowStateSchema.parse({
+        ...state,
+        revision: 2,
+        tasks: state.tasks.map((task) => task.id === "convert-errors" ? { ...task, output_contract: "wrong@1" } : task),
+      }),
+    });
+    await expect(apply({ ...baseProposal, base_workflow_revision: 2 })).rejects.toMatchObject({ code: "PROPOSAL_TASK_CONTRACT_MISMATCH" });
+
+    await commitWorkflowMutation(projectRoot, {
+      expectedRevision: 2, eventId: "conversion-critic", actor: "engine", occurredAt: "2026-07-14T00:03:00.000Z",
+      update: (state) => workflowStateSchema.parse({
+        ...state,
+        revision: 3,
+        tasks: state.tasks.map((task) => task.id === "convert-errors" ? { ...task, output_contract: "proposal@1", assigned_agent: "conversion-critic" } : task),
+      }),
+    });
+    await expect(apply({ ...baseProposal, base_workflow_revision: 3, owner: "conversion-critic" })).rejects.toMatchObject({ code: "PROPOSAL_CRITIC_READ_ONLY" });
+    const targetPath = path.join(projectRoot, "characters/alice/palette/basic-information.yaml");
+    await mkdir(path.dirname(targetPath), { recursive: true });
+    await writeFile(targetPath, "existing: true\n", "utf8");
+    await expect(apply(baseProposal)).rejects.toMatchObject({ code: "CONVERSION_PROJECT_INVALID" });
+  });
+});
+
+
+describe("mode conversion provenance branches", () => {
+  it("rejects a conversion module that references an unaccepted fact", async () => {
+    const workspace = await makeTemporaryWorkspace();
+    cleanups.push(workspace.cleanup);
+    const projectRoot = await initializeProject({
+      projectsRoot: workspace.projectsRoot,
+      manifest: projectManifestSchema.parse({
+        schema_version: 1, id: "conversion-provenance", title: "Conversion", kind: "character_card",
+        card: { name: "Conversion" },
+        characters: [{ id: "alice", display_name: "Alice", mode: "zhuji", role: "primary" }],
+      }),
+    });
+    await commitWorkflowMutation(projectRoot, {
+      expectedRevision: 0, eventId: "conversion-provenance-task", actor: "engine", occurredAt: "2026-07-23T00:00:00.000Z",
+      update: (state) => workflowStateSchema.parse({ ...state, revision: 1, tasks: [{
+        id: "convert-provenance", kind: "conversion-proposal", status: "pending", assigned_agent: "mode-conversion",
+        capabilities: ["author-write"], input_artifacts: [], output_contract: "proposal@1", dependencies: [],
+        attempt: 0, max_attempts: 2, extensions: {},
+      }] }),
+    });
+    const modules = paletteModuleFiles.map((item, index) => ({
+      schema_version: 1 as const, mode: "palette" as const, module: item.kind,
+      title: item.title, content: "Converted module",
+      ...(index === 0 ? {
+        sections: [{
+          id: "fact-section",
+          title: "Fact section",
+          content: "Uses a missing fact",
+          provenance: [{ kind: "fact" as const, ref: "missing-fact", requires_single_value: true }],
+        }],
+      } : {}),
+    }));
+    const expectedTargetRevisions = Object.fromEntries(paletteModuleFiles.map((item) => [
+      "characters/alice/palette/" + item.file, "absent" as const,
+    ]));
+    await expect(applyModeConversion({
+      projectsRoot: workspace.projectsRoot,
+      projectId: "conversion-provenance",
+      taskId: "convert-provenance",
+      proposal: {
+        schema_version: 1,
+        id: "conversion-provenance-1",
+        owner: "mode-conversion",
+        base_workflow_revision: 1,
+        value: {
+          kind: "conversion",
+          character_id: "alice",
+          source_mode: "zhuji",
+          target_mode: "palette",
+          modules,
+          mappings: [{ source: "appearance", target: "basic_information", summary: "Map appearance" }],
+        },
+      },
+      eventId: "conversion-provenance-apply",
+      occurredAt: "2026-07-23T00:01:00.000Z",
+      expectedTargetRevisions,
+      expectedSemanticLoss: ["legacy fields"],
+    })).rejects.toMatchObject({ code: "PROPOSAL_FACT_NOT_ACCEPTED" });
   });
 });

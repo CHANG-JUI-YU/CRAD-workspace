@@ -1,5 +1,8 @@
 import type { EjsSource, MvuSource } from "@card-workspace/schemas";
 import { describe, expect, it } from "vitest";
+import { compileEjsExpression, conditionCode } from "../src/official/ejs/generate-expression.js";
+import { emitEjsControl, emitEjsJsonLiteral, emitEjsOutputText, emitEjsStringLiteral, reparseGeneratedEjs } from "../src/official/ejs/ejs-literal.js";
+import { validateEjsSource } from "../src/official/ejs/validate.js";
 
 import {
   compileEjsSource,
@@ -168,4 +171,66 @@ describe("official EJS plugin", () => {
     expect(() => compileEjsSource(entrySource("raw <% malicious() %>"), registry())).toThrow("raw EJS delimiter");
     expect(() => generatePluginContributions(entrySource())).toThrow("MVU path registry");
   });
-});
+  it("covers legacy and recursive EJS expression type guards", () => {
+    const context = { mvuPathRegistry: registry(), aliasesByPath: new Map([["/mood", "cw_mood"]]) };
+    for (const condition of [
+      { path: "/mood", operator: "truthy" },
+      { path: "/mood", operator: "falsy" },
+      { path: "/mood", operator: "equals", value: "calm" },
+      { path: "/level", operator: "greater_than", value: 1 },
+      { path: "/level", operator: "less_than", value: 99 },
+    ] as const) expect(conditionCode(condition as never, context)).toMatch(/./);
+    for (const expression of [
+      { kind: "literal", value: null },
+      { kind: "compare", operator: "equals", left: { kind: "variable", path: "/mood" }, right: { kind: "literal", value: "calm" } },
+      { kind: "compare", operator: "not_equals", left: { kind: "variable", path: "/level" }, right: { kind: "literal", value: 0 } },
+      { kind: "in", value: { kind: "variable", path: "/phase" }, values: ["calm", "alert"] },
+      { kind: "all", conditions: [{ kind: "literal", value: true }] },
+      { kind: "any", conditions: [{ kind: "literal", value: false }] },
+      { kind: "not", condition: { kind: "literal", value: false } },
+      { kind: "range", path: "/level", min: 0, max: 100, min_inclusive: false, max_inclusive: false },
+    ] as const) expect(compileEjsExpression(expression as never, context).type).toBeDefined();
+    for (const expression of [
+      { kind: "compare", operator: "equals", left: { kind: "variable", path: "/mood" }, right: { kind: "literal", value: 1 } },
+      { kind: "compare", operator: "greater_than", left: { kind: "variable", path: "/mood" }, right: { kind: "literal", value: "x" } },
+      { kind: "in", value: { kind: "variable", path: "/phase" }, values: ["missing"] },
+      { kind: "range", path: "/mood", min: 0 },
+      { kind: "range", path: "/level", min: -1 },
+      { kind: "range", path: "/level", max: 101 },
+      { kind: "variable", path: "/missing" },
+    ] as const) expect(() => compileEjsExpression(expression as never, context)).toThrow();
+  });  it("covers EJS legacy comparison and expression fallback branches", () => {
+    const context = { mvuPathRegistry: registry(), aliasesByPath: new Map<string, string>() };
+    expect(conditionCode({ path: "/mood", operator: "not_equals", value: "alert" } as never, context)).toContain("!==");
+    expect(conditionCode({ path: "/level", operator: "greater_than", value: 1 } as never, context)).toContain(">" );
+    expect(conditionCode({ path: "/level", operator: "less_than", value: 99 } as never, context)).toContain("<");
+    expect(() => conditionCode({ path: "/mood", operator: "equals" } as never, context)).toThrow();
+    expect(() => conditionCode({ path: "/mood", operator: "equals", value: 1 } as never, context)).toThrow();
+    expect(conditionCode({ kind: "variable", path: "/mood" } as never, context)).toMatch(/^Boolean\(/u);
+    expect(compileEjsExpression({ kind: "compare", operator: "greater_than", left: { kind: "variable", path: "/level" }, right: { kind: "literal", value: 1 } } as never, context).code).toContain(">" );
+    expect(compileEjsExpression({ kind: "range", path: "/level", min: 1, max: 2, min_inclusive: true, max_inclusive: true } as never, context).code).toContain(">=");
+    expect(compileEjsExpression({ kind: "range", path: "/level" } as never, context).code).toBe("");
+  });
+  it("covers EJS literal reparsing and validation guards", () => {
+    expect(emitEjsStringLiteral("line")).toContain("line");
+    expect(emitEjsJsonLiteral({ value: "ok" })).toContain("value");
+    expect(emitEjsOutputText("safe")).toContain("<%=");
+    expect(emitEjsControl("if (true) {")).toContain("<%_");
+    expect(() => emitEjsControl("line" + String.fromCharCode(10) + "break")).toThrow();
+    expect(reparseGeneratedEjs("prefix <%= \"ok\" %>")).toContain("prefix");
+    expect(reparseGeneratedEjs("<%_ define(\"x\") _%><%_ if (true) { _%>x<%_ } _%>")).toContain("x");
+    expect(reparseGeneratedEjs("<%_ if (true) { _%>x<%_ } else { _%>y<%_ } _%>")).toContain("x");
+    for (const source of ["<%", "<% bad %>", "<%_ } _%>", "<%_ if (true) { _%>"]) {
+      expect(() => reparseGeneratedEjs(source)).toThrow();
+    }
+    const valid = entrySource();
+    expect(validateEjsSource(valid, registry()).aliases).toHaveLength(1);
+    expect(() => validateEjsSource({ ...valid, preprocessing: [{ id: "missing", path: "/missing" }] }, registry())).toThrow();
+    expect(() => validateEjsSource({ ...valid, preprocessing: [{ id: "same", path: "/mood" }, { id: "same", path: "/level" }] }, registry())).toThrow();
+    const range = { id: "range", branches: [
+      { when: { kind: "range", path: "/level", min: 0, max: 1 }, content: "a" },
+      { when: { kind: "range", path: "/level", min: 3, max: 4 }, content: "b" },
+    ] };
+    expect(() => validateEjsSource({ ...valid, entries: [], sections: [range] }, registry())).toThrow("fallback");
+    expect(validateEjsSource({ ...valid, entries: [], sections: [{ ...range, fallback: "other" }] }, registry()).aliases).toHaveLength(1);
+  });});

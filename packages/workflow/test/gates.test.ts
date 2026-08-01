@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { pluginArtifactSchema } from "@card-workspace/schemas";
 
-import { createRejectedGateSuccessor, decideGate, deriveCurrentContentSnapshot, deriveGateSnapshot, recordInterviewAnswer, supersedeStaleGates, supersedeStalePluginEvidence, WORKFLOW_GATE_ORDER } from "../src/index.js";
+import { createDecision, createRejectedGateSuccessor, decideGate, deriveCurrentContentSnapshot, deriveGateSnapshot, recordInterviewAnswer, supersedeStaleGates, supersedeStalePluginEvidence, WORKFLOW_GATE_ORDER } from "../src/index.js";
 import { makeState, REVISION_A, REVISION_B } from "./helpers.js";
 
 const gateInput = (gateId: "facts" | "blueprint" | "content" | "publish", action: "approve" | "reject" | "not_required" = "approve") => ({
@@ -10,6 +10,29 @@ const gateInput = (gateId: "facts" | "blueprint" | "content" | "publish", action
 });
 
 describe("interview, decisions and gates", () => {
+  it("createDecision covers direct gate guard and optional decision metadata", () => {
+    expect(() => createDecision({
+      id: "director-gate-decision",
+      kind: "gate.facts",
+      actor: "director",
+      actorRole: "director",
+      decidedAt: "2026-07-14T00:00:00.000Z",
+      inputRevisions: [],
+      summary: "director cannot decide gate",
+    })).toThrow(/Director/u);
+
+    expect(createDecision({
+      id: "user-decision",
+      kind: "note",
+      actor: "user-a",
+      actorRole: "user",
+      decidedAt: "2026-07-14T00:00:00.000Z",
+      inputRevisions: [],
+      summary: "metadata",
+      option: "accept",
+      impact: "low",
+    })).toMatchObject({ option: "accept", impact: "low" });
+  });
   it("四 gate 順序固定，Director 不可批准", () => {
     expect(WORKFLOW_GATE_ORDER).toEqual(["facts", "blueprint", "content", "publish"]);
     expect(() => decideGate(makeState(), gateInput("blueprint"))).toThrow(/facts/u);
@@ -162,5 +185,73 @@ describe("interview, decisions and gates", () => {
     });
 
     expect(supersedeStalePluginEvidence(state, [mvu, { ...ejs, status: "approved" }], REVISION_A)).toBe(state);
+  });  it("covers gate snapshot filtering, optional fields, and rejection edge branches", () => {
+    const baseGates = [
+      { id: "facts", status: "not_required" as const, input_revisions: [], extensions: {} },
+      { id: "blueprint", status: "approved" as const, input_revisions: [], extensions: {} },
+      { id: "content", status: "approved" as const, input_revisions: [], extensions: {} },
+      { id: "publish", status: "pending" as const, input_revisions: [], extensions: {} },
+    ];
+    const filtered = makeState({
+      stage: "content_review",
+      gates: baseGates,
+      artifacts: [
+        { id: "author-a", status: "missing", revision: REVISION_A, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} },
+        { id: "author-b", status: "approved", revision: REVISION_A, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} },
+        { id: "plugin-official.ejs", status: "draft", revision: REVISION_A, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} },
+        { id: "plugin-official.html", status: "approved", revision: REVISION_B, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} },
+      ],
+    });
+    expect(deriveCurrentContentSnapshot(filtered).map((item) => item.id)).toEqual(["author-b", "plugin-official.html"]);
+    expect(supersedeStaleGates(makeState(), new Map())).toEqual(makeState());
+    const withSelection = makeState({ extensions: { plugin_selection_revision: REVISION_A } });
+    expect(supersedeStalePluginEvidence(withSelection, [], REVISION_A)).toBe(withSelection);
+    expect(() => decideGate(makeState(), { ...gateInput("facts"), findings: [{ id: "workspace", category: "workspace", severity: "error", overridable: true }] })).toThrow();
+    expect(() => decideGate(makeState(), { ...gateInput("facts"), findings: [{ id: "workspace", category: "workspace", severity: "error", overridable: true }], overrideReason: "" })).toThrow();
+    expect(() => decideGate(makeState(), { ...gateInput("facts"), gateId: "unknown" as never })).toThrow();
+    expect(() => createRejectedGateSuccessor(makeState().gates[0]!, { id: "successor", kind: "task", assignedAgent: "director", capabilities: [], inputArtifacts: [], outputContract: "proposal@1", dependencies: [], maxAttempts: 1 })).toThrow();
+    const publish = makeState({
+      stage: "publish_review",
+      gates: baseGates,
+      artifacts: [{ id: "preview-current", status: "reviewed", revision: REVISION_A, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} }],
+    });
+    expect(decideGate(publish, { ...gateInput("publish", "reject"), inputRevisions: [{ id: "preview-current", revision: REVISION_A }], rejectionRoute: "repreview" }).state.stage).toBe("compile_preview");
+    expect(decideGate(publish, { ...gateInput("publish", "reject"), decisionId: "publish-content", inputRevisions: [{ id: "preview-current", revision: REVISION_A }], rejectionRoute: "content_revision", revisionScope: ["world"] }).state.stage).toBe("content_review");
+    const content = makeState({
+      stage: "content_review",
+      gates: baseGates,
+      artifacts: [{ id: "author-a", status: "approved", revision: REVISION_A, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} }],
+    });
+    expect(decideGate(content, { ...gateInput("content", "reject"), inputRevisions: [{ id: "author-a", revision: REVISION_A }], rejectionRoute: "content_revision", revisionScope: ["character", "character"] }).state.extensions.needs_revision_scope).toEqual(["character"]);
+  });
+  it("covers gate snapshot variants and rejection route guards", () => {
+    const baseGates = [
+      { id: "facts", status: "not_required" as const, input_revisions: [], extensions: {} },
+      { id: "blueprint", status: "approved" as const, input_revisions: [], extensions: {} },
+      { id: "content", status: "approved" as const, input_revisions: [], extensions: {} },
+      { id: "publish", status: "pending" as const, input_revisions: [], extensions: {} },
+    ];
+    const facts = makeState({ stage: "facts_review", gates: baseGates, artifacts: [
+      { id: "fact-register", status: "approved", revision: REVISION_A, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} },
+      { id: "conflict-register", status: "approved", revision: REVISION_B, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} },
+    ] });
+    expect(deriveGateSnapshot(facts, "facts").map((item) => item.id)).toEqual(["conflict-register", "fact-register"]);
+    const content = makeState({ stage: "content_review", gates: baseGates, artifacts: [
+      { id: "author-alice.yaml", status: "reviewed", revision: REVISION_A, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} },
+      { id: "plugin-official.mvu-zod", status: "approved", revision: REVISION_B, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} },
+      { id: "preview-old", status: "stale", revision: REVISION_A, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} },
+    ] });
+    expect(deriveGateSnapshot(content, "content").map((item) => item.id)).toEqual(["author-alice.yaml", "plugin-official.mvu-zod"]);
+    const publish = makeState({ stage: "publish_review", gates: baseGates, artifacts: [
+      { id: "preview-a", status: "reviewed", revision: REVISION_A, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} },
+      { id: "preview-b", status: "reviewed", revision: REVISION_B, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} },
+    ] });
+    expect(() => deriveGateSnapshot(publish, "publish")).toThrow();
+    const blueprint = makeState({ stage: "blueprint", gates: baseGates, artifacts: [{ id: "blueprint", status: "draft", revision: REVISION_A, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} }] });
+    const rejected = decideGate(blueprint, { ...gateInput("blueprint", "reject"), inputRevisions: [{ id: "blueprint", revision: REVISION_A }], rejectionRoute: "blueprint_successor" });
+    expect(rejected.state.tasks.at(-1)?.id).toContain("create-blueprint-successor");
+    const cancelState = makeState({ stage: "publish_review", gates: baseGates, artifacts: [{ id: "preview-current", status: "reviewed", revision: REVISION_A, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} }] });
+    const cancelled = decideGate(cancelState, { ...gateInput("publish", "reject"), inputRevisions: [{ id: "preview-current", revision: REVISION_A }], rejectionRoute: "cancel" });
+    expect(cancelled.state.outcome?.status).toBe("closed");
   });
 });

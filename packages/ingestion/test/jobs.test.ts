@@ -585,4 +585,234 @@ describe("resumable ingestion jobs", () => {
       expect(sourceEvents[index].prior_revision).toBe(eventSemanticRevision(sourceEvents[index - 1]));
     }
   });
+  it("covers job identity, lease, task, result, and supersede guard branches", async () => {
+    const f = await fixture("short source");
+    await expect(getJobStatus(f.projectRoot, "job-missing")).rejects.toMatchObject({ code: "JOB_NOT_FOUND" });
+    await mkdir(path.join(f.projectRoot, "sources", "jobs"), { recursive: true });
+    await writeFile(path.join(f.projectRoot, "sources", "jobs", "job-malformed.json"), "not-json\n", "utf8");
+    await expect(getJobStatus(f.projectRoot, "job-malformed")).rejects.toMatchObject({ code: "JOB_NOT_FOUND" });
+    const jobFile = path.join(f.projectRoot, "sources", "jobs", f.created.job.id + ".json");
+    const pendingRaw = JSON.parse(await readFile(jobFile, "utf8")) as Record<string, unknown>;
+    await writeFile(jobFile, JSON.stringify({
+      ...pendingRaw,
+      status: "completed",
+      tasks: (pendingRaw.tasks as Array<Record<string, unknown>>).map((task) => ({ ...task, status: "completed", result_batch_id: "batch-missing", result_batch_hash: sha("a") })),
+    }), "utf8");
+    await expect(validateCompletedJobResults(f.projectRoot, f.created.job.id)).rejects.toMatchObject({ code: "JOB_RESULT_BATCH_INVALID" });
+    await writeFile(jobFile, JSON.stringify(pendingRaw), "utf8");    await expect(readJobChunkPayload(f.projectRoot, f.created.job.id, "chunk-missing")).rejects.toMatchObject({ code: "JOB_TASK_NOT_FOUND" });
+    await expect(claimChunkTask(claimOptions(f, { leaseDurationMs: 0 }))).rejects.toMatchObject({ code: "JOB_LEASE_DURATION_INVALID" });
+    await expect(claimChunkTask(claimOptions(f, { expectedRevision: -1 }))).rejects.toMatchObject({ code: "JOB_REVISION_CONFLICT" });
+    await expect(claimChunkTask(claimOptions(f, { chunkId: "chunk-missing" }))).rejects.toMatchObject({ code: "JOB_TASK_NOT_FOUND" });
+
+    const claimed = await claimChunkTask(claimOptions(f));
+    await expect(claimChunkTask({ ...claimOptions(f), expectedRevision: claimed.job.revision, leaseId: "lease-2" }))
+      .rejects.toMatchObject({ code: "JOB_TASK_NOT_CLAIMABLE" });
+    await expect(completeChunkTask({
+      ...resultIdentity(f, claimed.job.revision), resultBatchId: "batch-missing", resultBatchHash: sha("a"),
+    })).rejects.toMatchObject({ code: "JOB_RESULT_BATCH_INVALID" });
+    await expect(failChunkTask({
+      ...resultIdentity(f, claimed.job.revision), owner: "other-worker", diagnostics: ["failed"],
+    })).rejects.toMatchObject({ code: "JOB_LEASE_STALE" });
+    await expect(failChunkTask({
+      ...resultIdentity(f, claimed.job.revision), chunkHash: sha("f"), diagnostics: ["failed"],
+    })).rejects.toMatchObject({ code: "JOB_CHUNK_HASH_MISMATCH" });
+
+    const failed = await failChunkTask({
+      ...resultIdentity(f, claimed.job.revision), diagnostics: ["provider-timeout"],
+    });
+    expect(failed.job.status).toBe("failed");
+    const superseded = await supersedeJob({ projectRoot: f.projectRoot, jobId: f.created.job.id, expectedRevision: failed.job.revision, actor: "tester", now: () => t0 });
+    expect(superseded.job.status).toBe("superseded");
+    await expect(supersedeJob({ projectRoot: f.projectRoot, jobId: f.created.job.id, expectedRevision: superseded.job.revision, actor: "tester", now: () => t0 }))
+      .rejects.toMatchObject({ code: "JOB_SUPERSEDED" });
+    await expect(claimChunkTask({ ...claimOptions(f), expectedRevision: superseded.job.revision }))
+      .rejects.toMatchObject({ code: "JOB_SUPERSEDED" });
+  });
+
+  it("covers empty jobs, immutable identity drift, and explicit result-input guards", async () => {
+    const empty = await fixture("");
+    expect(empty.created.job.status).toBe("completed");
+    expect(empty.created.job.tasks).toEqual([]);
+    await expect(validateCompletedJobResults(empty.projectRoot, empty.created.job.id)).resolves.toMatchObject({ results: [] });
+
+    const f = await fixture("short source");
+    const jobFile = path.join(f.projectRoot, "sources", "jobs", f.created.job.id + ".json");
+    const original = JSON.parse(await readFile(jobFile, "utf8")) as Record<string, unknown>;
+    await writeFile(jobFile, JSON.stringify({ ...original, id: "wrong-id" }), "utf8");
+    await expect(getJobStatus(f.projectRoot, f.created.job.id)).rejects.toMatchObject({ code: "JOB_IDENTITY_MISMATCH" });
+    await writeFile(jobFile, JSON.stringify(original), "utf8");
+    await writeFile(jobFile, JSON.stringify({ ...original, input_revision: sha("a") }), "utf8");
+    await expect(getJobStatus(f.projectRoot, f.created.job.id)).rejects.toMatchObject({ code: "JOB_IDENTITY_MISMATCH" });
+    await writeFile(jobFile, JSON.stringify(original), "utf8");
+
+    await expect(claimChunkTask(claimOptions(f, { owner: "bad/owner" }))).rejects.toThrow();
+    const claimed = await claimChunkTask(claimOptions(f));
+    await expect(completeChunkTask({
+      ...resultIdentity(f, claimed.job.revision),
+      sourceRevisionId: sha("z"),
+      resultBatchId: "batch-missing",
+      resultBatchHash: sha("a"),
+    })).rejects.toMatchObject({ code: "JOB_INPUT_MISMATCH" });
+    await expect(completeChunkTask({
+      ...resultIdentity(f, claimed.job.revision),
+      chunkSetId: "other-set",
+      resultBatchId: "batch-missing",
+      resultBatchHash: sha("a"),
+    })).rejects.toMatchObject({ code: "JOB_INPUT_MISMATCH" });
+
+  });
+  it("rejects stored candidate batches with submitted-state and evidence identity drift", async () => {
+    const f = await fixture("short source");
+    const claimed = await claimChunkTask(claimOptions(f));
+    const task = claimed.job.tasks[0]!;
+    const original = await submitCreativeBatch(f, claimed.job.revision, task.chunk_id, "status-drift");
+    const storedPath = path.join(f.projectRoot, "facts", "candidates", original.batchId + ".json");
+    const raw = JSON.parse(await readFile(storedPath, "utf8")) as CandidateBatch;
+    const rejected = {
+      ...raw,
+      candidates: raw.candidates.map((candidate) => ({ ...candidate, status: "rejected" as const })),
+    };
+    const rejectedHash = computeCandidateBatchHash(rejected);
+    const rejectedBatch = {
+      ...rejected,
+      id: "batch-" + rejectedHash.slice("sha256:".length),
+      content_hash: rejectedHash,
+    };
+    await writeFile(path.join(f.projectRoot, "facts", "candidates", rejectedBatch.id + ".json"), canonicalJson(rejectedBatch), "utf8");
+    await expect(completeChunkTask({
+      ...resultIdentity(f, claimed.job.revision),
+      resultBatchId: rejectedBatch.id,
+      resultBatchHash: rejectedBatch.content_hash,
+    })).rejects.toMatchObject({ code: "JOB_RESULT_BATCH_MISMATCH" });
+  });
+});
+
+it("covers ingestion job read, claim, completion, and malformed persistence guards", async () => {
+  const fixtureValue = await fixture("word ".repeat(200));
+  const job = fixtureValue.created.job;
+  const task = job.tasks[0]!;
+  await expect(getJobStatus(fixtureValue.projectRoot, "missing-job")).rejects.toMatchObject({ code: "JOB_NOT_FOUND" });
+  await expect(readJobChunkPayload(fixtureValue.projectRoot, job.id, "missing-chunk")).rejects.toMatchObject({ code: "JOB_TASK_NOT_FOUND" });
+  await expect(validateCompletedJobResults(fixtureValue.projectRoot, job.id)).rejects.toMatchObject({ code: "JOB_NOT_COMPLETED" });
+  await expect(claimChunkTask({
+    projectRoot: fixtureValue.projectRoot,
+    jobId: job.id,
+    chunkId: task.chunk_id,
+    expectedRevision: job.revision,
+    owner: "tester",
+    leaseId: "invalid-duration",
+    leaseDurationMs: 0,
+  })).rejects.toMatchObject({ code: "JOB_LEASE_DURATION_INVALID" });
+  await expect(claimChunkTask({
+    projectRoot: fixtureValue.projectRoot,
+    jobId: job.id,
+    chunkId: task.chunk_id,
+    expectedRevision: job.revision + 1,
+    owner: "tester",
+    leaseId: "lease",
+    leaseDurationMs: 1000,
+  })).rejects.toMatchObject({ code: "JOB_REVISION_CONFLICT" });
+
+  await mkdir(path.join(fixtureValue.projectRoot, "sources", "jobs"), { recursive: true });
+  await writeFile(path.join(fixtureValue.projectRoot, "sources", "jobs", "malformed.json"), "not-json", "utf8");
+  await expect(getJobStatus(fixtureValue.projectRoot, "malformed")).rejects.toMatchObject({ code: "JOB_NOT_FOUND" });
+});
+
+
+it("covers remaining ingestion job status and stored-batch branch edges", async () => {
+  const empty = await fixture("");
+  await expect(claimChunkTask({ projectRoot: empty.projectRoot, jobId: empty.created.job.id, chunkId: "missing", expectedRevision: empty.created.job.revision, owner: "worker", leaseId: "lease", leaseDurationMs: 1000, actor: "worker", now: () => t0 })).rejects.toMatchObject({ code: "JOB_COMPLETED" });
+  const f = await fixture("short source");
+
+  const claimed = await claimChunkTask(claimOptions(f));
+  const task = claimed.job.tasks[0]!;
+  const submitted = await submitCreativeBatch(f, claimed.job.revision, task.chunk_id, "duplicate-candidate");
+  const batchPath = path.join(f.projectRoot, "facts", "candidates", submitted.batchId + ".json");
+  const batch = JSON.parse(await readFile(batchPath, "utf8")) as CandidateBatch;
+  const duplicateCandidates = { ...batch, candidates: [batch.candidates[0]!, batch.candidates[0]!] };
+  const duplicateCandidatesHash = computeCandidateBatchHash(duplicateCandidates);
+  const duplicateCandidatesBatch = { ...duplicateCandidates, id: "batch-" + duplicateCandidatesHash.slice("sha256:".length), content_hash: duplicateCandidatesHash };
+  await writeFile(path.join(f.projectRoot, "facts", "candidates", duplicateCandidatesBatch.id + ".json"), canonicalJson(duplicateCandidatesBatch), "utf8");
+  await expect(completeChunkTask({ ...resultIdentity(f, claimed.job.revision), resultBatchId: duplicateCandidatesBatch.id, resultBatchHash: duplicateCandidatesBatch.content_hash })).rejects.toMatchObject({ code: "JOB_RESULT_BATCH_MISMATCH" });
+
+  const duplicateEvidence = {
+    ...batch.candidates[0]!,
+    evidence: [{
+      id: "duplicate-evidence", source_id: batch.source_id, source_revision_id: batch.source_revision_id,
+      chunk_set_id: batch.chunk_set_id, chunk_id: batch.chunk_id, chunk_hash: batch.chunk_hash,
+      quote: "evidence", normalized_character_range: [0, 0], normalized_line_range: [1, 1],
+    }, {
+      id: "duplicate-evidence", source_id: batch.source_id, source_revision_id: batch.source_revision_id,
+      chunk_set_id: batch.chunk_set_id, chunk_id: batch.chunk_id, chunk_hash: batch.chunk_hash,
+      quote: "evidence", normalized_character_range: [0, 0], normalized_line_range: [1, 1],
+    }],
+  };
+  const duplicateEvidenceDraft = { ...batch, candidates: [duplicateEvidence] };
+  const duplicateEvidenceHash = computeCandidateBatchHash(duplicateEvidenceDraft);
+  const duplicateEvidenceBatch = { ...duplicateEvidenceDraft, id: "batch-" + duplicateEvidenceHash.slice("sha256:".length), content_hash: duplicateEvidenceHash };
+  await writeFile(path.join(f.projectRoot, "facts", "candidates", duplicateEvidenceBatch.id + ".json"), canonicalJson(duplicateEvidenceBatch), "utf8");
+  await expect(completeChunkTask({ ...resultIdentity(f, claimed.job.revision), resultBatchId: duplicateEvidenceBatch.id, resultBatchHash: duplicateEvidenceBatch.content_hash })).rejects.toMatchObject({ code: "JOB_RESULT_BATCH_MISMATCH" });
+
+  await writeFile(path.join(f.projectRoot, "sources", "journals", "source-events.jsonl"), "", "utf8");
+  const createdEmptyJournal = await createExtractionJob({
+    projectRoot: f.projectRoot, sourceId: "novel", sourceRevisionId: f.intake.revision.id,
+    chunkSetId: f.chunks.manifest.id, createdBy: "tester", curationRunId: "empty-journal", now: () => t0,
+  });
+  expect(createdEmptyJournal.idempotent).toBe(false);
+});
+
+it("covers remaining job optional actors, evidence identity, result references, and completion guards", async () => {
+  const f = await fixture("short source");
+  const claimed = await claimChunkTask({ ...claimOptions(f), actor: undefined, now: undefined, leaseDurationMs: 600_000 });
+  const task = claimed.job.tasks[0]!;
+  const submitted = await submitCreativeBatch(f, claimed.job.revision, task.chunk_id, "optional-now");
+  const batchPath = path.join(f.projectRoot, "facts", "candidates", submitted.batchId + ".json");
+  const batch = JSON.parse(await readFile(batchPath, "utf8")) as CandidateBatch;
+  const candidate = batch.candidates[0]!;
+  const mismatchedEvidence = {
+    id: "mismatched-evidence",
+    source_id: "other-source",
+    source_revision_id: batch.source_revision_id,
+    chunk_set_id: batch.chunk_set_id,
+    chunk_id: batch.chunk_id,
+    chunk_hash: batch.chunk_hash,
+    quote: "evidence",
+    normalized_character_range: [0, 0] as [number, number],
+    normalized_line_range: [1, 1] as [number, number],
+  };
+  const invalidEvidenceBatch = { ...batch, candidates: [{ ...candidate, evidence: [mismatchedEvidence] }] };
+  const invalidEvidenceHash = computeCandidateBatchHash(invalidEvidenceBatch);
+  const invalidEvidenceId = `batch-${invalidEvidenceHash.slice("sha256:".length)}`;
+  await writeFile(path.join(f.projectRoot, "facts", "candidates", invalidEvidenceId + ".json"), canonicalJson({ ...invalidEvidenceBatch, id: invalidEvidenceId, content_hash: invalidEvidenceHash }), "utf8");
+  await expect(completeChunkTask({
+    ...resultIdentity(f, claimed.job.revision),
+    now: undefined,
+    resultBatchId: invalidEvidenceId,
+    resultBatchHash: invalidEvidenceHash,
+  })).rejects.toMatchObject({ code: "JOB_RESULT_BATCH_MISMATCH" });
+
+  const completed = await completeChunkTask({
+    ...resultIdentity(f, claimed.job.revision),
+    now: undefined,
+    resultBatchId: submitted.batchId,
+    resultBatchHash: submitted.batchHash,
+  });
+  const superseded = await supersedeJob({
+    projectRoot: f.projectRoot,
+    jobId: f.created.job.id,
+    expectedRevision: completed.job.revision,
+    actor: undefined,
+    now: undefined,
+  });
+  expect(superseded.job.tasks[0]).toMatchObject({ result_batch_id: submitted.batchId, result_batch_hash: submitted.batchHash });
+
+  const missingResult = await fixture("short source");
+  const missingResultPath = path.join(missingResult.projectRoot, "sources", "jobs", missingResult.created.job.id + ".json");
+  const missingResultRaw = JSON.parse(await readFile(missingResultPath, "utf8")) as Record<string, unknown>;
+  await writeFile(missingResultPath, canonicalJson({
+    ...missingResultRaw,
+    status: "completed",
+    tasks: (missingResultRaw.tasks as Array<Record<string, unknown>>).map((item) => ({ ...item, status: "completed" })),
+  }), "utf8");
+  await expect(validateCompletedJobResults(missingResult.projectRoot, missingResult.created.job.id)).rejects.toMatchObject({ code: "JOB_NOT_FOUND" });
 });

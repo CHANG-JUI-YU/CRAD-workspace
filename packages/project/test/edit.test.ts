@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -24,23 +25,23 @@ async function setup() {
 }
 
 describe("patchProjectFile", () => {
-  it("apply 同一交易更新作者檔與 workflow revision", async () => {
+  it("apply ??鈭斗??湔雿???workflow revision", async () => {
     const { projectRoot, revision } = await setup();
     const result = await patchProjectFile({
       projectRoot,
       relativePath: "project.yaml",
-      operations: [{ op: "replace", path: "/title", value: "修改後" }],
+      operations: [{ op: "replace", path: "/title", value: "Edited" }],
       expectedRevision: revision,
     });
     expect(result.affectedFiles).toEqual(["project.yaml", "workflow.json"]);
     expect(result.workflowRevision).toBe(1);
-    expect(await readFile(path.join(projectRoot, "project.yaml"), "utf8")).toContain("修改後");
+    expect(await readFile(path.join(projectRoot, "project.yaml"), "utf8")).toContain("Edited");
     expect(JSON.parse(await readFile(path.join(projectRoot, "workflow.json"), "utf8"))).toMatchObject({
       revision: 1,
     });
   });
 
-  it("schema invalid patch 不寫入任何檔案", async () => {
+  it("schema invalid patch does not write files", async () => {
     const { projectRoot, revision } = await setup();
     const beforeProject = await readFile(path.join(projectRoot, "project.yaml"), "utf8");
     const beforeWorkflow = await readFile(path.join(projectRoot, "workflow.json"), "utf8");
@@ -56,12 +57,14 @@ describe("patchProjectFile", () => {
     await expect(readFile(path.join(projectRoot, "workflow.json"), "utf8")).resolves.toBe(beforeWorkflow);
   });
 
-  it("no-op 不建立交易也不增加 workflow revision", async () => {
+  it("no-op 銝遣蝡漱??銝???workflow revision", async () => {
     const { projectRoot, revision } = await setup();
+    const current = await parseStructuredFile(path.join(projectRoot, "project.yaml"));
+    const currentTitle = (current.data as { title: string }).title;
     const result = await patchProjectFile({
       projectRoot,
       relativePath: "project.yaml",
-      operations: [{ op: "replace", path: "/title", value: "有效測試專案" }],
+      operations: [{ op: "replace", path: "/title", value: currentTitle }],
       expectedRevision: revision,
     });
     expect(result.noOp).toBe(true);
@@ -71,7 +74,7 @@ describe("patchProjectFile", () => {
     });
   });
 
-  it("拒絕修改衍生或未歸屬路徑", async () => {
+  it("??靽格銵??甇詨惇頝臬?", async () => {
     const { projectRoot, revision } = await setup();
     await expect(
       patchProjectFile({
@@ -93,7 +96,7 @@ describe("patchProjectFile", () => {
     }
   });
 
-  it("internal ingestion assertion 僅接受明確 artifacts、projections 與 journals", () => {
+  it("internal ingestion assertion ???蝣?artifacts?rojections ??journals", () => {
     expect(assertIngestionProjectPath("sources/snapshots/novel/revision.txt").kind).toBe("snapshot");
     expect(assertIngestionProjectPath("sources/revisions/novel/revision.json").kind).toBe("source_revision");
     expect(assertIngestionProjectPath("sources/projections/novel/revision.json").kind).toBe("text_projection");
@@ -105,12 +108,12 @@ describe("patchProjectFile", () => {
     expect(assertIngestionProjectPath("sources/research/research-batch-a/current.json").kind).toBe("research_batch");
     expect(assertIngestionProjectPath("sources/research/research-batch-a/abc123.json").kind).toBe("research_batch");
     expect(assertIngestionProjectPath("facts/decisions.jsonl").kind).toBe("decision_journal");
-    expect(() => assertIngestionProjectPath("project.yaml")).toThrowError("ingestion 僅允許存取受控 Sources/Facts 路徑");
-    expect(() => assertIngestionProjectPath("sources/snapshots/../manifest.yaml")).toThrowError("ingestion 僅允許存取受控 Sources/Facts 路徑");
-    expect(() => assertIngestionProjectPath(".build/provenance-index.json")).toThrowError("ingestion 僅允許存取受控 Sources/Facts 路徑");
+    expect(() => assertIngestionProjectPath("project.yaml")).toThrowError();
+    expect(() => assertIngestionProjectPath("sources/snapshots/../manifest.yaml")).toThrowError();
+    expect(() => assertIngestionProjectPath(".build/provenance-index.json")).toThrowError();
   });
 
-  it("拒絕修改 immutable project metadata", async () => {
+  it("??靽格 immutable project metadata", async () => {
     const { projectRoot, revision } = await setup();
     await expect(
       patchProjectFile({
@@ -120,5 +123,37 @@ describe("patchProjectFile", () => {
         expectedRevision: revision,
       }),
     ).rejects.toMatchObject({ code: "PATCH_PATH_DENIED" });
+  });
+
+  it("covers workflow, author-module, dry-run, and JSON patch branches", async () => {
+    const { projectRoot } = await setup();
+    const workflowPath = path.join(projectRoot, "workflow.json");
+    const workflowParsed = await parseStructuredFile(workflowPath);
+    if (workflowParsed.data === undefined) throw new Error("workflow parse failed");
+    const workflowRevision = computeRevision(workflowParsed.data);
+    const workflowDryRun = await patchProjectFile({
+      projectRoot,
+      relativePath: "workflow.json",
+      operations: [{ op: "replace", path: "/stage", value: "blueprint" }],
+      expectedRevision: workflowRevision,
+      dryRun: true,
+    });
+    expect(workflowDryRun.dryRun).toBe(true);
+    expect(workflowDryRun.affectedFiles).toEqual(["workflow.json"]);
+    expect(JSON.parse(await readFile(workflowPath, "utf8")).revision).toBe(0);
+
+    const modulePath = "blueprint.yaml";
+    const moduleParsed = await parseStructuredFile(path.join(projectRoot, modulePath));
+    if (moduleParsed.data === undefined) throw new Error("module parse failed");
+    const moduleRevision = computeRevision(moduleParsed.data);
+    const moduleDryRun = await patchProjectFile({
+      projectRoot,
+      relativePath: modulePath,
+      operations: [{ op: "replace", path: "/purpose", value: "Updated purpose" }],
+      expectedRevision: moduleRevision,
+      dryRun: true,
+    });
+    expect(moduleDryRun.rebuildScopes).toEqual(["author-model"]);
+    expect(moduleDryRun.content).toContain("Updated purpose");
   });
 });

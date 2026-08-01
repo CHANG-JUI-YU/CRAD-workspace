@@ -216,4 +216,23 @@ describe("official HTML plugin", () => {
       "#cw-safe",
     )).toThrow("root scope");
   });
+  it("covers HTML sanitizer node and CSS policy rejection branches", () => {
+    expect(() => reparseGeneratedMarkup("<script>alert(1)</script>", "cw-safe")).toThrow("generated markup");
+    expect(() => reparseGeneratedMarkup("hello", "cw-safe")).toThrow("root element");
+    expect(() => reparseGeneratedMarkup("<div id=\"a\"></div><div id=\"b\"></div>", "cw-safe")).toThrow("root element");
+    expect(() => reparseGeneratedMarkup("<!-- comment --><div id=\"cw-safe\"></div>", "cw-safe")).not.toThrow();
+    expect(() => reparseGeneratedMarkup("<unknown id=\"cw-safe\"></unknown>", "cw-safe")).toThrow("element");
+    expect(() => reparseGeneratedMarkup("<div id=\"cw-safe\" data-cw-x=\"javascript:alert(1)\"></div>", "cw-safe")).toThrow("scheme");
+    expect(() => reparseGeneratedMarkup("<div></div>", "cw-safe")).toThrow("root id");
+
+    expect(() => reparseGeneratedCss("@unknown {}", "#cw-safe")).toThrow("at-rule");
+    expect(() => reparseGeneratedCss("@media url(https://example.test) {}", "#cw-safe")).toThrow("at-rule");
+    expect(() => reparseGeneratedCss("#cw-safe{unknown:red}", "#cw-safe")).toThrow("property");
+    expect(() => reparseGeneratedCss("#cw-safe{color:unknown(red)}", "#cw-safe")).toThrow("function");
+    expect(() => reparseGeneratedCss("#cw-safe{background:calc(1px + 1px)}", "#cw-safe")).not.toThrow();
+    expect(() => reparseGeneratedCss("#cw-safe{background:url(https://example.test)}", "#cw-safe")).toThrow("URL");
+    expect(() => reparseGeneratedCss("#cw-safe{color:red} .other{color:blue}", "#cw-safe")).toThrow("root scope");
+    expect(() => reparseGeneratedCss("#cw-safe{color:red}", ".cw-safe")).toThrow("selector");
+    expect(() => reparseGeneratedCss("\\#cw-safe{color:red}", "#cw-safe")).toThrow("escape");
+  });
 });

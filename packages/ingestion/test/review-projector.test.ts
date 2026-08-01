@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -221,6 +221,11 @@ describe("fact review and projection", () => {
     });
     expect(resolved.conflict.status).toBe("resolved");
     expect(resolved.projection.register.facts.find((item) => item.id === "fact-b")?.status).toBe("rejected");
+    await expect(queryFacts(root, { status: "accepted", subject: "alice", predicate: "appearance.hair", classification: "source_fact", sourceId: "novel", gateStatus: "clear" })).resolves.toMatchObject({ facts: [{ fact: { id: "fact-a" } }] });
+    const acceptedRows = await queryFacts(root, { status: "accepted", subject: "alice", predicate: "appearance.hair", classification: "source_fact", sourceId: "novel" });
+    expect(acceptedRows.facts).toHaveLength(1);
+    expect((await queryFacts(root, { status: "rejected", gateStatus: "clear" })).facts).toHaveLength(1);
+    expect((await queryFacts(root, { subject: "nobody" })).facts).toEqual([]);
   });
 
   it("legacy placeholder candidate 可 reject 但不可 accept", async () => {
@@ -426,6 +431,32 @@ describe("resolution and immutable journal", () => {
       .toThrowError();
   });
 
+  it("covers resolution decision member, assignment, and overlap guards", () => {
+    expect(() => validateResolutionDecision({ ...base, conflict_id: "other", type: "unresolved" }, conflict)).toThrowError();
+    expect(() => validateResolutionDecision({ ...base, type: "choose_one", accepted_fact_ids: [], rejected_fact_ids: ["fact-a", "fact-b"] }, conflict)).toThrowError();
+    expect(() => validateResolutionDecision({ ...base, type: "supersede", accepted_fact_ids: ["fact-a", "fact-b"], rejected_fact_ids: [] }, conflict)).toThrowError();
+    expect(() => validateResolutionDecision({ ...base, type: "choose_one", accepted_fact_ids: ["fact-a"], rejected_fact_ids: [] }, conflict)).toThrowError();
+    expect(() => validateResolutionDecision({ ...base, type: "coexist", accepted_fact_ids: ["fact-a"], rejected_fact_ids: [] }, conflict)).toThrowError();
+    expect(() => validateResolutionDecision({ ...base, type: "choose_one", accepted_fact_ids: ["fact-c"], rejected_fact_ids: ["fact-a"] }, conflict)).toThrowError();
+    expect(() => validateResolutionDecision({ ...base, type: "temporal", temporal_assignments: [
+      { fact_id: "fact-a", valid_time: { start: "1", end: "3" } },
+      { fact_id: "fact-a", valid_time: { start: "4", end: "5" } },
+    ] }, conflict)).toThrowError();
+    expect(() => validateResolutionDecision({ ...base, type: "temporal", temporal_assignments: [
+      { fact_id: "fact-a", valid_time: { start: "1", end: "3" } },
+      { fact_id: "fact-b", valid_time: { start: "2", end: "4" } },
+    ] }, conflict)).toThrowError();
+    expect(() => validateResolutionDecision({ ...base, type: "scope_split", scope_assignments: [
+      { fact_id: "fact-a", scope: { character_ids: ["alice"] } },
+      { fact_id: "fact-a", scope: { character_ids: ["bob"] } },
+    ] }, conflict)).toThrowError();
+    expect(() => validateResolutionDecision({ ...base, type: "scope_split", scope_assignments: [
+      { fact_id: "fact-a", scope: { character_ids: ["alice"] } },
+      { fact_id: "fact-b", scope: { character_ids: ["alice"] } },
+    ] }, conflict)).toThrowError();
+    const candidateConflict = { ...conflict, members: [{ candidate_id: "candidate-a" }, { candidate_id: "candidate-b" }] };
+    expect(() => validateResolutionDecision({ ...base, type: "choose_one", accepted_fact_ids: [], rejected_fact_ids: [] }, candidateConflict)).toThrowError();
+  });
   it("檢查 canonical lines、sequence/prior/hash/duplicate，timestamp 不進 semantic event revision", () => {
     const empty = verifyJournalText("");
     const first = appendJournalEvents(empty, [{
@@ -465,4 +496,163 @@ describe("resolution and immutable journal", () => {
     await expect(readFile(path.join(root, "facts", "register.yaml"), "utf8")).resolves.toBe(registerBefore);
     await expect(readFile(path.join(root, "facts", "conflicts.yaml"), "utf8")).resolves.toBe(conflictsBefore);
   });
+  it("covers projection event rejection branches", async () => {
+    const root = await project();
+    const candidates = new Map<string, FactCandidate>();
+    let eventNumber = 0;
+    const make = (kind: string, payload: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) => appendJournalEvents(verifyJournalText(""), [{
+      id: `event-${++eventNumber}`,
+      kind,
+      aggregate_id: "fact-x",
+      actor: "user",
+      timestamp,
+      payload,
+      ...extra,
+    } as never]).events;
+    expect(() => projectFactEvents(make("source.created"), candidates)).toThrow("不支援");
+    expect(() => projectFactEvents(make("candidate.submitted"), candidates)).toThrow("不存在");
+    expect(() => projectFactEvents(make("conflict.opened", { conflict: {} } as never), candidates)).toThrow();
+    expect(() => projectFactEvents(make("conflict.resolved", { decision: {}, conflict: {} } as never), candidates)).toThrow();
+    expect(() => projectFactEvents(make("fact.accepted", {}), candidates)).toThrow();
+    const source = candidate("candidate-projection", "black");
+    candidates.set(source.id, source);
+    const decision = reviewDecision(source.id, "fact-projection", "decision-projection");
+    const fact = { ...source, id: "fact-projection", status: "accepted" as const, source_tiers: ["official" as const], fact_revision: 1, decision_id: decision.id, decision_ids: [decision.id] };
+    const valid = make("fact.accepted", { decision, fact });
+    expect(() => projectFactEvents(valid.map((event) => ({ ...event, aggregate_id: "wrong" })), candidates)).toThrow();
+    expect(() => projectFactEvents(valid.map((event) => ({ ...event, actor: "other" })), candidates)).toThrow();
+    expect(() => projectFactEvents(valid.map((event) => ({ ...event, payload: { decision, fact: { ...fact, fact_revision: 2 } } })), candidates)).toThrow();
+    expect(() => projectFactEvents(valid.map((event) => ({ ...event, payload: { decision: { ...decision, fact_id: "other" }, fact } })), candidates)).toThrow();
+    const opened = make("conflict.opened", { conflict: { ...conflict, id: "conflict-x" } }, { aggregate_id: "conflict-x" });
+    const openedProjection = projectFactEvents(opened, candidates);
+    expect(openedProjection.conflicts.conflicts).toHaveLength(1);
+    const resolved = make("conflict.resolved", { decision: { schema_version: 1, id: "resolve-x", conflict_id: "conflict-x", type: "unresolved", rationale: "x", actor: "user", decided_at: timestamp }, conflict: { ...conflict, id: "conflict-x", resolution_decision_id: "resolve-x" } }, { aggregate_id: "conflict-x", id: "resolve-x" });
+    expect(() => projectFactEvents([...opened, ...resolved], candidates)).not.toThrow();
+    await expect(readHistoricalCandidateIndex(root)).resolves.toBeInstanceOf(Map);
+  });
+});
+
+it("covers review identity guards and supersede/unresolved resolution branches", async () => {
+  const root = await project();
+  await storeCandidate(root, candidate("candidate-a", "black"));
+  await storeCandidate(root, candidate("candidate-b", "white"));
+  const initial = await readFactProjection(root);
+  const first = await reviewCandidate(root, {
+    decision: reviewDecision("candidate-a", "fact-a", "decision-a"),
+    expectedProjectionRevision: initial.register.revision,
+  });
+  const second = await reviewCandidate(root, {
+    decision: reviewDecision("candidate-b", "fact-b", "decision-b"),
+    expectedProjectionRevision: first.projection.register.revision,
+  });
+  const conflict = second.projection.conflicts.conflicts[0]!;
+  await expect(resolveConflict(root, {
+    decision: { schema_version: 1, id: "missing-conflict", conflict_id: "missing", type: "unresolved", rationale: "missing", actor: "user", decided_at: timestamp },
+    expectedProjectionRevision: second.projection.register.revision,
+  })).rejects.toMatchObject({ code: "CONFLICT_NOT_FOUND" });
+  const superseded = await resolveConflict(root, {
+    decision: {
+      schema_version: 1,
+      id: "supersede-resolution",
+      conflict_id: conflict.id,
+      type: "supersede",
+      accepted_fact_ids: ["fact-a"],
+      rejected_fact_ids: ["fact-b"],
+      rationale: "prefer exact source",
+      actor: "user",
+      decided_at: timestamp,
+    },
+    expectedProjectionRevision: second.projection.register.revision,
+    expectedFactRevisions: { "fact-a": 1, "fact-b": 1 },
+  });
+  expect(superseded.projection.register.facts).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: "fact-a", status: "accepted", supersedes: ["fact-b"] }),
+    expect.objectContaining({ id: "fact-b", status: "superseded", superseded_by: "fact-a" }),
+  ]));
+  await expect(resolveConflict(root, {
+    decision: {
+      schema_version: 1,
+      id: "resolved-again",
+      conflict_id: conflict.id,
+      type: "unresolved",
+      rationale: "already resolved",
+      actor: "user",
+      decided_at: timestamp,
+    },
+    expectedProjectionRevision: superseded.projection.register.revision,
+  })).rejects.toMatchObject({ code: "CONFLICT_ALREADY_RESOLVED" });
+
+  const legacyRoot = await project();
+  await storeCandidate(legacyRoot, candidate("candidate-legacy-only", "black"));
+  const legacyProjection = await readFactProjection(legacyRoot);
+  await expect(migrateCandidateIdentity(legacyRoot, {
+    decisionId: "missing-decision",
+    expectedProjectionRevision: legacyProjection.register.revision,
+    actor: "director",
+    occurredAt: timestamp,
+  })).rejects.toMatchObject({ code: "FACT_CANDIDATE_BINDING_DECISION_NOT_FOUND" });
+  const reviewed = await reviewCandidate(legacyRoot, {
+    decision: reviewDecision("candidate-legacy-only", "fact-legacy-only", "decision-legacy-only"),
+    expectedProjectionRevision: legacyProjection.register.revision,
+  });
+  await expect(migrateCandidateIdentity(legacyRoot, {
+    decisionId: "decision-legacy-only",
+    expectedProjectionRevision: reviewed.projection.register.revision,
+    actor: "director",
+    occurredAt: timestamp,
+  })).rejects.toMatchObject({ code: "FACT_CANDIDATE_IDENTITY_ALREADY_CANONICAL" });
+});
+
+it("covers projector missing files, revision integrity, and binding guards", async () => {
+  const root = await project();
+  await rm(path.join(root, "facts", "candidates"), { recursive: true, force: true });
+  await expect(readHistoricalCandidateIndex(root)).resolves.toEqual(new Map());
+  await rm(path.join(root, "facts", "register.yaml"), { force: true });
+  await expect(readFactProjection(root)).rejects.toMatchObject({ code: "FACT_PROJECTION_INVALID" });
+
+  const integrityRoot = await project();
+  const initial = await readFactProjection(integrityRoot);
+  await writeFile(path.join(integrityRoot, "facts", "register.yaml"), canonicalYaml({
+    ...initial.register,
+    revision: `sha256:${"0".repeat(64)}`,
+  }), "utf8");
+  await expect(verifyFactProjection(integrityRoot)).rejects.toMatchObject({ code: "FACT_PROJECTION_REVISION_MISMATCH" });
+
+  const source = candidate("candidate-binding-guard", "black");
+  const candidates = new Map([[source.id, source]]);
+  const invalidBinding = appendJournalEvents(verifyJournalText(""), [{
+    id: "candidate-identity-binding-invalid",
+    kind: "candidate.identity_bound",
+    aggregate_id: "decision-invalid",
+    actor: "director",
+    timestamp,
+    payload: { binding: {} },
+  } as never]).events;
+  expect(() => projectFactEvents(invalidBinding, candidates)).toThrow("binding");
+
+  const unresolved = appendJournalEvents(verifyJournalText(""), [{
+    id: "resolve-without-open",
+    kind: "conflict.resolved",
+    aggregate_id: "conflict-never-opened",
+    actor: "user",
+    timestamp,
+    payload: {
+      decision: { schema_version: 1, id: "resolve-without-open", conflict_id: "conflict-never-opened", type: "unresolved", rationale: "keep open", actor: "user", decided_at: timestamp },
+      conflict: {
+        schema_version: 1,
+        id: "conflict-never-opened",
+        subject: "alice",
+        predicate: "appearance.hair",
+        scope: { character_ids: [], extensions: {} },
+        valid_time: { extensions: {} },
+        members: [],
+        status: "open",
+        opened_at: timestamp,
+        updated_at: timestamp,
+        resolution_decision_id: "resolve-without-open",
+        extensions: {},
+      },
+    },
+  } as never]).events;
+  expect(() => projectFactEvents(unresolved, candidates)).toThrow("conflict.resolved");
 });

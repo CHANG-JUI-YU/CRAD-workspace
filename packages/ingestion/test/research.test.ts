@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   approveResearchSources,
   controlledFetch,
+  defaultPinnedHttpTransport,
   deriveResearchSourceFamily,
   extractHtmlText,
   fetchApprovedResearchSources,
@@ -83,6 +84,12 @@ describe("model web research contracts", () => {
 
 });
 
+  it("covers public address families and entity decoding edge cases", () => {
+    for (const address of ["0.0.0.0", "10.0.0.1", "100.64.0.1", "127.0.0.1", "169.254.1.1", "172.16.0.1", "192.0.0.1", "192.168.0.1", "192.88.99.1", "198.18.0.1", "203.0.113.1", "224.0.0.1", "::", "::1", "fc00::1", "fe80::1", "ff02::1", "2001:db8::1", "::ffff:192.168.0.1", "::ffff:c000:0201"]) expect(isPublicAddress(address)).toBe(false);
+    for (const address of ["93.184.216.34", "2001:4860:4860::8888", "::ffff:5db8:d822"]) expect(isPublicAddress(address)).toBe(true);
+    expect(extractHtmlText("<p>A &amp; B &#65; &#x42; &unknown;</p> and enough body text here")).toContain("A & B A B");
+    expect(() => extractHtmlText("<script>short</script>")).toThrow("no usable");
+  });
 describe("controlled web fetch", () => {
   const publicDns = () => Promise.resolve([{ address: "93.184.216.34", family: 4 }]);
   const transport = (body: string, headers?: Record<string, string>): PinnedHttpTransport =>
@@ -140,6 +147,25 @@ describe("controlled web fetch", () => {
     expect(extractHtmlText(html)).toBe("Alice & Bob have stable source text.");
     const fetched = await controlledFetch({ url: "https://example.test", resolveDns: publicDns, transport: transport(html, { "content-type": "text/html; charset=utf-8" }) });
     expect(fetched.bytes.toString()).toBe("Alice & Bob have stable source text.");
+  });
+  it("covers source family classification and controlled fetch response guards", async () => {
+    expect(deriveResearchSourceFamily(new URL("https://www.britannica.com/topic/alice"), [])).toBe("platform:britannica.com");
+    expect(deriveResearchSourceFamily(new URL("https://fandom.com/wiki/Alice"), [])).toBe("platform:fandom.com");
+    expect(deriveResearchSourceFamily(new URL("https://wikia.org/alice"), [])).toBe("platform:wikia.org");
+    expect(deriveResearchSourceFamily(new URL("https://alice.wiki.example/page"), [])).toBe("platform:alice.wiki.example");
+    expect(deriveResearchSourceFamily(new URL("https://unknown.example/page"), [])).toBeUndefined();
+
+    const good = () => Promise.resolve([{ address: "93.184.216.34", family: 4 }]);
+    await expect(controlledFetch({ url: "ftp://example.test", resolveDns: good, transport: vi.fn() })).rejects.toMatchObject({ code: "WEB_FETCH_TARGET_DENIED" });
+    await expect(controlledFetch({ url: "https://user:pass@example.test", resolveDns: good, transport: vi.fn() })).rejects.toMatchObject({ code: "WEB_FETCH_TARGET_DENIED" });
+    await expect(controlledFetch({ url: "https://example.test", resolveDns: () => Promise.resolve([]), transport: vi.fn() })).rejects.toMatchObject({ code: "WEB_FETCH_TARGET_DENIED" });
+    await expect(controlledFetch({ url: "https://example.test", resolveDns: () => Promise.reject(new Error("dns")), transport: vi.fn() })).rejects.toMatchObject({ code: "WEB_FETCH_TARGET_DENIED" });
+    await expect(controlledFetch({ url: "https://example.test", resolveDns: good, transport: () => Promise.resolve(httpResponse("not found", { status: 404 })) })).rejects.toMatchObject({ code: "WEB_FETCH_TARGET_DENIED" });
+    await expect(controlledFetch({ url: "https://example.test", resolveDns: good, maxBytes: 10, transport: () => Promise.resolve(httpResponse("small", { headers: { "content-type": "text/plain", "content-length": "100" } })) })).rejects.toMatchObject({ code: "WEB_FETCH_TOO_LARGE" });
+    const stringBody = Readable.from(["This is a sufficiently long plain response body."]);
+    const fetched = await controlledFetch({ url: "https://example.test", resolveDns: good, transport: () => Promise.resolve({ statusCode: 200, headers: { "content-type": "text/plain" }, body: stringBody }) });
+    expect(fetched.mediaType).toBe("text/plain");
+    await expect(controlledFetch({ url: "https://example.test", resolveDns: good, transport: () => Promise.resolve(httpResponse("short")) })).rejects.toMatchObject({ code: "WEB_FETCH_CONTENT_UNSUPPORTED" });
   });
 });
 
@@ -352,5 +378,226 @@ describe("research registry and snapshot bridge", () => {
 
     const legacy = await getResearchStatus(projectRoot, current.id);
     expect(legacy.candidates[0]).toMatchObject({ source_family_id: "official:official.example", language: query.language });
+  });
+});
+
+it("covers research pointer corruption, approval fallback guards, and redirect headers", async () => {
+  const projectRoot = await project();
+  const batch = await registerResearchSources({ projectRoot, query, results: [{ title: "Official", url: "https://official.example/a", snippet: "s", language: "en" }] });
+  await expect(approveResearchSources({ projectRoot, batchId: batch.id, expectedRevision: batch.revision, approvedCandidateIds: [batch.candidates[0]!.id], decisionId: "blank-fallback", actor: "director", decidedAt: "2026-07-20T00:00:00Z", singleFamilyFallback: true, singleFamilyFallbackReason: "   " })).rejects.toMatchObject({ code: "SOURCE_RESEARCH_DIVERSITY_REQUIRED" });
+  await expect(fetchApprovedResearchSources({ projectRoot, batchId: batch.id, actor: "source-researcher", transport: vi.fn(), resolveDns: () => Promise.resolve([{ address: "93.184.216.34", family: 4 }]) })).rejects.toMatchObject({ code: "SOURCE_RESEARCH_NOT_APPROVED" });
+  await writeFile(path.join(projectRoot, `sources/research/${batch.id}/current.json`), JSON.stringify({ schema_version: 1, batch_id: "other", revision: batch.revision, revision_path: `sources/research/${batch.id}/${batch.revision.slice("sha256:".length)}.json` }), "utf8");
+  await expect(getResearchStatus(projectRoot, batch.id)).rejects.toMatchObject({ code: "SOURCE_RESEARCH_BATCH_NOT_FOUND" });
+
+  const headersTransport: PinnedHttpTransport = () => Promise.resolve({ statusCode: 302, headers: { location: ["http://localhost/unsafe"] }, body: Readable.from([]) });
+  await expect(controlledFetch({ url: "https://example.test", transport: headersTransport, resolveDns: () => Promise.resolve([{ address: "93.184.216.34", family: 4 }]) })).rejects.toMatchObject({ code: "WEB_FETCH_TARGET_DENIED" });
+  const missingLocation: PinnedHttpTransport = () => Promise.resolve({ statusCode: 302, headers: {}, body: Readable.from([]) });
+  await expect(controlledFetch({ url: "https://example.test", transport: missingLocation, resolveDns: () => Promise.resolve([{ address: "93.184.216.34", family: 4 }]) })).rejects.toMatchObject({ code: "WEB_FETCH_TARGET_DENIED" });
+});
+it("covers research classification, fetch headers, and DNS identity guards", async () => {
+  const projectRoot = await project();
+  const registered = await registerResearchSources({
+    projectRoot,
+    query: { ...query, result_count: 1 },
+    results: [
+      { title: "skip", url: "not-a-url", snippet: "skip", language: "en" },
+      { title: " ", url: "https://www.britannica.com/alice", snippet: "encyclopedia", language: "en" },
+      { title: "wiki", url: "https://alice.wiki.example/page", snippet: "wiki", language: "en" },
+    ],
+  });
+  expect(registered.candidates).toHaveLength(1);
+  expect(registered.candidates[0]?.source_class).toBe("encyclopedia");
+
+  const good = () => Promise.resolve([{ address: "93.184.216.34", family: 4 }]);
+  const body = (headers: Record<string, string> = { "content-type": "text/plain" }) =>
+    Promise.resolve({ statusCode: 200, headers, body: Readable.from(["A sufficiently long body for controlled fetch tests."]) });
+  await expect(controlledFetch({ url: "https://example.test", resolveDns: () => Promise.resolve([{ address: "93.184.216.34", family: 6 }]), transport: vi.fn() })).rejects.toMatchObject({ code: "WEB_FETCH_TARGET_DENIED" });
+  await expect(controlledFetch({ url: "https://example.test", resolveDns: good, transport: () => body({}) })).rejects.toMatchObject({ code: "WEB_FETCH_CONTENT_UNSUPPORTED" });
+  await expect(controlledFetch({ url: "https://example.test", resolveDns: good, transport: () => body({ "content-type": "text/plain", "content-length": "not-a-number" }) })).resolves.toMatchObject({ mediaType: "text/plain" });
+  await expect(controlledFetch({ url: "https://example.test", resolveDns: good, transport: () => Promise.resolve(httpResponse(null, { status: 302, headers: { location: "https://user:pass@example.test/unsafe" } })) })).rejects.toMatchObject({ code: "WEB_FETCH_TARGET_DENIED" });
+  await expect(controlledFetch({ url: "https://example.test", resolveDns: good, transport: () => Promise.resolve(httpResponse("short", { status: 204 })) })).rejects.toMatchObject({ code: "WEB_FETCH_CONTENT_UNSUPPORTED" });
+  await expect(controlledFetch({ url: "https://example.test", resolveDns: good, transport: () => Promise.resolve(httpResponse("")) })).rejects.toMatchObject({ code: "WEB_FETCH_CONTENT_UNSUPPORTED" });
+});
+it("covers research pointer integrity, invalid address parsing, transport bodies, and fallback guards", async () => {
+  const projectRoot = await project();
+  const batch = await registerResearchSources({
+    projectRoot,
+    query,
+    results: [{ title: "Official", url: "https://official.example/alice", snippet: "official", language: "en" }],
+  });
+  const revisionPath = "sources/research/" + batch.id + "/" + batch.revision.slice("sha256:".length) + ".json";
+  const pointerPath = path.join(projectRoot, "sources", "research", batch.id, "current.json");
+  await writeFile(pointerPath, canonicalJson({
+    schema_version: 1,
+    batch_id: batch.id,
+    revision: "sha256:" + "0".repeat(64),
+    revision_path: revisionPath,
+  }), "utf8");
+  await expect(getResearchStatus(projectRoot, batch.id)).rejects.toMatchObject({ code: "SOURCE_RESEARCH_BATCH_INVALID" });
+  await writeFile(pointerPath, canonicalJson({
+    schema_version: 1,
+    batch_id: batch.id,
+    revision: batch.revision,
+    revision_path: revisionPath,
+  }), "utf8");
+  await writeFile(path.join(projectRoot, revisionPath), canonicalJson({ ...batch, updated_at: "2026-07-21T00:00:00.000Z" }), "utf8");
+  await expect(getResearchStatus(projectRoot, batch.id)).rejects.toMatchObject({ code: "SOURCE_RESEARCH_BATCH_INVALID" });
+
+  for (const address of ["not-an-ip", "1.2.3", "999.1.1.1", "::ffff:999.1.1.1"]) {
+    expect(isPublicAddress(address)).toBe(false);
+  }
+  await expect(defaultPinnedHttpTransport({
+    url: new URL("https://example.test"),
+    addresses: [],
+    signal: new AbortController().signal,
+  })).rejects.toThrow("validated address");
+
+  const faultyBody = Readable.from((async function* () {
+    await Promise.resolve();
+    yield Buffer.from("A sufficiently long body for controlled fetch tests.");
+    throw new Error("stream failure");
+  })());
+  await expect(controlledFetch({
+    url: "https://example.test",
+    resolveDns: () => Promise.resolve([{ address: "93.184.216.34", family: 4 }]),
+    transport: () => Promise.resolve({ statusCode: 200, headers: { "content-type": "text/plain" }, body: faultyBody }),
+  })).rejects.toThrow("stream failure");
+
+  const fallbackBatch = await registerResearchSources({ projectRoot, query: { ...query, work_title: "Fallback" }, results: [{ title: "Official", url: "https://official.example/fallback", snippet: "official", language: "en" }] });
+  await expect(approveResearchSources({
+    projectRoot,
+    batchId: fallbackBatch.id,
+    expectedRevision: fallbackBatch.revision,
+    approvedCandidateIds: [fallbackBatch.candidates[0]!.id],
+    decisionId: "reason-without-fallback",
+    actor: "director",
+    decidedAt: "2026-07-21T00:01:00.000Z",
+    singleFamilyFallback: false,
+    singleFamilyFallbackReason: "reason is ignored unless fallback is enabled",
+  })).rejects.toMatchObject({ code: "SOURCE_RESEARCH_DIVERSITY_REQUIRED" });
+});
+
+
+it("covers every reserved IPv4 range and runtime candidate defaults", async () => {
+  const safe = ["1.1.1.1", "100.63.0.1", "169.1.0.1", "172.15.0.1", "192.1.0.1", "192.88.98.1", "198.17.0.1", "198.20.0.1", "203.0.112.1"];
+  for (const address of safe) expect(isPublicAddress(address)).toBe(true);
+  const denied = ["100.64.0.1", "169.254.0.1", "172.16.0.1", "192.0.0.1", "192.88.99.1", "198.18.0.1", "198.51.100.1", "203.0.113.1"];
+  for (const address of denied) expect(isPublicAddress(address)).toBe(false);
+
+  const projectRoot = await project();
+  const current = await registerResearchSources({
+    projectRoot,
+    query,
+    results: [{ title: "Official", url: "https://official.example/defaults", snippet: "official", language: "en" }],
+  });
+  const legacyContent = {
+    schema_version: current.schema_version,
+    id: current.id,
+    provider: current.provider,
+    query: current.query,
+    candidates: current.candidates.map((candidate) => ({ ...candidate, source_family_id: undefined, language: undefined })),
+    approvals: current.approvals,
+    created_at: current.created_at,
+    updated_at: current.updated_at,
+  };
+  const revision = computeRevision(legacyContent);
+  const legacyRevisionPath = "sources/research/" + current.id + "/" + revision.slice("sha256:".length) + ".json";
+  await writeFile(path.join(projectRoot, legacyRevisionPath), canonicalJson({ ...legacyContent, revision }), "utf8");
+  await writeFile(path.join(projectRoot, "sources/research/" + current.id + "/current.json"), canonicalJson({
+    schema_version: 1, batch_id: current.id, revision, revision_path: legacyRevisionPath,
+  }), "utf8");
+  expect((await getResearchStatus(projectRoot, current.id)).candidates[0]).toMatchObject({
+    source_family_id: "official:official.example", language: query.language,
+  });
+});
+
+
+it("covers default HTTP transport protocol branches and entity fallbacks", async () => {
+  const controller = new AbortController();
+  await expect(defaultPinnedHttpTransport({
+    url: new URL("http://127.0.0.1:1"),
+    addresses: [{ address: "127.0.0.1", family: 4 }],
+    signal: controller.signal,
+  })).rejects.toBeDefined();
+  const aborted = new AbortController();
+  aborted.abort();
+  await expect(defaultPinnedHttpTransport({
+    url: new URL("http://127.0.0.1:1"),
+    addresses: [{ address: "127.0.0.1", family: 4 }],
+    signal: aborted.signal,
+  })).rejects.toBeDefined();
+  expect(extractHtmlText("<p>Known &amp; unknown &mystery; entity text with enough length.</p>"))
+    .toContain("&mystery; entity");
+});
+
+it("covers research runtime defaults, rejection states, and pinned protocol paths", async () => {
+  const projectRoot = await project();
+  const batch = await registerResearchSources({
+    projectRoot,
+    query: { ...query, result_count: 2 },
+    results: [
+      { title: "Official", url: "https://official.example/runtime", snippet: "official", language: "en" },
+      { title: "Wiki", url: "https://alice.fandom.com/wiki/Runtime", snippet: "wiki", language: "en" },
+    ],
+  });
+  const official = batch.candidates.find((candidate) => candidate.source_class === "official")!;
+  const approved = await approveResearchSources({
+    projectRoot,
+    batchId: batch.id,
+    expectedRevision: batch.revision,
+    approvedCandidateIds: [official.id],
+    decisionId: "runtime-approval",
+    actor: "director",
+    decidedAt: "2026-07-22T00:00:00.000Z",
+    singleFamilyFallback: true,
+    singleFamilyFallbackReason: "Only one source family is available for this focused check.",
+  });
+  expect(approved.batch.candidates.some((candidate) => candidate.status === "rejected")).toBe(true);
+  expect((await getResearchStatus(projectRoot, batch.id)).candidates.every((candidate) => candidate.source_family_id)).toBe(true);
+  expect(isPublicAddress("1.2.3.4")).toBe(true);
+
+  await expect(defaultPinnedHttpTransport({
+    url: new URL("http://127.0.0.1:1"),
+    addresses: [{ address: "127.0.0.1", family: 4 }],
+    signal: new AbortController().signal,
+  })).rejects.toBeDefined();
+  await expect(defaultPinnedHttpTransport({
+    url: new URL("https://127.0.0.1:1"),
+    addresses: [{ address: "127.0.0.1", family: 4 }],
+    signal: new AbortController().signal,
+  })).rejects.toBeDefined();
+  await expect(controlledFetch({
+    url: "https://example.test",
+    resolveDns: () => Promise.resolve([{ address: "93.184.216.34", family: 4 }]),
+    timeoutMs: 5,
+    transport: ({ signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    }),
+  })).rejects.toMatchObject({ code: "WEB_FETCH_TIMEOUT" });
+
+  const second = await registerResearchSources({
+    projectRoot,
+    query: { ...query, work_title: "Runtime options" },
+    results: [{ title: "Official", url: "https://official.example/options", snippet: "official", language: "en" }],
+  });
+  const secondApproved = await approveResearchSources({
+    projectRoot,
+    batchId: second.id,
+    expectedRevision: second.revision,
+    approvedCandidateIds: [second.candidates[0]!.id],
+    decisionId: "runtime-options-approval",
+    actor: "director",
+    decidedAt: "2026-07-22T00:01:00.000Z",
+    singleFamilyFallback: true,
+    singleFamilyFallbackReason: "Only one source family is available for this focused check.",
+  });
+  await fetchApprovedResearchSources({
+    projectRoot,
+    batchId: secondApproved.batch.id,
+    actor: "source-researcher",
+    timeoutMs: 1000,
+    maxBytes: 1024,
+    resolveDns: () => Promise.resolve([{ address: "93.184.216.34", family: 4 }]),
+    transport: () => Promise.resolve(httpResponse("Runtime options include enough source text for ingestion.")),
   });
 });

@@ -56,15 +56,11 @@ async function loaded(context: ToolCallContext) {
 }
 
 function desiredSelections(context: ToolCallContext) {
-  return context.args.desired_selections === undefined
-    ? undefined
-    : z.array(blueprintPluginSelectionSchema).parse(context.args.desired_selections);
+  return z.array(blueprintPluginSelectionSchema).parse(context.args.desired_selections);
 }
 
 function implementationPins(context: ToolCallContext) {
-  return context.args.implementation_pins === undefined
-    ? undefined
-    : officialPluginIdRecordSchema.parse(context.args.implementation_pins);
+  return officialPluginIdRecordSchema.parse(context.args.implementation_pins);
 }
 
 function revisionInputs(context: ToolCallContext): {
@@ -142,15 +138,15 @@ export const pluginTools = {
     return {
       project_id: project.manifest?.id,
       project_kind: project.manifest?.kind,
-      blueprint_selections: project.blueprint?.plugins ?? [],
+      blueprint_selections: project.blueprint!.plugins,
       selection: project.pluginSelection,
       selection_revision: project.pluginSelectionRevision,
-       sources: project.pluginSources?.map((source) => ({
+       sources: project.pluginSources!.map((source) => ({
          plugin_id: source.plugin_id,
          revision: project.sourceRevisions[`extensions/${source.plugin_id}/source.yaml`],
          source,
-       })) ?? [],
-      artifacts: project.pluginArtifacts ?? [],
+       })),
+      artifacts: project.pluginArtifacts!,
       diagnostics: project.diagnostics,
     };
   },

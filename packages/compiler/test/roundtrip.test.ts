@@ -142,4 +142,10 @@ describe("import round-trip", () => {
     expect(ir.entries[3]?.placement).toEqual({ type: "outlet", name: "memory" });
     expect(ir.entries[4]?.placement).toEqual({ type: "before_character" });
   });
+
+  it("reports equivalent round-trip for a minimal card", () => {
+    const report = roundTripImportedCard(importCharacterCard({ name: "Minimal" }));
+    expect(report.status).toBe("equivalent");
+    expect(report.differences).toEqual([]);
+  });
 });

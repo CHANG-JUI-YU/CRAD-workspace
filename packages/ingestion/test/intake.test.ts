@@ -240,4 +240,35 @@ describe("source intake", () => {
       code: "SNAPSHOT_HASH_MISMATCH",
     });
   });
+  it("covers intake identity, timestamp, filesystem, and immutable projection guards", async () => {
+    const { workspace, projectRoot } = await project();
+    const filePath = path.join(workspace.root, "guards.txt");
+    await writeFile(filePath, "guard", "utf8");
+    await expect(intakeLocalSource(localOptions(projectRoot, filePath, "../bad"))).rejects.toMatchObject({ code: "SOURCE_ID_INVALID" });
+    await expect(intakeLocalSource({ ...localOptions(projectRoot, filePath), title: "" })).rejects.toMatchObject({ code: "SOURCE_TITLE_INVALID" });
+    await expect(intakeLocalSource({ ...localOptions(projectRoot, filePath), actor: "bad/actor" })).rejects.toMatchObject({ code: "ACTOR_INVALID" });
+    await expect(intakeLocalSource({ ...localOptions(projectRoot, filePath), acquiredAt: "2026-07-13T10:00:00" })).rejects.toMatchObject({ code: "SOURCE_TIMESTAMP_INVALID" });
+    await expect(intakeLocalSource(localOptions(projectRoot, path.join(workspace.root, "missing.txt")))).rejects.toMatchObject({ code: "SOURCE_FILE_UNREADABLE" });
+    await expect(intakeRetrievedSource({
+      projectRoot, sourceId: "bad-time", title: "Bad", bytes: Buffer.from("bad"),
+      requestedUrl: "https://example.test", canonicalUrl: "https://example.test", fetchedAt: "2026-07-13T10:00:00",
+    })).rejects.toMatchObject({ code: "SOURCE_TIMESTAMP_INVALID" });
+    await expect(intakeRetrievedSource({
+      projectRoot, sourceId: "bad-canonical", title: "Bad", bytes: Buffer.from("bad"),
+      requestedUrl: "https://example.test", canonicalUrl: "not-url", fetchedAt: "2026-07-13T10:00:00Z",
+    })).rejects.toMatchObject({ code: "SOURCE_URL_INVALID" });
+    await expect(intakeRetrievedSource({
+      projectRoot, sourceId: "binary", title: "Binary", bytes: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]),
+      requestedUrl: "https://example.test", canonicalUrl: "https://example.test", fetchedAt: "2026-07-13T10:00:00Z",
+    })).rejects.toMatchObject({ code: "SOURCE_INTAKE_FAILED" });
+
+    const first = await intakeLocalSource(localOptions(projectRoot, filePath));
+    const projectionPath = path.join(projectRoot, "sources/projections/novel", first.revision.id.slice("sha256:".length) + ".json");
+    const projectionRaw = await readFile(projectionPath, "utf8");
+    const quote = String.fromCharCode(34);
+    const tamperedProjection = projectionRaw.replace(quote + "normalized_hash" + quote, quote + "normalized_hash_tampered" + quote);
+    await writeFile(projectionPath, tamperedProjection, "utf8");
+    await expect(intakeLocalSource(localOptions(projectRoot, filePath))).rejects.toMatchObject({ code: "SOURCE_PROJECTION_INVALID" });
+  });
+
 });
