@@ -1,4 +1,5 @@
 import { writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import path from "node:path";
 import { Readable } from "node:stream";
 
@@ -312,6 +313,51 @@ describe("research registry and snapshot bridge", () => {
     })).resolves.toMatchObject({ idempotent: false });
   });
 
+  it("allows an explicitly audited exclusion of official candidates", async () => {
+    const projectRoot = await project();
+    const batch = await registerResearchSources({
+      projectRoot,
+      query,
+      results: [
+        { title: "Official", url: "https://official.example/alice", snippet: "official", language: "en" },
+        { title: "Wikipedia", url: "https://zh.wikipedia.org/wiki/Alice", snippet: "encyclopedia", language: "zh-Hant" },
+        { title: "Fandom", url: "https://alice.fandom.com/wiki/Alice", snippet: "wiki", language: "en" },
+      ],
+    });
+    const nonOfficial = batch.candidates.filter((candidate) => candidate.source_class !== "official");
+    expect(nonOfficial).toHaveLength(2);
+
+    const approved = await approveResearchSources({
+      projectRoot,
+      batchId: batch.id,
+      expectedRevision: batch.revision,
+      approvedCandidateIds: nonOfficial.map((candidate) => candidate.id),
+      decisionId: "exclude-official",
+      actor: "director",
+      decidedAt: "2026-07-18T02:00:00Z",
+      singleFamilyFallback: false,
+      officialExclusion: true,
+      officialExclusionReason: "Official candidates are unavailable through the controlled fetch transport.",
+    });
+    expect(approved.idempotent).toBe(false);
+    expect(approved.batch.approvals.at(-1)).toMatchObject({
+      official_exclusion: true,
+      official_exclusion_reason: "Official candidates are unavailable through the controlled fetch transport.",
+    });
+
+    await expect(approveResearchSources({
+      projectRoot,
+      batchId: batch.id,
+      expectedRevision: approved.batch.revision,
+      approvedCandidateIds: nonOfficial.map((candidate) => candidate.id),
+      decisionId: "exclude-official-replay",
+      actor: "director",
+      decidedAt: "2026-07-18T02:01:00Z",
+      singleFamilyFallback: false,
+      officialExclusion: true,
+      officialExclusionReason: "Official candidates are unavailable through the controlled fetch transport.",
+    })).resolves.toMatchObject({ idempotent: true });
+  });
   it("rejects a final redirect into a different source family", async () => {
     const projectRoot = await project();
     const batch = await registerResearchSources({
@@ -528,6 +574,38 @@ it("covers default HTTP transport protocol branches and entity fallbacks", async
   })).rejects.toBeDefined();
   expect(extractHtmlText("<p>Known &amp; unknown &mystery; entity text with enough length.</p>"))
     .toContain("&mystery; entity");
+});
+
+it("default pinned HTTP transport supports Node all-address lookup callbacks", async () => {
+  let receivedUserAgent: string | string[] | undefined;
+  let receivedAccept: string | string[] | undefined;
+  const server = createServer((request, response) => {
+    receivedUserAgent = request.headers["user-agent"];
+    receivedAccept = request.headers.accept;
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.end("Pinned transport reached the local fixture successfully.");
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen({ host: "127.0.0.1", port: 0 }, resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Local fixture did not expose a TCP address");
+    const response = await defaultPinnedHttpTransport({
+      url: new URL("http://fixture.test:" + address.port + "/"),
+      addresses: [{ address: "127.0.0.1", family: 4 }],
+      signal: new AbortController().signal,
+    });
+    const chunks: Buffer[] = [];
+    for await (const chunk of response.body) chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk as Buffer);
+    expect(response.statusCode).toBe(200);
+    expect(receivedUserAgent).toBe("card-workspace/0.1.0 (controlled-fetch)");
+    expect(receivedAccept).toContain("text/html");
+    expect(Buffer.concat(chunks).toString("utf8")).toContain("Pinned transport reached");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });
 
 it("covers research runtime defaults, rejection states, and pinned protocol paths", async () => {

@@ -40,6 +40,8 @@ export const researchApprovalSchema = z.object({
   prior_revision: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
   single_family_fallback: z.boolean().optional(),
   single_family_fallback_reason: z.string().trim().min(1).max(2000).optional(),
+  official_exclusion: z.boolean().optional(),
+  official_exclusion_reason: z.string().trim().min(1).max(2000).optional(),
 }).strict();
 
 export const researchBatchSchema = z.object({

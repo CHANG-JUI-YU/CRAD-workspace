@@ -49,6 +49,8 @@ export const researchTools = {
       decidedAt: stringArg(context.args, "decided_at"),
       singleFamilyFallback: context.args.single_family_fallback as boolean,
       ...(context.args.single_family_fallback_reason ? { singleFamilyFallbackReason: stringArg(context.args, "single_family_fallback_reason") } : {}),
+      officialExclusion: context.args.official_exclusion as boolean,
+      ...(context.args.official_exclusion_reason ? { officialExclusionReason: stringArg(context.args, "official_exclusion_reason") } : {}),
     });
   },
   source_research_fetch_approved: async (context: ToolCallContext) => {

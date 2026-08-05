@@ -31,6 +31,7 @@ import { IngestionError } from "./types.js";
 const MAX_FETCH_BYTES = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_REDIRECTS = 3;
+const CONTROLLED_FETCH_USER_AGENT = "card-workspace/0.1.0 (controlled-fetch)";
 
 export interface SearchProviderResult { title: string; url: string; snippet: string; language: string }
 export interface DnsAddress { address: string; family: number }
@@ -240,6 +241,8 @@ export async function approveResearchSources(options: {
   decidedAt: string;
   singleFamilyFallback: boolean;
   singleFamilyFallbackReason?: string;
+  officialExclusion?: boolean;
+  officialExclusionReason?: string;
 }): Promise<{ batch: ResearchBatch; idempotent: boolean }> {
   const current = await readCurrent(options.projectRoot, options.batchId);
   if (current.batch.revision !== options.expectedRevision) fail("SOURCE_RESEARCH_REVISION_CONFLICT", "Research approval requires the exact current batch revision");
@@ -247,7 +250,14 @@ export async function approveResearchSources(options: {
   const known = new Set(current.batch.candidates.map((candidate) => candidate.id));
   if (approved.some((id) => !known.has(id))) fail("SOURCE_RESEARCH_CANDIDATE_UNKNOWN", "Approval contains an unknown candidate");
   const selected = current.batch.candidates.filter((candidate) => approved.includes(candidate.id));
-  if (current.batch.candidates.some((candidate) => candidate.source_class === "official") && !selected.some((candidate) => candidate.source_class === "official")) {
+  const officialCandidateAvailable = current.batch.candidates.some((candidate) => candidate.source_class === "official");
+  const officialSelected = selected.some((candidate) => candidate.source_class === "official");
+  const officialExclusion = options.officialExclusion === true;
+  const officialExclusionReason = options.officialExclusionReason?.trim();
+  if (officialExclusion && (!officialCandidateAvailable || officialSelected)) {
+    fail("SOURCE_RESEARCH_OFFICIAL_EXCLUSION_INVALID", "Official exclusion can only be audited when official candidates are available and none are approved");
+  }
+  if (officialCandidateAvailable && !officialSelected && !(officialExclusion && officialExclusionReason)) {
     fail("SOURCE_RESEARCH_OFFICIAL_REQUIRED", "Approval must include an official candidate when one is available");
   }
   const families = new Set(selected.map((candidate) => candidate.source_family_id).filter((family): family is string => Boolean(family)));
@@ -257,7 +267,8 @@ export async function approveResearchSources(options: {
   }
   const currentApproved = current.batch.candidates.filter((item) => item.status === "approved" || item.status === "fetched").map((item) => item.id).sort();
   const latestApproval = current.batch.approvals.at(-1);
-  const hasRequiredAudit = families.size >= 2 || (latestApproval?.single_family_fallback === true && Boolean(latestApproval.single_family_fallback_reason));
+  const hasOfficialExclusionAudit = !officialCandidateAvailable || officialSelected || (latestApproval?.official_exclusion === true && Boolean(latestApproval.official_exclusion_reason));
+  const hasRequiredAudit = hasOfficialExclusionAudit && (families.size >= 2 || (latestApproval?.single_family_fallback === true && Boolean(latestApproval.single_family_fallback_reason)));
   if (JSON.stringify(currentApproved) === JSON.stringify(approved) && hasRequiredAudit) return { batch: current.batch, idempotent: true };
   const content = {
     ...current.batch,
@@ -273,6 +284,7 @@ export async function approveResearchSources(options: {
       prior_revision: current.batch.revision,
       single_family_fallback: options.singleFamilyFallback,
       ...(options.singleFamilyFallback ? { single_family_fallback_reason: fallbackReason } : {}),
+      ...(officialExclusion ? { official_exclusion: true, official_exclusion_reason: officialExclusionReason } : {}),
     }],
     updated_at: options.decidedAt,
   };
@@ -326,7 +338,13 @@ export const defaultPinnedHttpTransport: PinnedHttpTransport = ({ url, addresses
   }
   const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
     agent: false,
-    lookup: (_hostname, _options, callback) => callback(null, selected.address, selected.family),
+    headers: {
+      accept: "text/html, text/plain;q=0.9, */*;q=0.1",
+      "user-agent": CONTROLLED_FETCH_USER_AGENT,
+    },
+    lookup: (_hostname, options, callback) => options.all
+      ? callback(null, [{ address: selected.address, family: selected.family }])
+      : callback(null, selected.address, selected.family),
     ...(url.protocol === "https:" ? { servername: url.hostname } : {}),
   });
   const abort = () => request.destroy(new Error("Controlled fetch aborted"));

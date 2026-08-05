@@ -315,12 +315,20 @@ const projectInputSchemas = {
     decided_at: z.string().datetime({ offset: true }),
     single_family_fallback: z.boolean().default(false),
     single_family_fallback_reason: z.string().trim().min(1).max(2000).optional(),
+    official_exclusion: z.boolean().default(false),
+    official_exclusion_reason: z.string().trim().min(1).max(2000).optional(),
   }).superRefine((input, context) => {
     if (input.single_family_fallback && !input.single_family_fallback_reason) {
       context.addIssue({ code: "custom", path: ["single_family_fallback_reason"], message: "single_family_fallback_reason is required when single_family_fallback is true" });
     }
     if (!input.single_family_fallback && input.single_family_fallback_reason) {
       context.addIssue({ code: "custom", path: ["single_family_fallback_reason"], message: "single_family_fallback_reason requires single_family_fallback=true" });
+    }
+    if (input.official_exclusion && !input.official_exclusion_reason) {
+      context.addIssue({ code: "custom", path: ["official_exclusion_reason"], message: "official_exclusion_reason is required when official_exclusion is true" });
+    }
+    if (!input.official_exclusion && input.official_exclusion_reason) {
+      context.addIssue({ code: "custom", path: ["official_exclusion_reason"], message: "official_exclusion_reason requires official_exclusion=true" });
     }
   }),
   source_research_fetch_approved: projectInput({ batch_id: z.string().min(1) }),

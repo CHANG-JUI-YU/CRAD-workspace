@@ -44,7 +44,7 @@ Fetched text is passed directly to `intakeRetrievedSource`. The resulting immuta
 
 - `source_research_submit_candidates`: Source Researcher only. Persists bounded model-discovered candidates from explicit work/character intent.
 - `source_research_status`: Source Researcher and Director read the current batch and candidate states.
-- `source_research_approve`: Director only and OpenCode ask-protected. Records the exact approved candidate IDs and batch revision. Approval requires at least two families and an official source when one is available, unless an explicit single-family fallback boolean and non-empty reason are audited.
+- `source_research_approve`: Director only and OpenCode ask-protected. Records the exact approved candidate IDs and batch revision. Approval requires at least two families and an official source when one is available, unless the Director audits an explicit official-exclusion boolean and non-empty reason or an explicit single-family fallback boolean and non-empty reason.
 - `source_research_fetch_approved`: Source Researcher only. Fetches only approved candidates and ingests each as an immutable source revision.
 
 All tools are project scoped and available only at `intake`. Search, status, and fetch do not require a Workflow task or lease. Approval is a mutation and requires exact batch revision.

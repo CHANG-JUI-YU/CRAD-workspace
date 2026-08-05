@@ -40,8 +40,8 @@ describe("Source Research MCP flow", () => {
     expect(directorTools).not.toContain("source_research_submit_candidates");
     expect(directorTools).not.toContain("source_research_fetch_approved");
 
-    interface Candidate { id: string; status: string; source_family_id: string; language: string }
-    interface Batch { id: string; revision: string; candidates: Candidate[]; approvals: Array<{ single_family_fallback?: boolean; single_family_fallback_reason?: string }> }
+    interface Candidate { id: string; status: string; source_family_id: string; source_class: string; language: string }
+    interface Batch { id: string; revision: string; candidates: Candidate[]; approvals: Array<{ single_family_fallback?: boolean; single_family_fallback_reason?: string; official_exclusion?: boolean; official_exclusion_reason?: string }> }
     interface ApprovalResult { batch: Batch }
     interface FetchResult { results: unknown[] }
     interface WorkflowResult { tasks: Array<{ input_artifacts: Array<{ id: string; revision: string }> }> }
@@ -57,18 +57,25 @@ describe("Source Research MCP flow", () => {
       language: "en",
       allowed_domains: ["official.example"],
       result_count: 5,
-      candidates: [{ title: "Official Alice", url: "https://official.example/alice", snippet: "discovery metadata only", language: "en" }],
+      candidates: [
+        { title: "Official Alice", url: "https://official.example/alice", snippet: "discovery metadata only", language: "en" },
+        { title: "Wikipedia Alice", url: "https://en.wikipedia.org/wiki/Alice", snippet: "encyclopedia metadata", language: "en" },
+        { title: "Fandom Alice", url: "https://alice.fandom.com/wiki/Alice", snippet: "wiki metadata", language: "en" },
+      ],
     });
     expect(searched.ok).toBe(true);
     expect((searched.result as Batch & { provider: string }).provider).toBe("model_web");
-    expect(searched.result.candidates[0]).toMatchObject({ source_family_id: "official:official.example", language: "en" });
     const batch = searched.result;
+    const official = batch.candidates.find((candidate) => candidate.source_class === "official")!;
+    const nonOfficial = batch.candidates.filter((candidate) => candidate.source_class !== "official");
+    expect(official).toMatchObject({ source_family_id: "official:official.example", language: "en" });
+    expect(nonOfficial).toHaveLength(2);
     const status = await call<Batch>(director.client, "source_research_status", { batch_id: batch.id });
     expect(status.result.revision).toBe(batch.revision);
     const stale = await call<ApprovalResult>(director.client, "source_research_approve", {
       batch_id: batch.id,
       expected_batch_revision: `sha256:${"0".repeat(64)}`,
-      approved_candidate_ids: [batch.candidates[0].id],
+      approved_candidate_ids: [official.id],
       decision_id: "stale",
       decided_at: "2026-07-18T00:01:00Z",
       single_family_fallback: true,
@@ -78,18 +85,19 @@ describe("Source Research MCP flow", () => {
     const approved = await call<ApprovalResult>(director.client, "source_research_approve", {
       batch_id: batch.id,
       expected_batch_revision: batch.revision,
-      approved_candidate_ids: [batch.candidates[0].id],
+      approved_candidate_ids: nonOfficial.map((candidate) => candidate.id),
       decision_id: "approve-source",
       decided_at: "2026-07-18T00:01:00Z",
-      single_family_fallback: true,
-      single_family_fallback_reason: "No second suitable family was found.",
+      single_family_fallback: false,
+      official_exclusion: true,
+      official_exclusion_reason: "Official candidates are unavailable through the controlled fetch transport.",
     });
-    expect(approved.result.batch.candidates[0].status).toBe("approved");
-    expect(approved.result.batch.approvals.at(-1)).toMatchObject({ single_family_fallback: true, single_family_fallback_reason: "No second suitable family was found." });
+    expect(approved.result.batch.candidates.find((candidate) => candidate.id === official.id)?.status).toBe("rejected");
+    expect(approved.result.batch.approvals.at(-1)).toMatchObject({ official_exclusion: true, official_exclusion_reason: "Official candidates are unavailable through the controlled fetch transport." });
     const fetched = await call<FetchResult>(researcher.client, "source_research_fetch_approved", { batch_id: batch.id });
-    expect(fetched.result.results).toHaveLength(1);
+    expect(fetched.result.results).toHaveLength(2);
     const sources = await listSources(fixture.projectRoot);
-    expect(sources).toHaveLength(1);
+    expect(sources).toHaveLength(2);
     const started = await call<WorkflowResult>(director.client, "workflow_start", {
       expected_workflow_revision: 0,
       event_id: "research-start",
