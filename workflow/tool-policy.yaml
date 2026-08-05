@@ -37,7 +37,12 @@ rules:
     requires_task: false
   - capability: workflow.direct
     tools: [source_intake_local, source_intake_retrieved]
-    stages: [intake, source_processing]
+    stages: [intake, source_processing, facts_review]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
+    tools: [source_append_recuration]
+    stages: [facts_review]
     mutation: true
     requires_task: false
   - capability: source.research

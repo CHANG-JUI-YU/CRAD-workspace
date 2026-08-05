@@ -181,7 +181,7 @@ describe("four-way tool authorization", () => {
   });
 
   it("keeps Facts review status and source repair Director-only without a task lease", async () => {
-    for (const [toolName, stage] of [["facts_review_status", "facts_review"], ["facts_candidate_identity_migrate", "facts_review"], ["facts_recuration_begin", "facts_review"], ["source_processing_repair_begin", "source_processing"]] as const) {
+    for (const [toolName, stage] of [["facts_review_status", "facts_review"], ["facts_candidate_identity_migrate", "facts_review"], ["facts_recuration_begin", "facts_review"], ["source_append_recuration", "facts_review"], ["source_processing_repair_begin", "source_processing"]] as const) {
       const director = await request({ agentId: "director", toolName, taskId: undefined, leaseId: undefined });
       director.workflow = workflowStateSchema.parse({ ...director.workflow, stage, tasks: [] });
       expect(authorizeTool(director)).toEqual({ capability: "workflow.direct" });

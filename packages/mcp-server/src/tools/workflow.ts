@@ -11,6 +11,8 @@ import {
   type WorkflowTask,
 } from "@card-workspace/schemas";
 import {
+  intakeLocalSource,
+  intakeRetrievedSource,
   readSourceManifest,
   getSourceRevision,
   verifyProvenance,
@@ -600,6 +602,54 @@ export const workflowTools = {
     const agent = context.trusted.config.registry.agents.find((candidate) => candidate.id === context.trusted.agentId);
     if (agent?.kind !== "director") mcpFail("FACTS_RECURATION_DENIED", "Only the Director may begin facts re-curation");
     const input = event(context.args);
+    const sourceInputs = await sourceArtifactReferences(context.projectRoot);
+    return commitWorkflowMutation(context.projectRoot, {
+      ...input,
+      actor: context.trusted.agentId,
+      update: (state) => beginFactsRecuration({
+        state,
+        sourceInputs,
+        runId: stringArg(context.args, "run_id"),
+        reason: stringArg(context.args, "reason"),
+        occurredAt: input.occurredAt,
+        actor: context.trusted.agentId,
+      }),
+    });
+  },
+  source_append_recuration: async (context: ToolCallContext) => {
+    const agent = context.trusted.config.registry.agents.find((candidate) => candidate.id === context.trusted.agentId);
+    if (agent?.kind !== "director") mcpFail("SOURCE_APPEND_RECURATION_DENIED", "Only the Director may append sources for facts re-curation");
+    const input = event(context.args);
+    const localPath = context.args.file_path;
+    const retrievedBytes = context.args.bytes_base64;
+    const hasLocalPath = typeof localPath === "string";
+    const hasRetrievedBytes = typeof retrievedBytes === "string";
+    if (hasLocalPath === hasRetrievedBytes) {
+      mcpFail("SOURCE_APPEND_RECURATION_INTAKE_MODE", "Exactly one of file_path or bytes_base64 is required");
+    }
+    if (typeof localPath === "string") {
+      await intakeLocalSource({
+        projectRoot: context.projectRoot,
+        sourceId: stringArg(context.args, "source_id"),
+        title: stringArg(context.args, "title"),
+        filePath: localPath,
+        actor: context.trusted.agentId,
+      });
+    } else {
+      await intakeRetrievedSource({
+        projectRoot: context.projectRoot,
+        sourceId: stringArg(context.args, "source_id"),
+        title: stringArg(context.args, "title"),
+        bytes: Buffer.from(stringArg(context.args, "bytes_base64"), "base64"),
+        requestedUrl: stringArg(context.args, "requested_url"),
+        canonicalUrl: stringArg(context.args, "canonical_url"),
+        fetchedAt: stringArg(context.args, "fetched_at"),
+        actor: context.trusted.agentId,
+        ...(typeof context.args.media_type === "string" ? { mediaType: context.args.media_type } : {}),
+        ...(typeof context.args.extension === "string" ? { extension: context.args.extension } : {}),
+        ...(typeof context.args.language === "string" ? { language: context.args.language } : {}),
+      });
+    }
     const sourceInputs = await sourceArtifactReferences(context.projectRoot);
     return commitWorkflowMutation(context.projectRoot, {
       ...input,

@@ -70,6 +70,10 @@ Rebuild 不是資料修復捷徑。`rebuildFactProjection` 只從已驗證的 im
 - Evidence quote 必須在指定範圍精確匹配；不以模糊相似度或 LLM 判斷取代驗證。
 - accepted fact 不由增量流程靜默改寫；必須有 decision 與 expected projection/fact revision。
 
+## Reference 檔案升級為正式來源
+
+Reference 檔案（技能參考、對照素材）不是正式來源，不得自動提升。只有使用者明確指定某 reference 檔案作為補充事實來源時，才可經 `source_append_recuration`（或 `source_intake_local`）在 facts_review 階段將其 intake 為正式 Source；該 Source 具備完整 lineage（snapshot、revision、provenance），之後的 facts re-curation 會以新舊來源共同重建事實覆蓋。Director 是唯一可在 facts_review 階段觸發此路徑的 Agent，且每次 append 都必須附 run_id 與可稽核 reason；未經使用者明確指定而提升 reference，等同繞過來源授權邊界。
+
 ## Agent/MCP 下一階段
 
 下一階段的 Agent 與 MCP tool 必須直接包裝同一組 `@card-workspace/ingestion` API，不可直接編輯 Sources/Facts 檔案，也不可複製去重、衝突、revision 或交易規則。工具輸入應保留 `projectRoot`、stable IDs、actor、expected revision 與 evidence；工具輸出只回傳 typed result、facts、evidence、decision summary 與 diagnostics，不輸出模型思維鏈。

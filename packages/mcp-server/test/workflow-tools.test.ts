@@ -4,7 +4,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { computeRevision, loadAuthorProject } from "@card-workspace/project";
-import { getJobStatus, intakeRetrievedSource } from "@card-workspace/ingestion";
+import { getJobStatus, intakeRetrievedSource, readSourceManifest } from "@card-workspace/ingestion";
 import { workflowStateSchema } from "@card-workspace/schemas";
 import { commitWorkflowMutation } from "@card-workspace/workflow";
 import { writeYamlFixture } from "@card-workspace/testing";
@@ -356,6 +356,82 @@ describe("workflow MCP tools", () => {
     });
     const binding = created.workflow.tasks[1]!.extensions.source_jobs as Record<string, { job_id: string }>;
     await expect(getJobStatus(fixture.projectRoot, binding.novel!.job_id)).resolves.toMatchObject({
+      extensions: { curation_run_id: "quality-2" },
+    });
+  });
+
+  it("intakes an appended source and begins facts re-curation atomically", async () => {
+    const fixture = await setupMcpWorkspace("source-append-recuration", "source_adaptation");
+    cleanups.push(fixture.workspace.cleanup);
+    const intake = await intakeRetrievedSource({
+      projectRoot: fixture.projectRoot, sourceId: "novel", title: "Novel", bytes: Buffer.from("Exact source."),
+      requestedUrl: "https://example.test/source", canonicalUrl: "https://example.test/source",
+      fetchedAt: "2026-07-18T00:00:00.000Z", actor: "director", mediaType: "text/plain", extension: ".txt",
+    });
+    const appendPath = path.join(fixture.workspace.root, "habits-notes.txt");
+    await writeFile(appendPath, "Additional habits coverage material.", "utf8");
+    const reviewed = await commitWorkflowMutation(fixture.projectRoot, {
+      expectedRevision: 0, eventId: "facts-reviewed", actor: "engine", occurredAt: "2026-07-18T00:01:00.000Z",
+      update: (state) => workflowStateSchema.parse({
+        ...state, stage: "facts_review", revision: 1,
+        gates: ["facts", "blueprint", "content", "publish"].map((id) => ({ id, status: "approved", input_revisions: [], extensions: {} })),
+        tasks: [{
+          id: "curate-facts", kind: "curate-facts", status: "completed", assigned_agent: "fact-curator",
+          capabilities: ["task.execute", "source.process", "facts.propose", "facts.read"],
+          input_artifacts: [{ id: "source-novel", revision: intake.revision.id }], output_contract: "facts-curation-summary@1",
+          dependencies: [], attempt: 1, max_attempts: 3,
+          result: { id: "facts-summary", revision: `sha256:${"d".repeat(64)}`, contract: "facts-curation-summary@1" },
+          extensions: { stage: "source_processing" },
+        }],
+      }),
+    });
+    const trusted = await createTrustedContext(fixture.environment);
+    await expect(workflowTools.source_append_recuration({
+      trusted, workflow: reviewed, projectRoot: fixture.projectRoot,
+      args: {
+        expected_workflow_revision: 1, event_id: "append-mode-invalid", occurred_at: "2026-07-18T00:02:00.000Z",
+        run_id: "quality-2", reason: "Habits dimension lacks coverage", source_id: "habits-notes", title: "Habits notes",
+      },
+    })).rejects.toMatchObject({ code: "SOURCE_APPEND_RECURATION_INTAKE_MODE" });
+    const next = await workflowTools.source_append_recuration({
+      trusted, workflow: reviewed, projectRoot: fixture.projectRoot,
+      args: {
+        expected_workflow_revision: 1, event_id: "append-recuration-started", occurred_at: "2026-07-18T00:02:00.000Z",
+        run_id: "quality-2", reason: "Habits dimension lacks coverage",
+        source_id: "habits-notes", title: "Habits notes", file_path: appendPath,
+      },
+    });
+    const manifest = await readSourceManifest(fixture.projectRoot);
+    const appended = manifest.sources.find((source) => source.id === "habits-notes");
+    if (!appended) throw new Error("appended source missing from manifest");
+    expect(next.stage).toBe("source_processing");
+    expect(next.tasks[1]).toMatchObject({
+      id: "curate-facts-recurate-quality-2", status: "pending",
+      input_artifacts: [
+        { id: "source-novel", revision: intake.revision.id },
+        { id: "source-habits-notes", revision: appended.current_revision_id },
+      ],
+      extensions: { curation_run_id: "quality-2" },
+    });
+    expect(next.gates.every((gate) => gate.status === "pending" && gate.input_revisions.length === 0)).toBe(true);
+    const curator = await createTrustedContext({ ...fixture.environment, CARD_WORKSPACE_AGENT_ID: "fact-curator" });
+    const claimed = await workflowTools.task_claim({
+      trusted: curator, workflow: next, projectRoot: fixture.projectRoot,
+      args: {
+        task_id: "curate-facts-recurate-quality-2", lease_id: "append-lease", lease_duration_ms: 60_000,
+        expected_workflow_revision: 2, event_id: "append-claimed", occurred_at: "2026-07-18T00:03:00.000Z",
+      },
+    });
+    const created = await sourceTools.source_create_chunks({
+      trusted: curator, workflow: claimed, projectRoot: fixture.projectRoot,
+      args: {
+        task_id: "curate-facts-recurate-quality-2", lease_id: "append-lease",
+        source_id: "habits-notes", source_revision_id: appended.current_revision_id,
+        expected_workflow_revision: 3, event_id: "append-job-created", occurred_at: "2026-07-18T00:04:00.000Z",
+      },
+    });
+    const binding = created.workflow.tasks[1]!.extensions.source_jobs as Record<string, { job_id: string }>;
+    await expect(getJobStatus(fixture.projectRoot, binding["habits-notes"]!.job_id)).resolves.toMatchObject({
       extensions: { curation_run_id: "quality-2" },
     });
   });

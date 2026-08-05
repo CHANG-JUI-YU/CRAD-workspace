@@ -39,6 +39,7 @@ export const TOOL_REGISTRY: Readonly<Record<string, ToolInvariant>> = Object.fre
   task_repair_resume: mutationTool,
   source_processing_repair_begin: mutationTool,
   facts_recuration_begin: mutationTool,
+  source_append_recuration: mutationTool,
   workflow_answer_interview: mutationTool,
   workflow_approve_gate: mutationTool,
   workflow_reject_gate: mutationTool,
