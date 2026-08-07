@@ -168,6 +168,18 @@ describe("four-way tool authorization", () => {
     expect(() => authorizeTool(denied)).toThrow(/not authorized/u);
   });
 
+  it("allows only Director to retry an invalid-output task without a task lease", async () => {
+    for (const stage of ["blueprint", "pre_world_authoring", "pre_world_review", "authoring", "semantic_review", "post_world_authoring", "post_world_review", "greetings_authoring", "content_review"] as const) {
+      const director = await request({ agentId: "director", toolName: "task_retry_begin", taskId: undefined, leaseId: undefined });
+      director.workflow = workflowStateSchema.parse({ ...director.workflow, stage, tasks: [] });
+      expect(authorizeTool(director)).toEqual({ capability: "workflow.direct" });
+      expect(() => authorizeTool({ ...director, agentId: "zhuji-creator" })).toThrow(/not authorized/u);
+    }
+    const denied = await request({ agentId: "director", toolName: "task_retry_begin", taskId: undefined, leaseId: undefined });
+    denied.workflow = workflowStateSchema.parse({ ...denied.workflow, stage: "compile_preview", tasks: [] });
+    expect(() => authorizeTool(denied)).toThrow(/not authorized/u);
+  });
+
   it("allows only Director to resume a repaired exhausted task without a task lease", async () => {
     for (const stage of ["blueprint", "pre_world_authoring", "pre_world_review", "authoring", "semantic_review", "post_world_authoring", "post_world_review", "greetings_authoring", "content_review"] as const) {
       const director = await request({ agentId: "director", toolName: "task_repair_resume", taskId: undefined, leaseId: undefined });

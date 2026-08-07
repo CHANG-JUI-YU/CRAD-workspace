@@ -179,9 +179,166 @@ describe("facts review pagination", () => {
       ...context,
       args: { decision: { candidate_id: "candidate-occurrence-" + "a".repeat(64) }, expected_projection_revision: "sha256:" + "a".repeat(64) },
     })).rejects.toBeDefined();
-    await expect(factTools.provenance_trace({ ...context, args: { id: "missing" } })).rejects.toBeDefined();
+  await expect(factTools.provenance_trace({ ...context, args: { id: "missing" } })).rejects.toBeDefined();
   });
 });
+
+it("fact_review_batch 原子批次審核並回傳摘要而非 register 快照", async () => {
+  const { setupMcpWorkspace } = await import("./helpers.js");
+  const { createTrustedContext } = await import("../src/context.js");
+  const { loadAuthorProject } = await import("@card-workspace/project");
+  const { readFactProjection } = await import("@card-workspace/ingestion");
+  const fixture = await setupMcpWorkspace("facts-batch-review");
+  const trusted = await createTrustedContext(fixture.environment);
+  const loaded = await loadAuthorProject(fixture.workspace.projectsRoot, "facts-batch-review");
+  const empty = await readFactProjection(fixture.projectRoot);
+  const decision = {
+    schema_version: 1,
+    id: "batch-decision",
+    candidate_id: `candidate-occurrence-${"0".repeat(64)}`,
+    fact_id: "fact-batch",
+    type: "rejected" as const,
+    rationale: "Not active",
+    actor: "director",
+    decided_at: "2027-07-18T00:00:00.000Z",
+    extensions: {},
+  };
+  await expect(factTools.fact_review_batch({
+    trusted,
+    workflow: loaded.workflow!,
+    projectRoot: fixture.projectRoot,
+    args: { decisions: [], expected_projection_revision: empty.register.revision },
+  })).rejects.toMatchObject({ code: "FACT_REVIEW_BATCH_EMPTY" });
+  await expect(factTools.fact_review_batch({
+    trusted,
+    workflow: loaded.workflow!,
+    projectRoot: fixture.projectRoot,
+    args: { decisions: [decision], expected_projection_revision: empty.register.revision },
+  })).rejects.toMatchObject({ code: "FACT_CANDIDATE_NOT_ACTIVE" });
+  await expect(factTools.fact_review_batch({
+    trusted,
+    workflow: loaded.workflow!,
+    projectRoot: fixture.projectRoot,
+    args: {
+      decisions: [{ ...decision, id: "duplicate" }, { ...decision, id: "duplicate" }],
+      expected_projection_revision: empty.register.revision,
+    },
+  })).rejects.toMatchObject({ code: "FACT_REVIEW_BATCH_DUPLICATE_DECISION" });
+  await expect(factTools.fact_review_batch({
+    trusted,
+    workflow: loaded.workflow!,
+    projectRoot: fixture.projectRoot,
+    args: { decisions: [decision], expected_projection_revision: `sha256:${"0".repeat(64)}` },
+  })).rejects.toMatchObject({ code: "FACT_PROJECTION_STALE" });
+});
+
+
+it("conflict_list 分頁回傳 exact member fact IDs 且限 Director", async () => {
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const path = await import("node:path");
+  const { setupMcpWorkspace } = await import("./helpers.js");
+  const { createTrustedContext } = await import("../src/context.js");
+  const { loadAuthorProject } = await import("@card-workspace/project");
+  const { canonicalJson } = await import("@card-workspace/project");
+  const { candidateBatchSchema, factCandidateSchema } = await import("@card-workspace/schemas");
+  const { computeCandidateBatchHash, readFactProjection, reviewCandidates } = await import("@card-workspace/ingestion");
+  const fixture = await setupMcpWorkspace("facts-conflict-list");
+  const trusted = await createTrustedContext(fixture.environment);
+  const loaded = await loadAuthorProject(fixture.workspace.projectsRoot, "facts-conflict-list");
+  const timestamp = "2026-07-13T10:00:00.000Z";
+
+  const makeCandidate = (id: string, predicate: string, value: string) => factCandidateSchema.parse({
+    schema_version: 1,
+    id,
+    subject: "alice",
+    predicate,
+    value,
+    classification: "source_fact",
+    confidence: 0.9,
+    evidence: [{
+      id: `evidence-${id}`,
+      source_id: "novel",
+      source_revision_id: `sha256:${"a".repeat(64)}`,
+      chunk_set_id: "set-1",
+      chunk_id: "chunk-1",
+      chunk_hash: `sha256:${"b".repeat(64)}`,
+      quote: value,
+      normalized_character_range: [0, value.length],
+      normalized_line_range: [1, 1],
+    }],
+    status: "pending_review",
+    created_by: "curator",
+    created_at: timestamp,
+  });
+  const store = async (item: unknown, batchId: string) => {
+    const normalized = candidateBatchSchema.parse({
+      schema_version: 1,
+      id: batchId,
+      source_id: "novel",
+      source_revision_id: `sha256:${"a".repeat(64)}`,
+      chunk_set_id: "set-1",
+      chunk_id: "chunk-1",
+      chunk_hash: `sha256:${"b".repeat(64)}`,
+      job_id: "job-1",
+      input_revision: `sha256:${"c".repeat(64)}`,
+      candidates: [item],
+      created_by: "curator",
+      created_at: timestamp,
+      content_hash: `sha256:${"0".repeat(64)}`,
+    });
+    const batch = candidateBatchSchema.parse({ ...normalized, content_hash: computeCandidateBatchHash(normalized) });
+    await mkdir(path.join(fixture.projectRoot, "facts", "candidates"), { recursive: true });
+    await writeFile(path.join(fixture.projectRoot, "facts", "candidates", `${batch.id}.json`), canonicalJson(batch), "utf8");
+  };
+  const candidates = [
+    makeCandidate(occurrence(300), "appearance.hair", "black"),
+    makeCandidate(occurrence(301), "appearance.hair", "brown"),
+    makeCandidate(occurrence(302), "appearance.height", "tall"),
+    makeCandidate(occurrence(303), "appearance.height", "short"),
+  ];
+  for (const [index, item] of candidates.entries()) await store(item, `batch-conflict-${index}`);
+  const before = await readFactProjection(fixture.projectRoot);
+  const result = await reviewCandidates(fixture.projectRoot, {
+    decisions: [
+      { schema_version: 1, id: "decision-1", candidate_id: candidates[0]!.id, fact_id: "fact-hair-a", type: "accepted", rationale: "ok", actor: "director", decided_at: timestamp },
+      { schema_version: 1, id: "decision-2", candidate_id: candidates[1]!.id, fact_id: "fact-hair-b", type: "accepted", rationale: "ok", actor: "director", decided_at: timestamp },
+      { schema_version: 1, id: "decision-3", candidate_id: candidates[2]!.id, fact_id: "fact-height-a", type: "accepted", rationale: "ok", actor: "director", decided_at: timestamp },
+      { schema_version: 1, id: "decision-4", candidate_id: candidates[3]!.id, fact_id: "fact-height-b", type: "accepted", rationale: "ok", actor: "director", decided_at: timestamp },
+    ],
+    expectedProjectionRevision: before.register.revision,
+  });
+  expect(result.conflicts_opened).toHaveLength(2);
+
+  const firstPage = await factTools.conflict_list({
+    trusted,
+    workflow: loaded.workflow!,
+    projectRoot: fixture.projectRoot,
+    args: { limit: 1 },
+  });
+  expect(firstPage.projection_revision).toMatch(/^sha256:[a-f0-9]{64}$/u);
+  expect(firstPage.conflicts).toHaveLength(1);
+  expect(firstPage.next_cursor).toBe(firstPage.conflicts[0]!.id);
+  expect(firstPage.conflicts[0]!.members.map((member: { fact_id?: string }) => member.fact_id).sort()).toEqual(["fact-hair-a", "fact-hair-b"]);
+  const secondPage = await factTools.conflict_list({
+    trusted,
+    workflow: loaded.workflow!,
+    projectRoot: fixture.projectRoot,
+    args: { limit: 1, cursor: firstPage.next_cursor },
+  });
+  expect(secondPage.conflicts).toHaveLength(1);
+  expect(secondPage.next_cursor).toBeUndefined();
+  expect(secondPage.conflicts[0]!.members.map((member: { fact_id?: string }) => member.fact_id).sort()).toEqual(["fact-height-a", "fact-height-b"]);
+
+  const curatorTrusted = await createTrustedContext({ ...fixture.environment, CARD_WORKSPACE_AGENT_ID: "fact-curator" });
+  await expect(factTools.conflict_list({
+    trusted: curatorTrusted,
+    workflow: loaded.workflow!,
+    projectRoot: fixture.projectRoot,
+    args: { limit: 10 },
+  })).rejects.toMatchObject({ code: "FACTS_CONFLICT_LIST_DENIED" });
+  await fixture.workspace.cleanup();
+});
+
 
 
 it("covers Facts status without an active curation and optional review inputs", async () => {

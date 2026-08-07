@@ -1,4 +1,5 @@
 import { readdir, readFile } from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -385,14 +386,23 @@ export async function buildProject(options: BuildProjectOptions): Promise<BuildP
 
 async function autoDetectAvatar(projectRoot: string): Promise<string> {
   const assetsDir = path.join(projectRoot, "assets");
-  const entries = await readdir(assetsDir, { withFileTypes: true });
+  let entries: Dirent[] = [];
+  try {
+    entries = await readdir(assetsDir, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      entries = [];
+    } else {
+      throw error;
+    }
+  }
   const pngs = entries
     .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".png"))
     .map((entry) => entry.name);
   if (pngs.length === 0) {
     throw new ProjectError(
       "AVATAR_NOT_FOUND",
-      "assets/ 目錄下找不到任何 PNG 頭像，請放入頭像圖片或在 project.yaml 的 card.avatar 指定路徑",
+      "assets/ 目錄不存在或找不到任何 PNG 頭像，請放入頭像圖片或在 project.yaml 的 card.avatar 指定路徑",
     );
   }
   return `assets/${pngs[0]}`;

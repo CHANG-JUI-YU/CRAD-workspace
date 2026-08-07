@@ -436,6 +436,85 @@ describe("workflow MCP tools", () => {
     });
   });
 
+  it("re-curates only the requested sources when recurate_source_ids is passed", async () => {
+    const fixture = await setupMcpWorkspace("source-append-incremental", "source_adaptation");
+    cleanups.push(fixture.workspace.cleanup);
+    const intake = await intakeRetrievedSource({
+      projectRoot: fixture.projectRoot, sourceId: "novel", title: "Novel", bytes: Buffer.from("Exact source."),
+      requestedUrl: "https://example.test/source", canonicalUrl: "https://example.test/source",
+      fetchedAt: "2026-07-18T00:00:00.000Z", actor: "director", mediaType: "text/plain", extension: ".txt",
+    });
+    const appendPath = path.join(fixture.workspace.root, "habits-notes.txt");
+    await writeFile(appendPath, "Additional habits coverage material.", "utf8");
+    const reviewed = await commitWorkflowMutation(fixture.projectRoot, {
+      expectedRevision: 0, eventId: "facts-reviewed", actor: "engine", occurredAt: "2026-07-18T00:01:00.000Z",
+      update: (state) => workflowStateSchema.parse({
+        ...state, stage: "facts_review", revision: 1,
+        gates: ["facts", "blueprint", "content", "publish"].map((id) => ({ id, status: "approved", input_revisions: [], extensions: {} })),
+        tasks: [{
+          id: "curate-facts", kind: "curate-facts", status: "completed", assigned_agent: "fact-curator",
+          capabilities: ["task.execute", "source.process", "facts.propose", "facts.read"],
+          input_artifacts: [{ id: "source-novel", revision: intake.revision.id }], output_contract: "facts-curation-summary@1",
+          dependencies: [], attempt: 1, max_attempts: 3,
+          result: { id: "facts-summary", revision: `sha256:${"d".repeat(64)}`, contract: "facts-curation-summary@1" },
+          extensions: { stage: "source_processing" },
+        }],
+      }),
+    });
+    const trusted = await createTrustedContext(fixture.environment);
+    const next = await workflowTools.source_append_recuration({
+      trusted, workflow: reviewed, projectRoot: fixture.projectRoot,
+      args: {
+        expected_workflow_revision: 1, event_id: "incremental-append-started", occurred_at: "2026-07-18T00:02:00.000Z",
+        run_id: "quality-3", reason: "Speech dimension lacks coverage for character-4",
+        source_id: "habits-notes", title: "Habits notes", file_path: appendPath,
+        recurate_source_ids: ["source-habits-notes"],
+      },
+    });
+    const manifest = await readSourceManifest(fixture.projectRoot);
+    const appended = manifest.sources.find((source) => source.id === "habits-notes");
+    if (!appended) throw new Error("appended source missing from manifest");
+    expect(next.stage).toBe("source_processing");
+    expect(next.tasks[1]).toMatchObject({
+      id: "curate-facts-recurate-quality-3", status: "pending",
+      input_artifacts: [{ id: "source-habits-notes", revision: appended.current_revision_id }],
+      extensions: { curation_run_id: "quality-3" },
+    });
+    expect(next.gates.every((gate) => gate.status === "pending" && gate.input_revisions.length === 0)).toBe(true);
+    const completedRun = await commitWorkflowMutation(fixture.projectRoot, {
+      expectedRevision: 2, eventId: "incremental-run-completed", actor: "engine", occurredAt: "2026-07-18T00:03:00.000Z",
+      update: (state) => workflowStateSchema.parse({
+        ...state, stage: "facts_review", revision: 3,
+        tasks: state.tasks.map((task) => task.id === "curate-facts-recurate-quality-3"
+          ? { ...task, status: "completed", result: { id: "facts-summary-2", revision: `sha256:${"e".repeat(64)}`, contract: "facts-curation-summary@1" } }
+          : task),
+      }),
+    });
+    const bare = await workflowTools.source_append_recuration({
+      trusted, workflow: completedRun, projectRoot: fixture.projectRoot,
+      args: {
+        expected_workflow_revision: 3, event_id: "incremental-append-bare", occurred_at: "2026-07-18T00:04:00.000Z",
+        run_id: "quality-4", reason: "Bare source id form",
+        source_id: "habits-notes", title: "Habits notes", file_path: appendPath,
+        recurate_source_ids: ["habits-notes"],
+      },
+    });
+    expect(bare.tasks[2]).toMatchObject({
+      id: "curate-facts-recurate-quality-4", status: "pending",
+      input_artifacts: [{ id: "source-habits-notes", revision: appended.current_revision_id }],
+      extensions: { curation_run_id: "quality-4" },
+    });
+    await expect(workflowTools.source_append_recuration({
+      trusted, workflow: bare, projectRoot: fixture.projectRoot,
+      args: {
+        expected_workflow_revision: 4, event_id: "incremental-append-unknown", occurred_at: "2026-07-18T00:04:00.000Z",
+        run_id: "quality-5", reason: "Unknown source id",
+        source_id: "habits-notes-2", title: "Habits notes 2", file_path: appendPath,
+        recurate_source_ids: ["source-missing"],
+      },
+    })).rejects.toMatchObject({ code: "SOURCE_APPEND_RECURATION_SOURCES_EMPTY" });
+  });
+
   it("advertises the complete task claim contract", () => {
     const tool = toolRegistry.task_claim;
     if (!tool || tool.scope !== "project") throw new Error("task_claim is not project-scoped");
@@ -985,6 +1064,47 @@ describe("workflow MCP tools", () => {
     });
   });
 
+  it("reports exact expected and supplied snapshots when a Content Gate approval is stale", async () => {
+    const fixture = await setupMcpWorkspace("content-gate-snapshot-stale");
+    cleanups.push(fixture.workspace.cleanup);
+    const trusted = await createTrustedContext(fixture.environment);
+    const loaded = await loadAuthorProject(fixture.workspace.projectsRoot, "content-gate-snapshot-stale");
+    const targetId = "author-characters-alice-zhuji-01-appearance.yaml";
+    const targetRevision = loaded.sourceRevisions["characters/alice/zhuji/01-appearance.yaml"];
+    if (!targetRevision) throw new Error("Content revision fixture is missing appearance revision");
+    const content = await commitWorkflowMutation(fixture.projectRoot, {
+      expectedRevision: 0, eventId: "content-review-ready", actor: "engine", occurredAt: "2026-07-14T00:00:00.000Z",
+      update: (state) => workflowStateSchema.parse({
+        ...state, stage: "content_review", revision: 1,
+        gates: [
+          { id: "facts", status: "not_required", input_revisions: [], extensions: {} },
+          { id: "blueprint", status: "approved", input_revisions: [], extensions: {} },
+          { id: "content", status: "pending", input_revisions: [], extensions: {} },
+          { id: "publish", status: "pending", input_revisions: [], extensions: {} },
+        ],
+        artifacts: [{ id: targetId, status: "draft", revision: targetRevision, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} }],
+      }),
+    });
+    await expect(workflowTools.workflow_approve_gate({
+      trusted, projectRoot: fixture.projectRoot, workflow: content,
+      args: {
+        expected_workflow_revision: 1,
+        event_id: "content-approve-stale",
+        occurred_at: "2026-07-14T00:02:00.000Z",
+        decision_id: "content-approve-stale",
+        gate_id: "content",
+        input_revisions: [{ id: targetId, revision: `sha256:${"0".repeat(64)}` }],
+        summary: "Approve with a stale revision",
+      },
+    })).rejects.toMatchObject({
+      code: "GATE_SNAPSHOT_STALE",
+      details: {
+        expected: [{ id: targetId, revision: targetRevision }],
+        supplied: [{ id: targetId, revision: `sha256:${"0".repeat(64)}` }],
+      },
+    });
+  });
+
   it("binds the initialized relationship placeholder into the materialized Creator task", async () => {
     const fixture = await setupMcpWorkspace("relationship-materialize", "original", "free", { secondCharacter: true, relationships: true });
     cleanups.push(fixture.workspace.cleanup);
@@ -1242,6 +1362,69 @@ describe("workflow MCP tools", () => {
     });
     expect(recovered.tasks.find((task) => task.id === "create-alice-module")).toMatchObject({ dependencies: ["recover-provider-1"] });
     expect(recovered.decisions.at(-1)).toMatchObject({ kind: "task.recovery.requested", extensions: { successor_task_id: "recover-provider-1" } });
+  });
+
+  it("atomically opens a controlled retry successor for an invalid-output task", async () => {
+    const fixture = await setupMcpWorkspace("task-retry");
+    cleanups.push(fixture.workspace.cleanup);
+    const trusted = await createTrustedContext(fixture.environment);
+    const failed = await commitWorkflowMutation(fixture.projectRoot, {
+      expectedRevision: 0, eventId: "task-invalid-output", actor: "engine", occurredAt: "2026-07-14T00:00:00.000Z",
+      update: (state) => workflowStateSchema.parse({
+        ...state, stage: "authoring", revision: 1,
+        tasks: [
+          {
+            id: "create-alice-inner_nature", kind: "create-character-module", status: "failed", assigned_agent: "zhuji-creator",
+            capabilities: ["task.execute", "character.propose"], input_artifacts: [{ id: "blueprint", revision: `sha256:${"a".repeat(64)}` }],
+            output_contract: "proposal@1", dependencies: [], attempt: 3, max_attempts: 3, failure_summary: "Parameters collapsed",
+            failure: { category: "invalid_output", summary: "Parameters collapsed into a single value", failed_at: "2026-07-14T00:00:00.000Z", failed_by: "zhuji-creator", attempt: 3 },
+            extensions: { stage: "authoring", character_id: "alice", module: "inner_nature" },
+          },
+          {
+            id: "create-alice-extension", kind: "create-character-module", status: "pending", assigned_agent: "zhuji-creator",
+            capabilities: ["task.execute", "character.propose"], input_artifacts: [], output_contract: "proposal@1",
+            dependencies: ["create-alice-inner_nature"], attempt: 0, max_attempts: 3, extensions: { stage: "authoring", character_id: "alice", module: "extension" },
+          },
+        ],
+      }),
+    });
+    const retried = await workflowTools.task_retry_begin({
+      trusted, projectRoot: fixture.projectRoot, workflow: failed,
+      args: {
+        expected_workflow_revision: 1, event_id: "task-retry-begun", occurred_at: "2026-07-14T00:01:00.000Z",
+        task_id: "create-alice-inner_nature", run_id: "format-1", reason: "Retry the exact content with a corrected proposal parameter shape",
+      },
+    });
+    expect(retried.tasks.find((task) => task.id === "create-alice-inner_nature")).toMatchObject({
+      status: "superseded",
+      failure: { category: "invalid_output", summary: "Parameters collapsed into a single value", failed_at: "2026-07-14T00:00:00.000Z", failed_by: "zhuji-creator", attempt: 3 },
+    });
+    expect(retried.tasks.find((task) => task.id === "retry-format-1")).toMatchObject({
+      status: "pending", attempt: 0, max_attempts: 3, assigned_agent: "zhuji-creator",
+      extensions: { retry_of: "create-alice-inner_nature", retry_run_id: "format-1", retry_generation: 1 },
+    });
+    expect(retried.tasks.find((task) => task.id === "create-alice-extension")).toMatchObject({ dependencies: ["retry-format-1"] });
+    expect(retried.decisions.at(-1)).toMatchObject({ kind: "task.retry.requested", extensions: { successor_task_id: "retry-format-1", failure_category: "invalid_output", retry_generation: 1 } });
+    const nonEligible = await commitWorkflowMutation(fixture.projectRoot, {
+      expectedRevision: 2, eventId: "task-timeout-failure", actor: "engine", occurredAt: "2026-07-14T00:02:00.000Z",
+      update: (state) => workflowStateSchema.parse({
+        ...state, revision: 3,
+        tasks: [{
+          id: "create-alice-appearance", kind: "create-character-module", status: "failed", assigned_agent: "zhuji-creator",
+          capabilities: ["task.execute", "character.propose"], input_artifacts: [{ id: "blueprint", revision: `sha256:${"a".repeat(64)}` }],
+          output_contract: "proposal@1", dependencies: [], attempt: 3, max_attempts: 3, failure_summary: "Timeout",
+          failure: { category: "provider_timeout", summary: "Timeout", failed_at: "2026-07-14T00:02:00.000Z", failed_by: "zhuji-creator", attempt: 3 },
+          extensions: { stage: "authoring", character_id: "alice", module: "appearance" },
+        }],
+      }),
+    });
+    await expect(workflowTools.task_retry_begin({
+      trusted, projectRoot: fixture.projectRoot, workflow: nonEligible,
+      args: {
+        expected_workflow_revision: 3, event_id: "task-retry-denied", occurred_at: "2026-07-14T00:03:00.000Z",
+        task_id: "create-alice-appearance", run_id: "format-2", reason: "Not eligible",
+      },
+    })).rejects.toMatchObject({ code: "TASK_RETRY_CATEGORY_NOT_ELIGIBLE" });
   });
 
   it("resumes the same recovery-exhausted task once after an audited project repair", async () => {

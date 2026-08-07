@@ -118,6 +118,16 @@ describe("source adapter selection", () => {
 });
 
 describe("text and structured adapters", () => {
+  it("MediaWiki 模板開頭（{{）依 text hint 走 text adapter 而非誤判 JSON", () => {
+    const wikitext = "{{Infobox character\n| name = Hachiman\n}}\nHachiman is the protagonist.";
+    const withMediaType = extractSource(Buffer.from(wikitext), { mediaType: "text/plain" });
+    expect(withMediaType).toMatchObject({ adapter: { id: "text" }, evidence: "raw" });
+    expect(withMediaType.text).toBe(wikitext);
+    const withExtension = extractSource(Buffer.from(wikitext), { extension: ".txt" });
+    expect(withExtension).toMatchObject({ adapter: { id: "text" }, evidence: "raw" });
+    expectCode(() => extractSource(Buffer.from(wikitext), {}), "SOURCE_FORMAT_UNSUPPORTED");
+  });
+
   it("fatal 解碼但保留 BOM、換行與 Unicode 原文", () => {
     const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from("甲\r\n乙\r丙\n")]);
     const result = extractSource(bytes, { format: "chat" });

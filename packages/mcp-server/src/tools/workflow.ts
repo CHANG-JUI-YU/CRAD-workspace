@@ -27,6 +27,7 @@ import {
   beginCharacterReviewRetry,
   beginFactsRecuration,
   beginTaskRecovery,
+  beginTaskRetry,
   beginGreetingsRevision,
   beginWorldAuthoring,
   beginWorldRevision,
@@ -41,6 +42,7 @@ import {
   resumeTaskAfterRepair,
   startConfiguredWorkflow,
   submitTask,
+  WorkflowError,
 } from "@card-workspace/workflow";
 import {
   canonicalYaml,
@@ -563,6 +565,23 @@ export const workflowTools = {
       }),
     });
   },
+  task_retry_begin: async (context: ToolCallContext) => {
+    const agent = context.trusted.config.registry.agents.find((candidate) => candidate.id === context.trusted.agentId);
+    if (agent?.kind !== "director") mcpFail("TASK_RETRY_DENIED", "Only the Director may open a controlled task retry");
+    const input = event(context.args);
+    return commitWorkflowMutation(context.projectRoot, {
+      ...input,
+      actor: context.trusted.agentId,
+      update: (state) => beginTaskRetry({
+        state,
+        taskId: stringArg(context.args, "task_id"),
+        runId: stringArg(context.args, "run_id"),
+        reason: stringArg(context.args, "reason"),
+        occurredAt: input.occurredAt,
+        actor: context.trusted.agentId,
+      }),
+    });
+  },
   task_repair_resume: async (context: ToolCallContext) => {
     const agent = context.trusted.config.registry.agents.find((candidate) => candidate.id === context.trusted.agentId);
     if (agent?.kind !== "director") mcpFail("TASK_REPAIR_RESUME_DENIED", "Only the Director may resume a task after repair");
@@ -651,6 +670,29 @@ export const workflowTools = {
       });
     }
     const sourceInputs = await sourceArtifactReferences(context.projectRoot);
+    if (Array.isArray(context.args.recurate_source_ids)) {
+      const ids = new Set(context.args.recurate_source_ids.flatMap((id) => {
+        if (typeof id !== "string") return [];
+        const bare = id.startsWith("source-") ? id.slice("source-".length) : id;
+        return [id, bare, `source-${id}`, `source-${bare}`];
+      }));
+      const filtered = sourceInputs.filter((ref) => ids.has(ref.id) || ids.has(ref.id.slice("source-".length)));
+      if (filtered.length === 0) {
+        mcpFail("SOURCE_APPEND_RECURATION_SOURCES_EMPTY", "recurate_source_ids must include at least one known source ID");
+      }
+      return commitWorkflowMutation(context.projectRoot, {
+        ...input,
+        actor: context.trusted.agentId,
+        update: (state) => beginFactsRecuration({
+          state,
+          sourceInputs: filtered,
+          runId: stringArg(context.args, "run_id"),
+          reason: stringArg(context.args, "reason"),
+          occurredAt: input.occurredAt,
+          actor: context.trusted.agentId,
+        }),
+      });
+    }
     return commitWorkflowMutation(context.projectRoot, {
       ...input,
       actor: context.trusted.agentId,
@@ -1075,7 +1117,10 @@ async function gate(context: ToolCallContext, action: "approve" | "reject") {
     ];
     const normalize = (references: typeof expected) => [...references].sort((left, right) => left.id.localeCompare(right.id));
     if (JSON.stringify(normalize(inputRevisions)) !== JSON.stringify(normalize(expected))) {
-      mcpFail("FACTS_GATE_SNAPSHOT_STALE", "Facts Gate approval requires exact current register revisions");
+      mcpFail("FACTS_GATE_SNAPSHOT_STALE", "Facts Gate approval requires exact current register revisions", {
+        expected: normalize(expected),
+        supplied: normalize(inputRevisions),
+      });
     }
     inputRevisions = expected;
   }
@@ -1100,18 +1145,24 @@ async function gate(context: ToolCallContext, action: "approve" | "reject") {
     ? inputRevisions
     : deriveGateSnapshot(decisionState, stringArg(context.args, "gate_id") as "facts" | "blueprint" | "content" | "publish");
   if (inputRevisions.length === 0) inputRevisions = authoritative;
-  const result = decideGate(decisionState, {
-    decisionId: stringArg(context.args, "decision_id"),
-    gateId: stringArg(context.args, "gate_id") as "facts" | "blueprint" | "content" | "publish",
-    action,
-    actor: "opencode-user",
-    actorRole: "user",
-    decidedAt: input.occurredAt,
-    inputRevisions,
-    summary: stringArg(context.args, "summary"),
-    ...(typeof context.args.rejection_route === "string" ? { rejectionRoute: context.args.rejection_route as "facts_recuration" | "blueprint_successor" | "content_revision" | "repreview" | "cancel" } : {}),
-    ...(Array.isArray(context.args.revision_scope) ? { revisionScope: context.args.revision_scope as Array<"character" | "relationship" | "world" | "greetings"> } : {}),
-  });
+  let result;
+  try {
+    result = decideGate(decisionState, {
+      decisionId: stringArg(context.args, "decision_id"),
+      gateId: stringArg(context.args, "gate_id") as "facts" | "blueprint" | "content" | "publish",
+      action,
+      actor: "opencode-user",
+      actorRole: "user",
+      decidedAt: input.occurredAt,
+      inputRevisions,
+      summary: stringArg(context.args, "summary"),
+      ...(typeof context.args.rejection_route === "string" ? { rejectionRoute: context.args.rejection_route as "facts_recuration" | "blueprint_successor" | "content_revision" | "repreview" | "cancel" } : {}),
+      ...(Array.isArray(context.args.revision_scope) ? { revisionScope: context.args.revision_scope as Array<"character" | "relationship" | "world" | "greetings"> } : {}),
+    });
+  } catch (error) {
+    if (error instanceof WorkflowError) mcpFail(error.code, error.message, error.cause);
+    throw error;
+  }
   let nextState = result.state;
   if (action === "reject" && context.args.gate_id === "content" && context.args.rejection_route === "content_revision") {
     const scope = z.array(z.enum(["character", "relationship", "world", "greetings"])).length(1).parse(context.args.revision_scope)[0]!;

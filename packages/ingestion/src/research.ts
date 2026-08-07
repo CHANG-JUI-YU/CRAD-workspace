@@ -74,6 +74,26 @@ function hostMatches(hostname: string, domain: string): boolean {
   return hostname === domain || hostname.endsWith(`.${domain}`);
 }
 
+export function mediawikiApiUrl(url: URL): URL | undefined {
+  const hostname = url.hostname.toLowerCase();
+  if (!hostMatches(hostname, "wikipedia.org") && !hostMatches(hostname, "fandom.com")) return undefined;
+  const rawPage = /^\/wiki\/(.+)$/u.exec(url.pathname)?.[1];
+  if (!rawPage) return undefined;
+  let page: string;
+  try {
+    page = decodeURIComponent(rawPage);
+  } catch {
+    return undefined;
+  }
+  const target = new URL(hostMatches(hostname, "wikipedia.org") ? "/w/api.php" : "/api.php", url.origin);
+  target.searchParams.set("action", "parse");
+  target.searchParams.set("page", page);
+  target.searchParams.set("prop", "wikitext");
+  target.searchParams.set("format", "json");
+  target.searchParams.set("formatversion", "2");
+  return target;
+}
+
 function classify(url: URL, allowedDomains: string[]): ResearchSourceClass | undefined {
   const hostname = url.hostname.toLowerCase();
   if (allowedDomains.some((domain) => hostMatches(hostname, domain))) return "official";
@@ -434,6 +454,7 @@ export async function controlledFetch(options: {
   const requested = canonicalWebUrl(options.url);
   if (!requested) fail("WEB_FETCH_TARGET_DENIED", "Fetch target must be credential-free HTTP(S)");
   let current = requested;
+  let fellBack = false;
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const addresses = await resolveTarget(current, options.resolveDns, timeoutMs);
@@ -458,10 +479,18 @@ export async function controlledFetch(options: {
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         response.body.destroy();
+        if (!fellBack && [403, 429].includes(response.statusCode)) {
+          const apiUrl = mediawikiApiUrl(current);
+          if (apiUrl !== undefined) {
+            current = apiUrl;
+            fellBack = true;
+            continue;
+          }
+        }
         fail("WEB_FETCH_TARGET_DENIED", `Fetch target returned status ${response.statusCode}`);
       }
       const mediaType = header(response.headers, "content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-      if (mediaType !== "text/html" && mediaType !== "text/plain") {
+      if (mediaType !== "text/html" && mediaType !== "text/plain" && mediaType !== "application/json") {
         response.body.destroy();
         fail("WEB_FETCH_CONTENT_UNSUPPORTED", `Unsupported fetch content type: ${mediaType ?? "missing"}`);
       }
@@ -492,9 +521,22 @@ export async function controlledFetch(options: {
         controller.signal.removeEventListener("abort", abortBody);
       }
       const raw = Buffer.concat(chunks);
-      const text = mediaType === "text/html" ? extractHtmlText(raw.toString("utf8")) : raw.toString("utf8").replace(/\s+/gu, " ").trim();
+      let text: string;
+      if (mediaType === "application/json") {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw.toString("utf8"));
+        } catch {
+          fail("WEB_FETCH_CONTENT_UNSUPPORTED", "Fetched JSON payload is not parseable");
+        }
+        const wikitext = (parsed as { parse?: { wikitext?: unknown } }).parse?.wikitext;
+        if (typeof wikitext !== "string") fail("WEB_FETCH_CONTENT_UNSUPPORTED", "Fetched JSON payload has no wikitext body");
+        text = wikitext;
+      } else {
+        text = mediaType === "text/html" ? extractHtmlText(raw.toString("utf8")) : raw.toString("utf8").replace(/\s+/gu, " ").trim();
+      }
       if (text.length < 20) fail("WEB_FETCH_CONTENT_UNSUPPORTED", "Fetched page has no usable body text");
-      return { requestedUrl: requested.href, finalUrl: current.href, mediaType, bytes: Buffer.from(text, "utf8") };
+      return { requestedUrl: requested.href, finalUrl: current.href, mediaType: "text/plain", bytes: Buffer.from(text, "utf8") };
     } finally {
       clearTimeout(timeout);
     }

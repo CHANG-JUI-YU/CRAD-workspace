@@ -53,9 +53,9 @@ describe("agent-lint", () => {
   it("cross-reference plugin agents、skills、schema、capability 與 tool", async () => {
     const root = await createFixture();
     const config = await loadWorkflowConfig(root);
-    expect(config.registry.agents).toHaveLength(19);
-    expect(new Set(config.registry.agents.map((agent) => agent.skill))).toHaveLength(19);
-    expect(config.personalities).toHaveLength(21);
+    expect(config.registry.agents).toHaveLength(22);
+    expect(new Set(config.registry.agents.map((agent) => agent.skill))).toHaveLength(20);
+    expect(config.personalities).toHaveLength(22);
     expect(config.personalities.some((profile) => profile.id === "base-adult")).toBe(true);
     for (const agent of config.registry.agents) {
       expect(config.personalities.some((profile) => profile.id === agent.personality)).toBe(true);

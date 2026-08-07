@@ -1,7 +1,7 @@
 import { blueprintSchema, pluginRevisionIntentSchema, projectManifestSchema, workflowDefinitionSchema, workflowStateSchema, type WorkflowState } from "@card-workspace/schemas";
 import { describe, expect, it } from "vitest";
 
-import { advanceConfiguredWorkflow, beginCharacterExpansion, updateCharacterExpansionBlueprint, beginCharacterRevision, beginCharacterReviewRetry, beginFactsRecuration, beginGreetingsRevision, beginSourceProcessingRepair, beginTaskRecovery, beginScopedContentRevision, beginWorldAuthoring, beginWorldRevision, completeSourceProcessingTask, resumeTaskAfterRepair, startConfiguredWorkflow, materializePluginTasks, WorkflowError } from "../src/index.js";
+import { advanceConfiguredWorkflow, beginCharacterExpansion, updateCharacterExpansionBlueprint, beginCharacterRevision, beginCharacterReviewRetry, beginFactsRecuration, beginGreetingsRevision, beginSourceProcessingRepair, beginTaskRecovery, beginTaskRetry, beginScopedContentRevision, beginWorldAuthoring, beginWorldRevision, completeSourceProcessingTask, resumeTaskAfterRepair, startConfiguredWorkflow, materializePluginTasks, WorkflowError } from "../src/index.js";
 
 const occurredAt = "2026-07-14T00:00:00.000Z";
 
@@ -1640,6 +1640,32 @@ it("covers recovery, completion idempotency, and world/greeting lifecycle guards
   expect(recovered.tasks.at(-1)).toMatchObject({ id: "recover-recover", extensions: { recovery_of: failedTask.id } });
   expect(recovered.tasks.find((task) => task.id === pendingDependent.id)?.dependencies).toEqual(["recover-recover"]);
   expectWorkflowError(() => beginTaskRecovery({ state: recovered, taskId: failedTask.id, runId: "recover-2", failureCategory: "provider_timeout", reason: "retry", occurredAt, actor: "director" }), "TASK_RECOVERY_TARGET_NOT_FAILED");
+
+  const invalidTask = {
+    id: "create-alice-module", kind: "create-character-module" as const, status: "failed" as const, assigned_agent: "zhuji-creator", capabilities: ["task.execute", "character.propose"], input_artifacts: [], output_contract: "proposal@1", dependencies: [], attempt: 3, max_attempts: 3,
+    failure: { category: "invalid_output" as const, summary: "Parameters collapsed into a single value", failed_at: occurredAt, failed_by: "zhuji-creator", attempt: 3 }, extensions: { stage: "authoring", character_id: "alice", module: "inner_nature" },
+  };
+  const invalidState = workflowStateSchema.parse({ ...state(), stage: "authoring", tasks: [invalidTask] });
+  expectWorkflowError(() => beginTaskRetry({ state: invalidState, taskId: "create-alice-module", runId: "format-1", reason: "retry with corrected parameters", occurredAt, actor: "worker" }), "TASK_RETRY_DENIED");
+  expectWorkflowError(() => beginTaskRetry({ state: invalidState, taskId: "missing", runId: "format-1", reason: "retry", occurredAt, actor: "director" }), "TASK_RETRY_TARGET_NOT_FAILED");
+  expectWorkflowError(() => beginTaskRetry({ state: workflowStateSchema.parse({ ...invalidState, tasks: [{ ...invalidTask, attempt: 2 }] }), taskId: invalidTask.id, runId: "format-1", reason: "retry", occurredAt, actor: "director" }), "TASK_RETRY_ATTEMPTS_NOT_EXHAUSTED");
+  expectWorkflowError(() => beginTaskRetry({ state: workflowStateSchema.parse({ ...invalidState, tasks: [{ ...invalidTask, failure: { category: "semantic_failure", summary: "bad content", failed_at: occurredAt, failed_by: "zhuji-creator", attempt: 3 } }] }), taskId: invalidTask.id, runId: "format-1", reason: "retry", occurredAt, actor: "director" }), "TASK_RETRY_CATEGORY_NOT_ELIGIBLE");
+  expectWorkflowError(() => beginTaskRetry({ state: workflowStateSchema.parse({ ...invalidState, entry_kind: "mode_conversion", workflow_definition_id: "mode-conversion-v1" }), taskId: invalidTask.id, runId: "format-1", reason: "retry", occurredAt, actor: "director" }), "TASK_RETRY_STAGE_UNSUPPORTED");
+  const invalidDependent = { id: "create-alice-extension", kind: "create-character-module" as const, status: "claimed" as const, assigned_agent: "zhuji-creator", capabilities: ["task.execute", "character.propose"], input_artifacts: [], output_contract: "proposal@1", dependencies: [invalidTask.id], attempt: 1, max_attempts: 3, lease: { id: "lease", owner: "creator", claimed_at: occurredAt, expires_at: "2099-01-01T00:00:00.000Z" }, extensions: { stage: "authoring" } };
+  expectWorkflowError(() => beginTaskRetry({ state: workflowStateSchema.parse({ ...invalidState, tasks: [invalidTask, invalidDependent] }), taskId: invalidTask.id, runId: "format-1", reason: "retry", occurredAt, actor: "director" }), "TASK_RETRY_ACTIVE_LEASE");
+  const invalidPending = { ...invalidDependent, status: "pending" as const, lease: undefined };
+  const retried = beginTaskRetry({ state: workflowStateSchema.parse({ ...invalidState, tasks: [invalidTask, invalidPending] }), taskId: invalidTask.id, runId: "format-1", reason: "Retry the exact content with a corrected proposal parameter shape", occurredAt, actor: "director" });
+  expect(retried.tasks.at(-1)).toMatchObject({ id: "retry-format-1", attempt: 0, max_attempts: 3, extensions: { retry_of: invalidTask.id, retry_run_id: "format-1", retry_generation: 1 } });
+  expect(retried.tasks.find((task) => task.id === invalidTask.id)?.status).toBe("superseded");
+  expect(retried.tasks.find((task) => task.id === invalidPending.id)?.dependencies).toEqual(["retry-format-1"]);
+  expect(retried.decisions.at(-1)).toMatchObject({ id: "task-retry-format-1", kind: "task.retry.requested", extensions: { successor_task_id: "retry-format-1", failure_category: "invalid_output", retry_generation: 1 } });
+  expectWorkflowError(() => beginTaskRetry({ state: retried, taskId: invalidTask.id, runId: "format-2", reason: "again", occurredAt, actor: "director" }), "TASK_RETRY_TARGET_NOT_FAILED");
+  expectWorkflowError(() => beginTaskRetry({ state: retried, taskId: "retry-format-1", runId: "format-2", reason: "again", occurredAt, actor: "director" }), "TASK_RETRY_TARGET_NOT_FAILED");
+  const exhaustedRetry = workflowStateSchema.parse({ ...state(), stage: "authoring", tasks: [{ ...invalidTask, id: "retry-format-1", failure: { category: "invalid_output", summary: "again", failed_at: occurredAt, failed_by: "zhuji-creator", attempt: 3 }, extensions: { stage: "authoring", character_id: "alice", module: "inner_nature", retry_of: invalidTask.id, retry_generation: 1 } }] });
+  expectWorkflowError(() => beginTaskRetry({ state: exhaustedRetry, taskId: "retry-format-1", runId: "format-3", reason: "again", occurredAt, actor: "director" }), "TASK_RETRY_LINEAGE_EXISTS");
+  expectWorkflowError(() => beginTaskRetry({ state: workflowStateSchema.parse({ ...invalidState, tasks: [{ ...invalidTask, extensions: { stage: "authoring", character_id: "alice", module: "inner_nature", recovery_of: "create-character", recovery_generation: 1 } }] }), taskId: invalidTask.id, runId: "format-4", reason: "after recovery", occurredAt, actor: "director" }), "TASK_RETRY_LINEAGE_EXISTS");
+  const idConflict = workflowStateSchema.parse({ ...invalidState, decisions: [{ id: "task-retry-format-1", kind: "task.retry.requested", actor: "director", decided_at: occurredAt, input_revisions: [], summary: "existing run", extensions: {} }] });
+  expectWorkflowError(() => beginTaskRetry({ state: idConflict, taskId: invalidTask.id, runId: "format-1", reason: "duplicate run", occurredAt, actor: "director" }), "TASK_RETRY_ID_CONFLICT");
 
   const repairTarget = workflowStateSchema.parse({ ...state(), stage: "authoring", tasks: [{ ...failedTask, id: "recover-task", status: "needs_user_decision", failure: { category: "provider_timeout", summary: "timeout", failed_at: occurredAt, failed_by: "worker", attempt: 3 }, failure_summary: "needs repair", extensions: { stage: "authoring", recovery_exhausted: true, recovery_generation: 1, recovery_of: "create-character" } }] });
   expectWorkflowError(() => resumeTaskAfterRepair({ state: repairTarget, taskId: "recover-task", runId: "resume", reason: "fix", occurredAt, actor: "worker" }), "TASK_REPAIR_RESUME_DENIED");

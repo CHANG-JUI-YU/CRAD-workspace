@@ -35,8 +35,22 @@ function hintedFormat(metadata: SourceMetadata): StructuredFormat | undefined {
 }
 
 function looksLikeJson(text: string): boolean {
-  const first = text.replace(/^\uFEFF/u, "").trimStart()[0];
-  return first === "{" || first === "[";
+  const trimmed = text.replace(/^\uFEFF/u, "").trimStart();
+  const first = trimmed[0];
+  if (first === "{") return trimmed[1] === '"' || trimmed[1] === "}";
+  if (first === "[") {
+    const second = trimmed[1];
+    return second === '"'
+      || second === "["
+      || second === "{"
+      || second === "]"
+      || second === "-"
+      || second === "t"
+      || second === "f"
+      || second === "n"
+      || (second !== undefined && second >= "0" && second <= "9");
+  }
+  return false;
 }
 
 function parseJson(text: string): unknown {

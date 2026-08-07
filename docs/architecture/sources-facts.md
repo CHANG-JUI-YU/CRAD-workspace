@@ -70,6 +70,24 @@ Rebuild 不是資料修復捷徑。`rebuildFactProjection` 只從已驗證的 im
 - Evidence quote 必須在指定範圍精確匹配；不以模糊相似度或 LLM 判斷取代驗證。
 - accepted fact 不由增量流程靜默改寫；必須有 decision 與 expected projection/fact revision。
 
+## Facts Gate 核准的 Revision 語意
+
+Facts Gate（`workflow_approve_gate`，gate_id: facts，source_adaptation）要求 `input_revisions` 精確等於引擎從目前 register 檔算出的快照 refs。register 存在三層語意不同的 revision，只有一層是 Gate 接受的：
+
+| 層 | 出現位置 | 計算方式 | Gate 接受 |
+| --- | --- | --- | --- |
+| Semantic register revision | `facts/register.yaml` 內 `revision` 欄位；`facts_review_status.overview.revisions.fact_projection` | 對不含自身 `revision` 欄位的 register 狀態做 canonical JSON 計算 | 否 |
+| Gate snapshot revision | `facts_review_status.overview.revisions.fact_register` | 對完整 register 物件（含 `revision` 欄位）做 canonical JSON 計算 | 是 |
+| Raw text revision | `project_artifact_list` 中 register artifact 的 revision | 對 register 檔案原文做 SHA-256 | 否 |
+
+`facts_review_status.overview.revisions.fact_register` 與 `conflict_register` 是唯一權威來源；`fact_projection`／`conflict_projection`、`project_artifact_list` 的 register artifact revision 與 `workflow_status` 的 source revisions 都不是 Gate 接受的 refs。Gate 拒絕時（`FACTS_GATE_SNAPSHOT_STALE`）錯誤 details 會附上 `expected` 與 `supplied` 兩組 refs，直接以 `expected` 重試即可；若 `supplied` 與 `expected` 不同，代表取得 refs 後 register 已被改寫，應重新查詢 `facts_review_status` 再核准。
+
+## Content Gate 快照語意
+
+Content Gate（gate_id: content，content_review 階段）同樣要求 `input_revisions` 精確等於引擎目前的 exact snapshot，且**不含 blueprint**：快照只包含 `workflow.artifacts` 中 `id` 以 `author-` 開頭（revision 存在、status 非 missing/stale）的產物，加上 `status === "approved"` 的 plugin artifacts，依 id 排序後與 `workflow_status`（full）回傳的 artifacts 全等。`project_artifact_list` 或 source path 形式都不是 Content Gate 接受的 refs。
+
+`workflow_status`（full detail）是唯一權威來源：過濾 `author-*` 並保留其 contract 欄位（若有）即為 `expected`。Gate 拒絕時（`GATE_SNAPSHOT_STALE`）錯誤 details 會附上 `expected` 與 `supplied` 兩組 refs，直接以 `expected` 重試即可。
+
 ## Reference 檔案升級為正式來源
 
 Reference 檔案（技能參考、對照素材）不是正式來源，不得自動提升。只有使用者明確指定某 reference 檔案作為補充事實來源時，才可經 `source_append_recuration`（或 `source_intake_local`）在 facts_review 階段將其 intake 為正式 Source；該 Source 具備完整 lineage（snapshot、revision、provenance），之後的 facts re-curation 會以新舊來源共同重建事實覆蓋。Director 是唯一可在 facts_review 階段觸發此路徑的 Agent，且每次 append 都必須附 run_id 與可稽核 reason；未經使用者明確指定而提升 reference，等同繞過來源授權邊界。

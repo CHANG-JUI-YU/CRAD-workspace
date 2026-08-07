@@ -9,7 +9,7 @@ agents:
     input_contracts: [workflow-state@2, review-report@1, card-inspection@1]
     output_contracts: [workflow-state@2, proposal@1]
     extensions:
-      delegates: [source-researcher, fact-curator, zhuji-creator, palette-creator, relationship-creator, character-critic, greetings-creator, greetings-critic, mode-conversion, card-import-analyst, world-lore-creator, world-lore-critic, mvu-creator, mvu-critic, ejs-creator, ejs-critic, html-creator, html-critic]
+      delegates: [source-researcher, fact-curator, fact-reviewer-1, fact-reviewer-2, fact-reviewer-3, zhuji-creator, palette-creator, relationship-creator, character-critic, greetings-creator, greetings-critic, mode-conversion, card-import-analyst, world-lore-creator, world-lore-critic, mvu-creator, mvu-critic, ejs-creator, ejs-critic, html-creator, html-critic]
       references: [.agents/skills/director-orchestration/references/workflow-routing.md]
       fixtures: [.agents/skills/director-orchestration/fixtures/routing.yaml]
   - id: source-researcher
@@ -32,6 +32,33 @@ agents:
     input_contracts: [workflow-state@2]
     output_contracts: [facts-curation-summary@1]
     extensions: { references: [.agents/skills/fact-curation/references/extraction.md], fixtures: [.agents/skills/fact-curation/fixtures/candidates.yaml] }
+  - id: fact-reviewer-1
+    kind: fact-reviewer
+    agent_file: .opencode/prompts/fact-reviewer.md
+    skill: fact-review
+    personality: fact-reviewer
+    capabilities: [workflow.read, facts.read, facts.review]
+    input_contracts: [workflow-state@2]
+    output_contracts: []
+    extensions: { references: [.agents/skills/fact-review/references/review-guidelines.md] }
+  - id: fact-reviewer-2
+    kind: fact-reviewer
+    agent_file: .opencode/prompts/fact-reviewer.md
+    skill: fact-review
+    personality: fact-reviewer
+    capabilities: [workflow.read, facts.read, facts.review]
+    input_contracts: [workflow-state@2]
+    output_contracts: []
+    extensions: { references: [.agents/skills/fact-review/references/review-guidelines.md] }
+  - id: fact-reviewer-3
+    kind: fact-reviewer
+    agent_file: .opencode/prompts/fact-reviewer.md
+    skill: fact-review
+    personality: fact-reviewer
+    capabilities: [workflow.read, facts.read, facts.review]
+    input_contracts: [workflow-state@2]
+    output_contracts: []
+    extensions: { references: [.agents/skills/fact-review/references/review-guidelines.md] }
   - id: zhuji-creator
     kind: zhuji-creator
     agent_file: .opencode/prompts/zhuji-creator.md

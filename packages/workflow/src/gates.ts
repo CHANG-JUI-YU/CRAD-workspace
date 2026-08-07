@@ -140,7 +140,10 @@ function assertExactSnapshot(supplied: readonly ArtifactReference[], authoritati
     .map(({ id, revision, contract }) => ({ id, revision, ...(contract ? { contract } : {}) }))
     .sort((left, right) => lexicalCompare(left.id, right.id));
   if (JSON.stringify(normalize(supplied)) !== JSON.stringify(normalize(authoritative))) {
-    workflowFail("GATE_SNAPSHOT_STALE", "Gate decision 必須使用 authoritative exact current snapshot");
+    workflowFail("GATE_SNAPSHOT_STALE", "Gate decision 必須使用 authoritative exact current snapshot", {
+      expected: normalize(authoritative),
+      supplied: normalize(supplied),
+    });
   }
 }
 

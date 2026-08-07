@@ -105,6 +105,12 @@ describe("buildProject", () => {
     await expect(readFile(path.join(workspace.exportsRoot, "build-demo", "build-demo.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("無 assets 目錄且未指定 avatar 時以 AVATAR_NOT_FOUND 明確拒絕而非 ENOENT", async () => {
+    const workspace = await makeBuildProject({ json: true, png: true, v2_backfill: false });
+    await expect(buildProject({ workspaceRoot: workspace.root, projectId: "build-demo" }))
+      .rejects.toMatchObject({ code: "AVATAR_NOT_FOUND" });
+  });
+
   it("正式 build 只回傳 build/export operations 與 CAS expectations", async () => {
     const workspace = await makeBuildProject({ json: true, png: false, v2_backfill: false });
     const result = await buildProject({ workspaceRoot: workspace.root, projectId: "build-demo" });
@@ -447,7 +453,7 @@ describe("buildProject", () => {
 
     await expect(
       buildProject({ workspaceRoot: workspace.root, projectId: "build-demo", png: true }),
-    ).rejects.toMatchObject({ code: "ENOENT" });
+    ).rejects.toMatchObject({ code: "AVATAR_NOT_FOUND" });
     await expect(readFile(exportPath, "utf8")).resolves.toBe("old");
   });
 

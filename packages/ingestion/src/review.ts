@@ -232,6 +232,122 @@ export async function reviewCandidate(projectRoot: string, input: ReviewCandidat
   return { fact: projection.register.facts.find((item) => item.id === fact.id)!, projection };
 }
 
+export interface ReviewCandidatesInput {
+  decisions: unknown[];
+  expectedProjectionRevision: Revision;
+  expectedFactRevisions?: Readonly<Record<string, number>>;
+  patches?: Readonly<Record<string, FactPatch>>;
+}
+
+export interface ReviewCandidatesResult {
+  reviewed: number;
+  projection_revision: Revision;
+  facts: Array<{ id: string; fact_revision: number; status: Fact["status"] }>;
+  conflicts_opened: string[];
+}
+
+export async function reviewCandidates(projectRoot: string, input: ReviewCandidatesInput): Promise<ReviewCandidatesResult> {
+  if (input.decisions.length === 0) {
+    fail("FACT_REVIEW_BATCH_EMPTY", "批次必須至少包含一個 decision");
+  }
+  const callerDecisions = input.decisions.map(validateReviewDecision);
+  const decisionIds = new Set<string>();
+  const factIds = new Set<string>();
+  for (const decision of callerDecisions) {
+    if (decisionIds.has(decision.id)) {
+      fail("FACT_REVIEW_BATCH_DUPLICATE_DECISION", `批次內 decision ID 重複：${decision.id}`);
+    }
+    decisionIds.add(decision.id);
+    if (factIds.has(decision.fact_id)) {
+      fail("FACT_REVIEW_BATCH_DUPLICATE_FACT", `批次內 fact ID 重複：${decision.fact_id}`);
+    }
+    factIds.add(decision.fact_id);
+  }
+  const [current, journal, candidates, historicalCandidates, manifest] = await Promise.all([
+    readFactProjection(projectRoot),
+    readFactJournal(projectRoot),
+    readActiveCandidateIndex(projectRoot),
+    readHistoricalCandidateIndex(projectRoot),
+    readSourceManifest(projectRoot),
+  ]);
+  assertProjectionExpectation(current.register.revision, input.expectedProjectionRevision);
+  const additions: NewJournalEvent[] = [];
+  const reviewed: ReviewCandidatesResult["facts"] = [];
+  const conflictsOpened: string[] = [];
+  const batchFacts: Fact[] = [...current.register.facts];
+  const batchConflicts: Conflict[] = [...current.conflicts.conflicts];
+  for (const callerDecision of callerDecisions) {
+    const candidate = resolveActiveCandidate(candidates.candidates, callerDecision.candidate_id);
+    const usesLegacyRawId = !candidates.candidates.has(callerDecision.candidate_id);
+    if (candidate === undefined || (usesLegacyRawId && !historicalCandidates.has(callerDecision.candidate_id))) {
+      fail("FACT_CANDIDATE_NOT_ACTIVE", `candidate 不屬於 active curation：${callerDecision.candidate_id}`);
+    }
+    const decision = reviewDecisionSchema.parse({ ...callerDecision, candidate_id: candidate.id });
+    if (decision.type !== "rejected" && diagnoseFactCandidateQuality(candidate).length > 0) {
+      fail("FACT_CANDIDATE_QUALITY_DENIED", `不合格 candidate 只能被 rejected：${decision.candidate_id}`);
+    }
+    const previous = batchFacts.find((fact) => fact.id === decision.fact_id);
+    const expectedRevision = input.expectedFactRevisions?.[decision.fact_id];
+    if (previous !== undefined) {
+      if (expectedRevision === undefined || expectedRevision !== previous.fact_revision) {
+        fail("FACT_REVISION_STALE", `fact revision 衝突：${decision.fact_id}`);
+      }
+    } else if (expectedRevision !== undefined) {
+      fail("FACT_REVISION_STALE", `新 fact 不接受 expected fact revision：${decision.fact_id}`);
+    }
+    const patch = input.patches?.[decision.fact_id];
+    if (previous?.status === "accepted" && patch !== undefined && expectedRevision === undefined) {
+      fail("FACT_ACCEPTED_PATCH_REQUIRES_REVISION", `accepted fact 修改需要 expected fact revision：${decision.fact_id}`);
+    }
+    const tiers = [...new Set(candidate.evidence.map((item) =>
+      manifest.sources.find((source) => source.id === item.source_id)?.tier ?? "unknown"))];
+    const fact = reviewedFact(candidate, decision, previous, tiers.length > 0 ? tiers : ["unknown"], patch);
+    additions.push({
+      id: decision.id,
+      kind: `fact.${decision.type}`,
+      aggregate_id: fact.id,
+      actor: decision.actor,
+      timestamp: decision.decided_at,
+      payload: asPayload({ decision, fact }),
+    });
+    if (decision.type === "accepted" && previous === undefined) {
+      const evaluation = evaluateFactCandidate({
+        candidate,
+        register: { ...current.register, facts: batchFacts },
+        conflicts: { ...current.conflicts, conflicts: batchConflicts },
+      });
+      if (evaluation.proposal.kind === "create_conflict" || evaluation.proposal.kind === "update_conflict") {
+        const conflict: Conflict = {
+          ...evaluation.proposal.conflict,
+          members: evaluation.proposal.conflict.members.map((member) =>
+            member.candidate_id === candidate.id
+              ? { fact_id: fact.id, source_id: member.source_id, source_revision_id: member.source_revision_id, value: member.value }
+              : member),
+        };
+        additions.push({
+          id: `${decision.id}-conflict`,
+          kind: "conflict.opened",
+          aggregate_id: conflict.id,
+          actor: decision.actor,
+          timestamp: decision.decided_at,
+          payload: asPayload({ conflict }),
+        });
+        batchConflicts.push(conflict);
+        conflictsOpened.push(conflict.id);
+      }
+    }
+    batchFacts.push(fact);
+    reviewed.push({ id: fact.id, fact_revision: fact.fact_revision, status: fact.status });
+  }
+  const projection = await commitEvents(projectRoot, current, journal, additions);
+  return {
+    reviewed: reviewed.length,
+    projection_revision: projection.register.revision,
+    facts: reviewed,
+    conflicts_opened: conflictsOpened,
+  };
+}
+
 function parseCandidateIdentityBinding(event: JournalVerification["events"][number]): CandidateIdentityBinding | undefined {
   if (event.kind !== "candidate.identity_bound") return undefined;
   const parsed = candidateIdentityBindingSchema.safeParse(event.payload.binding);
@@ -359,6 +475,34 @@ export async function resolveConflict(projectRoot: string, input: ResolveConflic
   });
   const projection = await commitEvents(projectRoot, current, journal, additions);
   return { conflict: projection.conflicts.conflicts.find((item) => item.id === conflict.id)!, projection };
+}
+
+export interface ListConflictsInput {
+  cursor?: string;
+  limit?: number;
+}
+
+export interface ListConflictsResult {
+  projection_revision: Revision;
+  conflicts: Conflict[];
+  next_cursor?: string;
+}
+
+export async function listConflicts(projectRoot: string, input: ListConflictsInput = {}): Promise<ListConflictsResult> {
+  const projection = await readFactProjection(projectRoot);
+  const conflicts = projection.conflicts.conflicts;
+  const limit = input.limit ?? 20;
+  let start = 0;
+  if (input.cursor !== undefined) {
+    const index = conflicts.findIndex((conflict) => conflict.id === input.cursor);
+    start = index === -1 ? conflicts.length : index + 1;
+  }
+  const page = conflicts.slice(start, start + limit);
+  return {
+    projection_revision: projection.register.revision,
+    conflicts: page,
+    ...(start + page.length < conflicts.length ? { next_cursor: page[page.length - 1]!.id } : {}),
+  };
 }
 
 export async function queryFacts(projectRoot: string, filter: QueryFactsFilter = {}): Promise<QueryFactsResult> {

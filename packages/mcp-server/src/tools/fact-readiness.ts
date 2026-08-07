@@ -3,16 +3,18 @@ import {
   diagnoseFactCandidateQuality,
   readActiveCandidateIndex,
   readFactJournal,
+  readHistoricalCandidateIndex,
   resolveActiveCandidate,
   verifyFactProjection,
 } from "@card-workspace/ingestion";
 import type { ProjectCharacter } from "@card-workspace/schemas";
 
 export async function readFactsReadiness(projectRoot: string, characters: readonly ProjectCharacter[]) {
-  const [active, journal, projection] = await Promise.all([
+  const [active, journal, projection, historical] = await Promise.all([
     readActiveCandidateIndex(projectRoot),
     readFactJournal(projectRoot),
     verifyFactProjection(projectRoot),
+    readHistoricalCandidateIndex(projectRoot),
   ]);
   const reviewed = new Set<string>();
   const candidateFactIds = new Map<string, string>();
@@ -21,11 +23,13 @@ export async function readFactsReadiness(projectRoot: string, characters: readon
     const decision = event.payload.decision;
     if (!decision || typeof decision !== "object" || Array.isArray(decision)) continue;
     if (typeof decision.candidate_id !== "string" || typeof decision.fact_id !== "string") continue;
-    const candidate = resolveActiveCandidate(active.candidates, decision.candidate_id);
-    if (!candidate) continue;
-    reviewed.add(candidate.id);
-    candidateFactIds.set(candidate.id, decision.fact_id);
-    if (typeof decision.type === "string") candidateDecisionTypes.set(candidate.id, decision.type);
+    const activeCandidate = resolveActiveCandidate(active.candidates, decision.candidate_id);
+    const historicalCandidate = activeCandidate ?? resolveActiveCandidate(historical, decision.candidate_id);
+    if (!historicalCandidate) continue;
+    candidateFactIds.set(historicalCandidate.id, decision.fact_id);
+    if (!activeCandidate) continue;
+    reviewed.add(activeCandidate.id);
+    if (typeof decision.type === "string") candidateDecisionTypes.set(activeCandidate.id, decision.type);
   }
   const candidateIds = [...active.candidates.keys()].sort();
   const qualityDiagnostics = candidateIds.flatMap((id) => {
@@ -37,7 +41,7 @@ export async function readFactsReadiness(projectRoot: string, characters: readon
   const coverage = buildFactsCoverageReport({
     characters,
     facts: projection.register.facts,
-    activeCandidates: active.candidates,
+    activeCandidates: historical,
     candidateFactIds,
   });
   return {

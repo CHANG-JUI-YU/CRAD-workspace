@@ -121,6 +121,11 @@ rules:
     mutation: true
     requires_task: false
   - capability: workflow.direct
+    tools: [task_retry_begin]
+    stages: [blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, content_review]
+    mutation: true
+    requires_task: false
+  - capability: workflow.direct
     tools: [task_repair_resume]
     stages: [blueprint, pre_world_authoring, pre_world_review, authoring, semantic_review, post_world_authoring, post_world_review, greetings_authoring, content_review]
     mutation: true
@@ -151,12 +156,12 @@ rules:
     mutation: false
     requires_task: true
   - capability: facts.review
-    tools: [fact_review, conflict_resolve]
+    tools: [fact_review, fact_review_batch, conflict_resolve]
     stages: [facts_review]
     mutation: true
     requires_task: false
   - capability: workflow.direct
-    tools: [facts_review_status]
+    tools: [facts_review_status, conflict_list]
     stages: [facts_review]
     mutation: false
     requires_task: false

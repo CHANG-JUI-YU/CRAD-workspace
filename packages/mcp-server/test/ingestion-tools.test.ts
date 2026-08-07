@@ -348,6 +348,11 @@ describe("Sources/Facts MCP adapters", () => {
       summary: "Stale",
     });
     expect(staleGate.payload.error?.code).toBe("FACTS_GATE_SNAPSHOT_STALE");
+    const staleDetails = staleGate.payload.error as { details?: { expected: Array<{ id: string; revision: string }>; supplied: Array<{ id: string; revision: string }> } };
+    const staleSupplied = [...exactRefs.map((item) => item.id === "fact-register" ? { ...item, revision: `sha256:${"0".repeat(64)}` } : item)]
+      .sort((left, right) => left.id.localeCompare(right.id));
+    expect(staleDetails.details?.expected).toEqual([...exactRefs].sort((left, right) => left.id.localeCompare(right.id)));
+    expect(staleDetails.details?.supplied).toEqual(staleSupplied);
     const approved = await call(director.client, "workflow_approve_gate", {
       expected_workflow_revision: 5,
       event_id: "facts-gate-approved",
@@ -366,6 +371,323 @@ describe("Sources/Facts MCP adapters", () => {
     expect(blueprint.payload.result).toMatchObject({ stage: "blueprint" });
     const blueprintTask = blueprint.payload.result.tasks.find((task) => task.kind === "create-blueprint");
     expect(blueprintTask?.input_artifacts).toEqual(expect.arrayContaining(exactRefs));
+
+    await curator.client.close();
+    await curator.server.close();
+    await director.client.close();
+    await director.server.close();
+  });
+
+  it("keeps coverage from earlier curation runs when an incremental run adds a new source", async () => {
+    const fixture = await setupMcpWorkspace("source-e2e-incremental", "source_adaptation");
+    cleanups.push(fixture.workspace.cleanup);
+    const connect = async (agentId: string) => {
+      const { server } = await createMcpServer({ environment: { ...fixture.environment, CARD_WORKSPACE_AGENT_ID: agentId } });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverTransport);
+      const client = new Client({ name: `${agentId}-test`, version: "1" });
+      await client.connect(clientTransport);
+      return { client, server };
+    };
+    const director = await connect("director");
+    const call = async (client: Client, name: string, args: Record<string, unknown>) => {
+      const response = await client.callTool({ name, arguments: { project_id: "source-e2e-incremental", ...args } });
+      const payload = JSON.parse((response.content[0] as { text: string }).text) as {
+        ok?: boolean;
+        result: SourceE2EResult;
+        error?: { code?: string };
+      };
+      return { response, payload };
+    };
+    const runFirstCuration = async () => {
+      expect((await call(director.client, "source_intake_retrieved", {
+        source_id: "novel",
+        title: "Novel",
+        bytes_base64: Buffer.from("前言\nAlice有銀髮😀。\n").toString("base64"),
+        requested_url: "https://example.test/novel",
+        canonical_url: "https://example.test/novel",
+        fetched_at: "2027-07-18T00:00:00.000Z",
+        media_type: "text/plain",
+        extension: ".txt",
+      })).payload.ok).toBe(true);
+      const started = await call(director.client, "workflow_start", {
+        expected_workflow_revision: 0,
+        event_id: "source-start",
+        occurred_at: "2027-07-18T00:01:00.000Z",
+        intake_answers: [{ decision_id: "source-concept", question_id: "concept", answer: "Adapt exact source facts" }],
+        intake_completion: { decision_id: "source-intake-complete", answer: "No additional settings", confirmed_no_additional_settings: true },
+      });
+      expect(started.response.isError).not.toBe(true);
+      const sourceRef = started.payload.result.tasks[0]!.input_artifacts[0]!;
+      const curator = await connect("fact-curator");
+      await call(curator.client, "task_claim", {
+        task_id: "curate-facts",
+        lease_id: "curation-lease",
+        lease_duration_ms: 63_072_000_000,
+        expected_workflow_revision: 1,
+        event_id: "curation-claimed",
+        occurred_at: "2027-07-18T00:02:00.000Z",
+      });
+      const created = await call(curator.client, "source_create_chunks", {
+        task_id: "curate-facts",
+        lease_id: "curation-lease",
+        source_id: sourceRef.id,
+        source_revision_id: sourceRef.revision,
+        expected_workflow_revision: 2,
+        event_id: "novel-job-bound",
+        occurred_at: "2027-07-18T00:03:00.000Z",
+      });
+      const job = created.payload.result.job;
+      const chunkTask = job.next_chunk!;
+      const chunkClaim = await call(curator.client, "source_get_chunk_task", {
+        task_id: "curate-facts",
+        lease_id: "curation-lease",
+        job_id: job.id,
+        claim: true,
+        chunk_id: chunkTask.chunk_id,
+        expected_job_revision: 0,
+        chunk_lease_id: "chunk-lease",
+        chunk_lease_duration_ms: 3_600_000,
+      });
+      const chunk = chunkClaim.payload.result.chunk;
+      const candidate = {
+        schema_version: 1,
+        subject: "alice",
+        predicate: "appearance.hair",
+        value: "silver",
+        classification: "source_fact",
+        confidence: 1,
+        coverage_dimensions: [
+          "identity", "appearance", "personality", "speech", "habits", "background", "relationships",
+        ],
+        scope: { character_ids: ["alice"], extensions: {} },
+        valid_time: { extensions: {} },
+        evidence: [{ id: "evidence-alice-hair", quote: "Alice有銀髮😀。", extensions: {} }],
+        status: "submitted",
+        extensions: {},
+      };
+      const submitted = await call(curator.client, "fact_submit_candidates", {
+        task_id: "curate-facts",
+        lease_id: "curation-lease",
+        chunk_lease_id: "chunk-lease",
+        expected_job_revision: 1,
+        batch: {
+          schema_version: 1 as const,
+          source_id: "novel",
+          source_revision_id: sourceRef.revision,
+          chunk_set_id: chunk.chunk_set_id,
+          chunk_id: chunk.id,
+          chunk_hash: chunk.content_hash,
+          job_id: job.id,
+          input_revision: job.input_revision,
+          candidates: [candidate],
+          created_at: "2027-07-18T00:04:00.000Z",
+          extensions: {},
+        },
+      });
+      const submittedResult = submitted.payload.result as { job: { status: string } };
+      expect(submittedResult.job.status).toBe("completed");
+      const finalized = await call(curator.client, "fact_finalize_curation", {
+        task_id: "curate-facts",
+        lease_id: "curation-lease",
+        result_id: "facts-curation-first",
+        expected_workflow_revision: 3,
+        event_id: "curation-finalized",
+        occurred_at: "2027-07-18T00:05:00.000Z",
+      });
+      expect(finalized.payload.error).toBeUndefined();
+      const advanced = await call(director.client, "workflow_advance", {
+        expected_workflow_revision: 4,
+        event_id: "facts-review-entered",
+        occurred_at: "2027-07-18T00:06:00.000Z",
+      });
+      expect(advanced.payload.result.stage).toBe("facts_review");
+      const statusBefore = await call(director.client, "facts_review_status", {});
+      const statusResult = statusBefore.payload.result as {
+        overview: { counts: { unreviewed: number }; revisions: { fact_projection: string } };
+        page: { items: Array<{ candidate_id: string }> };
+      };
+      const reviewed = await call(director.client, "fact_review", {
+        decision: {
+          schema_version: 1,
+          id: "review-first",
+          candidate_id: statusResult.page.items[0]!.candidate_id,
+          fact_id: "fact-alice-hair",
+          type: "accepted",
+          rationale: "Direct source statement",
+          actor: "director",
+          decided_at: "2027-07-18T00:08:00.000Z",
+          extensions: {},
+        },
+        expected_projection_revision: statusResult.overview.revisions.fact_projection,
+      });
+      expect(reviewed.response.isError).not.toBe(true);
+      await curator.client.close();
+      await curator.server.close();
+      return { sourceRef };
+    };
+    await runFirstCuration();
+
+    const appended = await call(director.client, "source_append_recuration", {
+      expected_workflow_revision: 5,
+      event_id: "incremental-append",
+      occurred_at: "2027-07-18T00:10:00.000Z",
+      run_id: "run-2",
+      reason: "Add habits material",
+      source_id: "source-2",
+      title: "Second source",
+      bytes_base64: Buffer.from("前言\nAlice習慣睡得很好。\n").toString("base64"),
+      requested_url: "https://example.test/second",
+      canonical_url: "https://example.test/second",
+      fetched_at: "2027-07-18T00:09:30.000Z",
+      media_type: "text/plain",
+      extension: ".txt",
+      recurate_source_ids: ["source-2"],
+    });
+    expect(appended.payload.error).toBeUndefined();
+    const appendResult = appended.payload.result;
+    expect(appendResult.stage).toBe("source_processing");
+    const secondTask = appendResult.tasks[1]!;
+    expect(secondTask.kind).toBe("curate-facts");
+    expect(secondTask.input_artifacts).toHaveLength(1);
+    expect(secondTask.input_artifacts[0]!.id).toBe("source-source-2");
+    expect(secondTask.input_artifacts[0]!.revision).toMatch(/^sha256:[0-9a-f]{64}$/u);
+
+    const curator = await connect("fact-curator");
+    await call(curator.client, "task_claim", {
+      task_id: secondTask.id,
+      lease_id: "curation-lease-2",
+      lease_duration_ms: 63_072_000_000,
+      expected_workflow_revision: 6,
+      event_id: "curation-2-claimed",
+      occurred_at: "2027-07-18T00:11:00.000Z",
+    });
+    const created = await call(curator.client, "source_create_chunks", {
+      task_id: secondTask.id,
+      lease_id: "curation-lease-2",
+      source_id: "source-source-2",
+      source_revision_id: secondTask.input_artifacts[0]!.revision,
+      expected_workflow_revision: 7,
+      event_id: "source-2-job-bound",
+      occurred_at: "2027-07-18T00:12:00.000Z",
+    });
+    const job = created.payload.result.job;
+    const chunkTask = job.next_chunk!;
+    const chunkClaim = await call(curator.client, "source_get_chunk_task", {
+      task_id: secondTask.id,
+      lease_id: "curation-lease-2",
+      job_id: job.id,
+      claim: true,
+      chunk_id: chunkTask.chunk_id,
+      expected_job_revision: 0,
+      chunk_lease_id: "chunk-lease-2",
+      chunk_lease_duration_ms: 3_600_000,
+    });
+    const chunk = chunkClaim.payload.result.chunk;
+    const submitted = await call(curator.client, "fact_submit_candidates", {
+      task_id: secondTask.id,
+      lease_id: "curation-lease-2",
+      chunk_lease_id: "chunk-lease-2",
+      expected_job_revision: 1,
+      batch: {
+        schema_version: 1 as const,
+        source_id: "source-2",
+        source_revision_id: secondTask.input_artifacts[0]!.revision,
+        chunk_set_id: chunk.chunk_set_id,
+        chunk_id: chunk.id,
+        chunk_hash: chunk.content_hash,
+        job_id: job.id,
+        input_revision: job.input_revision,
+        candidates: [{
+          schema_version: 1,
+          subject: "alice",
+          predicate: "habits.sleep",
+          value: "睡得很好",
+          classification: "source_fact",
+          confidence: 1,
+          coverage_dimensions: ["habits"],
+          scope: { character_ids: ["alice"], extensions: {} },
+          valid_time: { extensions: {} },
+          evidence: [{ id: "evidence-alice-sleep", quote: "Alice習慣睡得很好。", extensions: {} }],
+          status: "submitted",
+          extensions: {},
+        }],
+        created_at: "2027-07-18T00:13:00.000Z",
+        extensions: {},
+      },
+    });
+    expect((submitted.payload.result as { job: { status: string } }).job.status).toBe("completed");
+    const finalized = await call(curator.client, "fact_finalize_curation", {
+      task_id: secondTask.id,
+      lease_id: "curation-lease-2",
+      result_id: "facts-curation-second",
+      expected_workflow_revision: 8,
+      event_id: "curation-2-finalized",
+      occurred_at: "2027-07-18T00:14:00.000Z",
+    });
+    expect(finalized.payload.error).toBeUndefined();
+    const advanced = await call(director.client, "workflow_advance", {
+      expected_workflow_revision: 9,
+      event_id: "facts-review-2-entered",
+      occurred_at: "2027-07-18T00:15:00.000Z",
+    });
+    expect(advanced.payload.result.stage).toBe("facts_review");
+    const statusAfter = await call(director.client, "facts_review_status", {});
+    const statusResult = statusAfter.payload.result as {
+      overview: {
+        counts: { total: number; unreviewed: number };
+        coverage: {
+          characters: Array<{ character_id: string; covered_dimensions: string[] }>;
+          gate_ready: boolean;
+        };
+        gate_ready: boolean;
+        revisions: { fact_projection: string; fact_register: string; conflict_register: string };
+      };
+    };
+    expect(statusResult.overview.counts.total).toBe(1);
+    expect(statusResult.overview.counts.unreviewed).toBe(1);
+    const covered = statusResult.overview.coverage.characters[0]!.covered_dimensions;
+    expect(covered).toEqual(expect.arrayContaining([
+      "identity", "appearance", "personality", "speech", "habits", "background", "relationships",
+    ]));
+    expect(statusResult.overview.coverage.gate_ready).toBe(true);
+    expect(statusResult.overview.gate_ready).toBe(false);
+
+    const reviewed = await call(director.client, "fact_review", {
+      decision: {
+        schema_version: 1,
+        id: "review-second",
+        candidate_id: (statusAfter.payload.result as {
+          page: { items: Array<{ candidate_id: string }> };
+        }).page.items[0]!.candidate_id,
+        fact_id: "fact-alice-sleep",
+        type: "accepted",
+        rationale: "Direct source statement",
+        actor: "director",
+        decided_at: "2027-07-18T00:16:00.000Z",
+        extensions: {},
+      },
+      expected_projection_revision: statusResult.overview.revisions.fact_projection,
+    });
+    expect(reviewed.response.isError).not.toBe(true);
+    const statusFinal = await call(director.client, "facts_review_status", {});
+    const statusFinalResult = statusFinal.payload.result as {
+      overview: { gate_ready: boolean; revisions: { fact_register: string; conflict_register: string } };
+    };
+    expect(statusFinalResult.overview.gate_ready).toBe(true);
+    const approvedGate = await call(director.client, "workflow_approve_gate", {
+      expected_workflow_revision: 10,
+      event_id: "facts-gate-approved",
+      occurred_at: "2027-07-18T00:17:00.000Z",
+      decision_id: "facts-gate-approved-decision",
+      gate_id: "facts",
+      input_revisions: [
+        { id: "fact-register", revision: statusFinalResult.overview.revisions.fact_register },
+        { id: "conflict-register", revision: statusFinalResult.overview.revisions.conflict_register },
+      ],
+      summary: "Reviewed exact facts",
+    });
+    expect(approvedGate.payload.result.gates.find((gate) => gate.id === "facts")?.status).toBe("approved");
 
     await curator.client.close();
     await curator.server.close();

@@ -1334,6 +1334,106 @@ export function beginTaskRecovery(options: BeginTaskRecoveryOptions): WorkflowSt
   });
 }
 
+export interface BeginTaskRetryOptions {
+  state: WorkflowState;
+  taskId: string;
+  runId: string;
+  reason: string;
+  occurredAt: string;
+  actor: string;
+}
+
+export function beginTaskRetry(options: BeginTaskRetryOptions): WorkflowState {
+  const { state } = options;
+  if (options.actor !== "director") workflowFail("TASK_RETRY_DENIED", "Only the Director may open a controlled task retry");
+  if (state.outcome?.status === "closed") workflowFail("WORKFLOW_CLOSED", `Workflow is closed with outcome ${state.outcome.kind}`);
+  const target = state.tasks.find((task) => task.id === options.taskId);
+  if (target?.status !== "failed") workflowFail("TASK_RETRY_TARGET_NOT_FAILED", `task ${options.taskId} is not failed`);
+  if (target.attempt < target.max_attempts) workflowFail("TASK_RETRY_ATTEMPTS_NOT_EXHAUSTED", `task ${target.id} has attempts remaining`);
+  if (target.failure === undefined || target.failure.category !== "invalid_output") {
+    workflowFail("TASK_RETRY_CATEGORY_NOT_ELIGIBLE", `task ${target.id} failure category is not invalid_output`);
+  }
+  if (target.extensions.recovery_of !== undefined || target.extensions.recovery_generation !== undefined
+    || target.extensions.retry_of !== undefined || target.extensions.retry_generation !== undefined
+    || state.tasks.some((task) => task.extensions.retry_of === target.id || task.extensions.recovery_of === target.id)) {
+    workflowFail("TASK_RETRY_LINEAGE_EXISTS", `task ${target.id} retry or recovery lineage already exists`);
+  }
+  if (!genericRecoveryEntries.has(state.entry_kind)) {
+    workflowFail("TASK_RETRY_STAGE_UNSUPPORTED", `entry ${state.entry_kind} does not support controlled task retry`);
+  }
+  const stages = recoveryStagesByKind[target.kind];
+  const entries = recoveryEntriesByKind[target.kind];
+  const persistedStage = target.extensions.stage;
+  if (stages === undefined || !stages.has(state.stage)
+    || (entries !== undefined && !entries.has(state.entry_kind))
+    || (persistedStage !== undefined && persistedStage !== state.stage)) {
+    workflowFail("TASK_RETRY_STAGE_UNSUPPORTED", `task ${target.id} is not compatible with stage ${state.stage}`);
+  }
+  const occurredAt = new Date(options.occurredAt).getTime();
+  if (state.tasks.some((task) => task.status === "claimed" && task.lease !== undefined
+    && new Date(task.lease.expires_at).getTime() > occurredAt)) {
+    workflowFail("TASK_RETRY_ACTIVE_LEASE", "workflow has an active task lease");
+  }
+  const directDependents = state.tasks.filter((task) => task.dependencies.includes(target.id));
+  if (directDependents.some((task) => task.status !== "pending")) {
+    workflowFail("TASK_RETRY_GRAPH_INVALID", `task ${target.id} has a non-pending direct dependent`);
+  }
+  const successorId = `retry-${options.runId}`;
+  const decisionId = `task-retry-${options.runId}`;
+  if (state.tasks.some((task) => task.id === successorId) || state.decisions.some((decision) => decision.id === decisionId)) {
+    workflowFail("TASK_RETRY_ID_CONFLICT", `retry run ${options.runId} conflicts with an existing ID`);
+  }
+  const successor = workflowTaskSchema.parse({
+    id: successorId,
+    kind: target.kind,
+    status: "pending",
+    assigned_agent: target.assigned_agent,
+    capabilities: target.capabilities,
+    input_artifacts: target.input_artifacts,
+    output_contract: target.output_contract,
+    dependencies: target.dependencies,
+    attempt: 0,
+    max_attempts: target.max_attempts,
+    extensions: {
+      ...target.extensions,
+      retry_of: target.id,
+      retry_run_id: options.runId,
+      retry_generation: 1,
+      retry_input_strategy: "same_snapshot",
+    },
+  });
+  const rewiredIds = new Set(directDependents.map((task) => task.id));
+  return workflowStateSchema.parse({
+    ...state,
+    revision: state.revision + 1,
+    tasks: [
+      ...state.tasks.map((task) => task.id === target.id
+        ? { ...task, status: "superseded" as const, lease: undefined }
+        : rewiredIds.has(task.id)
+          ? { ...task, dependencies: task.dependencies.map((dependency) => dependency === target.id ? successorId : dependency) }
+          : task),
+      successor,
+    ],
+    decisions: [...state.decisions, {
+      id: decisionId,
+      kind: "task.retry.requested",
+      actor: options.actor,
+      decided_at: options.occurredAt,
+      input_revisions: target.input_artifacts,
+      summary: options.reason,
+      extensions: {
+        run_id: options.runId,
+        task_id: target.id,
+        successor_task_id: successorId,
+        failure_category: "invalid_output",
+        rewired_task_ids: directDependents.map((task) => task.id),
+        retry_generation: 1,
+        retry_input_strategy: "same_snapshot",
+      },
+    }],
+  });
+}
+
 export function resumeTaskAfterRepair(options: {
   state: WorkflowState;
   taskId: string;

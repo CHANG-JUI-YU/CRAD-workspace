@@ -19,6 +19,7 @@ import {
   appendJournalEvents,
   computeCandidateBatchHash,
   computeJournalEventRevision,
+  listConflicts,
   projectFactEvents,
   migrateCandidateIdentity,
   queryFacts,
@@ -27,6 +28,7 @@ import {
   rebuildFactProjection,
   resolveConflict,
   reviewCandidate,
+  reviewCandidates,
   validateResolutionDecision,
   verifyFactProjection,
   verifyJournalText,
@@ -181,6 +183,124 @@ describe("fact review and projection", () => {
     });
     expect(revised.fact).toMatchObject({ value: "blue", fact_revision: 2, decision_ids: ["decision-a", "decision-c"] });
     await expect(verifyFactProjection(root)).resolves.toEqual(revised.projection);
+  });
+
+  it("batch review 單一 CAS 一次提交並回傳摘要而非完整 register", async () => {
+    const root = await project();
+    await storeCandidate(root, candidate("candidate-a", "black"));
+    await storeCandidate(root, candidate("candidate-b", "brown"));
+    await storeCandidate(root, candidate("candidate-c", "silver"));
+    const state = await readFactProjection(root);
+    const result = await reviewCandidates(root, {
+      decisions: [
+        reviewDecision("candidate-a", "fact-a", "decision-a"),
+        reviewDecision("candidate-b", "fact-b", "decision-b"),
+        reviewDecision("candidate-c", "fact-c", "decision-c", "rejected"),
+      ],
+      expectedProjectionRevision: state.register.revision,
+    });
+    expect(result.reviewed).toBe(3);
+    expect(result.projection_revision).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(result.facts).toEqual([
+      { id: "fact-a", fact_revision: 1, status: "accepted" },
+      { id: "fact-b", fact_revision: 1, status: "accepted" },
+      { id: "fact-c", fact_revision: 1, status: "rejected" },
+    ]);
+    expect(result.conflicts_opened).toHaveLength(1);
+    expect(result.conflicts_opened[0]).toMatch(/^conflict-[a-f0-9]{64}$/u);
+    const after = await readFactProjection(root);
+    expect(after.register.facts.map((fact) => fact.id).sort()).toEqual(["fact-a", "fact-b", "fact-c"]);
+    expect(after.conflicts.conflicts).toHaveLength(1);
+  });
+
+  it("batch review 拒絕空批次、重複 decision id 與重複 fact id", async () => {
+    const root = await project();
+    await storeCandidate(root, candidate("candidate-a", "black"));
+    await storeCandidate(root, candidate("candidate-b", "brown"));
+    const state = await readFactProjection(root);
+    await expect(reviewCandidates(root, {
+      decisions: [],
+      expectedProjectionRevision: state.register.revision,
+    })).rejects.toMatchObject({ code: "FACT_REVIEW_BATCH_EMPTY" });
+    await expect(reviewCandidates(root, {
+      decisions: [
+        reviewDecision("candidate-a", "fact-a", "decision-a"),
+        reviewDecision("candidate-b", "fact-b", "decision-a"),
+      ],
+      expectedProjectionRevision: state.register.revision,
+    })).rejects.toMatchObject({ code: "FACT_REVIEW_BATCH_DUPLICATE_DECISION" });
+    await expect(reviewCandidates(root, {
+      decisions: [
+        reviewDecision("candidate-a", "fact-a", "decision-a"),
+        reviewDecision("candidate-b", "fact-a", "decision-b"),
+      ],
+      expectedProjectionRevision: state.register.revision,
+    })).rejects.toMatchObject({ code: "FACT_REVIEW_BATCH_DUPLICATE_FACT" });
+  });
+
+  it("batch review 沿用 stale、品質與 fact revision 拒絕", async () => {
+    const root = await project();
+    await storeCandidate(root, candidate("candidate-a", "black"));
+    await storeCandidate(root, candidate("legacy-placeholder", "placeholder"));
+    const state = await readFactProjection(root);
+    await expect(reviewCandidates(root, {
+      decisions: [reviewDecision("candidate-a", "fact-a", "decision-a")],
+      expectedProjectionRevision: `sha256:${"0".repeat(64)}`,
+    })).rejects.toMatchObject({ code: "FACT_PROJECTION_STALE" });
+    await expect(reviewCandidates(root, {
+      decisions: [reviewDecision("legacy-placeholder", "fact-p", "decision-p")],
+      expectedProjectionRevision: state.register.revision,
+    })).rejects.toMatchObject({ code: "FACT_CANDIDATE_QUALITY_DENIED" });
+    const accepted = await reviewCandidates(root, {
+      decisions: [reviewDecision("candidate-a", "fact-a", "decision-a")],
+      expectedProjectionRevision: state.register.revision,
+    });
+    await expect(reviewCandidates(root, {
+      decisions: [reviewDecision("candidate-a", "fact-a", "decision-b")],
+      expectedProjectionRevision: accepted.projection_revision,
+      expectedFactRevisions: { "fact-a": 2 },
+    })).rejects.toMatchObject({ code: "FACT_REVISION_STALE" });
+    const revised = await reviewCandidates(root, {
+      decisions: [reviewDecision("candidate-a", "fact-a", "decision-b")],
+      expectedProjectionRevision: accepted.projection_revision,
+      expectedFactRevisions: { "fact-a": 1 },
+      patches: { "fact-a": { value: "blue" } },
+    });
+    expect(revised.facts).toEqual([{ id: "fact-a", fact_revision: 2, status: "accepted" }]);
+    expect((await readFactProjection(root)).register.facts.find((fact) => fact.id === "fact-a")?.value).toBe("blue");
+  });
+
+  it("listConflicts 分頁回傳 exact member fact IDs 供 Director 裁決", async () => {
+    const root = await project();
+    await storeCandidate(root, candidate("candidate-a", "black"));
+    await storeCandidate(root, candidate("candidate-b", "brown"));
+    await storeCandidate(root, { ...candidate("candidate-d", "tall"), predicate: "appearance.height" });
+    await storeCandidate(root, { ...candidate("candidate-e", "short"), predicate: "appearance.height" });
+    const state = await readFactProjection(root);
+    const result = await reviewCandidates(root, {
+      decisions: [
+        reviewDecision("candidate-a", "fact-a", "decision-a"),
+        reviewDecision("candidate-b", "fact-b", "decision-b"),
+        reviewDecision("candidate-d", "fact-d", "decision-d"),
+        reviewDecision("candidate-e", "fact-e", "decision-e"),
+      ],
+      expectedProjectionRevision: state.register.revision,
+    });
+    expect(result.conflicts_opened).toHaveLength(2);
+    const firstPage = await listConflicts(root, { limit: 1 });
+    expect(firstPage.projection_revision).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(firstPage.conflicts).toHaveLength(1);
+    expect(firstPage.next_cursor).toBe(firstPage.conflicts[0]!.id);
+    expect(firstPage.conflicts[0]!.members.map((member) => member.fact_id).sort()).toEqual(["fact-a", "fact-b"]);
+    const secondPage = await listConflicts(root, { limit: 1, cursor: firstPage.next_cursor });
+    expect(secondPage.conflicts).toHaveLength(1);
+    expect(secondPage.next_cursor).toBeUndefined();
+    expect(secondPage.conflicts[0]!.members.map((member) => member.fact_id).sort()).toEqual(["fact-d", "fact-e"]);
+    const both = await listConflicts(root);
+    expect(both.conflicts).toHaveLength(2);
+    const unknownCursor = await listConflicts(root, { cursor: "conflict-nonexistent" });
+    expect(unknownCursor.conflicts).toEqual([]);
+    expect(unknownCursor.next_cursor).toBeUndefined();
   });
 
   it("query 暴露 unresolved conflict gate，resolution 使用 fact/projection CAS", async () => {

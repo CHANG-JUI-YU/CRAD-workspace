@@ -149,6 +149,37 @@ describe("controlled web fetch", () => {
     const fetched = await controlledFetch({ url: "https://example.test", resolveDns: publicDns, transport: transport(html, { "content-type": "text/html; charset=utf-8" }) });
     expect(fetched.bytes.toString()).toBe("Alice & Bob have stable source text.");
   });
+  it("falls back to the same-host MediaWiki API when an HTML page returns 403", async () => {
+    const blocked: PinnedHttpTransport = ({ url }) => Promise.resolve(
+      url.pathname.startsWith("/api.php")
+        ? httpResponse(JSON.stringify({ parse: { wikitext: "{{Infobox character\nHachiman Hikigaya is the protagonist with stable source text." } }), { headers: { "content-type": "application/json; charset=utf-8" } })
+        : httpResponse(null, { status: 403 }),
+    );
+    const fetched = await controlledFetch({ url: "https://oregairu.fandom.com/wiki/Hachiman_Hikigaya", resolveDns: publicDns, transport: blocked });
+    expect(fetched.mediaType).toBe("text/plain");
+    expect(fetched.bytes.toString()).toBe("{{Infobox character\nHachiman Hikigaya is the protagonist with stable source text.");
+    expect(fetched.finalUrl).toBe("https://oregairu.fandom.com/api.php?action=parse&page=Hachiman_Hikigaya&prop=wikitext&format=json&formatversion=2");
+  });
+  it("maps Wikipedia pages to the w/api.php endpoint on 429", async () => {
+    const blocked: PinnedHttpTransport = ({ url }) => Promise.resolve(
+      url.pathname.startsWith("/w/api.php")
+        ? httpResponse(JSON.stringify({ parse: { wikitext: "Oregairu is a light novel series with stable source text." } }), { headers: { "content-type": "application/json" } })
+        : httpResponse(null, { status: 429 }),
+    );
+    const fetched = await controlledFetch({ url: "https://en.wikipedia.org/wiki/Oregairu", resolveDns: publicDns, transport: blocked });
+    expect(fetched.mediaType).toBe("text/plain");
+    expect(fetched.finalUrl).toBe("https://en.wikipedia.org/w/api.php?action=parse&page=Oregairu&prop=wikitext&format=json&formatversion=2");
+  });
+  it("rejects 403 pages without a MediaWiki API fallback and fails closed on blocked or malformed fallback responses", async () => {
+    await expect(controlledFetch({ url: "https://myanimelist.net/anime/14813", resolveDns: publicDns, transport: () => Promise.resolve(httpResponse(null, { status: 403 })) })).rejects.toMatchObject({ code: "WEB_FETCH_TARGET_DENIED" });
+    await expect(controlledFetch({ url: "https://oregairu.fandom.com/wiki/Hachiman_Hikigaya", resolveDns: publicDns, transport: () => Promise.resolve(httpResponse(null, { status: 403 })) })).rejects.toMatchObject({ code: "WEB_FETCH_TARGET_DENIED" });
+    const malformed: PinnedHttpTransport = ({ url }) => Promise.resolve(
+      url.pathname.startsWith("/api.php")
+        ? httpResponse(JSON.stringify({ parse: {} }), { headers: { "content-type": "application/json" } })
+        : httpResponse(null, { status: 403 }),
+    );
+    await expect(controlledFetch({ url: "https://oregairu.fandom.com/wiki/Hachiman_Hikigaya", resolveDns: publicDns, transport: malformed })).rejects.toMatchObject({ code: "WEB_FETCH_CONTENT_UNSUPPORTED" });
+  });
   it("covers source family classification and controlled fetch response guards", async () => {
     expect(deriveResearchSourceFamily(new URL("https://www.britannica.com/topic/alice"), [])).toBe("platform:britannica.com");
     expect(deriveResearchSourceFamily(new URL("https://fandom.com/wiki/Alice"), [])).toBe("platform:fandom.com");
@@ -245,7 +276,7 @@ describe("research registry and snapshot bridge", () => {
       singleFamilyFallbackReason: "No second suitable family is available for this focused fetch.",
     })).resolves.toMatchObject({ idempotent: true });
 
-    const pageTransport: PinnedHttpTransport = vi.fn(() => Promise.resolve(httpResponse("Alice has an official biography with enough source text.")));
+    const pageTransport: PinnedHttpTransport = vi.fn(() => Promise.resolve(httpResponse("{{Infobox character\nAlice has an official biography with enough source text.")));
     const fetched = await fetchApprovedResearchSources({
       projectRoot,
       batchId: first.id,

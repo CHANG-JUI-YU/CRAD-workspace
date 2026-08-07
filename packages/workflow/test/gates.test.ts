@@ -84,7 +84,18 @@ describe("interview, decisions and gates", () => {
       artifacts: [{ id: "blueprint", status: "draft", revision: REVISION_A, updated_at: "2026-07-14T00:00:00.000Z", extensions: {} }],
     });
     expect(deriveGateSnapshot(state, "blueprint")).toEqual([{ id: "blueprint", revision: REVISION_A }]);
-    expect(() => decideGate(state, { ...gateInput("blueprint"), inputRevisions: [{ id: "blueprint", revision: REVISION_B }] })).toThrow(/stale|exact/u);
+    try {
+      decideGate(state, { ...gateInput("blueprint"), inputRevisions: [{ id: "blueprint", revision: REVISION_B }] });
+      throw new Error("Expected GATE_SNAPSHOT_STALE");
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "GATE_SNAPSHOT_STALE",
+        cause: {
+          expected: [{ id: "blueprint", revision: REVISION_A }],
+          supplied: [{ id: "blueprint", revision: REVISION_B }],
+        },
+      });
+    }
     expect(() => deriveGateSnapshot(makeState({ stage: "blueprint" }), "blueprint")).toThrow(/snapshot/u);
     expect(() => deriveGateSnapshot(makeState({ stage: "content_review" }), "blueprint")).toThrow(/stage/u);
   });

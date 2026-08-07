@@ -1,6 +1,7 @@
 import {
   getJobStatus,
   getTextProjection,
+  listConflicts,
   materializeCandidateBatch,
   migrateCandidateIdentity,
   queryFacts,
@@ -8,6 +9,7 @@ import {
   resolveEvidenceLocator,
   resolveConflict,
   reviewCandidate,
+  reviewCandidates,
   submitAndCompleteChunkCandidates,
   traceProvenance,
   validateCompletedJobResults,
@@ -369,6 +371,28 @@ export const factTools = {
       expectedProjectionRevision: stringArg(context.args, "expected_projection_revision") as `sha256:${string}`,
       actor: context.trusted.agentId,
       occurredAt: stringArg(context.args, "occurred_at"),
+    });
+  },
+  fact_review_batch: async (context: ToolCallContext) => {
+    const decisions = context.args.decisions;
+    if (!Array.isArray(decisions) || decisions.length === 0) {
+      mcpFail("FACT_REVIEW_BATCH_EMPTY", "fact_review_batch requires at least one review decision");
+    }
+    const expectedFactRevisions = (context.args.expected_fact_revisions ?? {}) as Record<string, number>;
+    const patches = (context.args.patches ?? {}) as Record<string, never>;
+    return reviewCandidates(context.projectRoot, {
+      decisions,
+      expectedProjectionRevision: stringArg(context.args, "expected_projection_revision") as `sha256:${string}`,
+      ...(Object.keys(expectedFactRevisions).length > 0 ? { expectedFactRevisions } : {}),
+      ...(Object.keys(patches).length > 0 ? { patches } : {}),
+    });
+  },
+  conflict_list: async (context: ToolCallContext) => {
+    const agent = context.trusted.config.registry.agents.find((candidate) => candidate.id === context.trusted.agentId);
+    if (agent?.kind !== "director") mcpFail("FACTS_CONFLICT_LIST_DENIED", "Only the Director may list conflicts with member fact IDs");
+    return listConflicts(context.projectRoot, {
+      limit: numberArg(context.args, "limit"),
+      ...(typeof context.args.cursor === "string" ? { cursor: context.args.cursor } : {}),
     });
   },
   conflict_resolve: (context: ToolCallContext) => resolveConflict(context.projectRoot, {
