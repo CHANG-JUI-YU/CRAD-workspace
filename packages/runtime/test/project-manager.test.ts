@@ -32,7 +32,7 @@ describe("workspace project manager", () => {
     expect(status.project_id).toBe("project-001");
     expect(status.project_path).toContain("project-001");
     expect((await projects.interviewContext()).project_id).toBe("project-001");
-    const paused = await projects.answerInterview("a useful answer", { actor: "user", attachments: [] });
+    const paused = await projects.answerInterview("角色設定", { actor: "user", attachments: [] });
     expect(paused.project_id).toBe("project-001");
     expect(paused.project_path).toContain("project-001");
   });

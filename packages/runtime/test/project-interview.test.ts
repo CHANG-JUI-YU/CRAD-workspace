@@ -97,14 +97,113 @@ describe("project interview runtime", () => {
     const state = await repository.read();
     const blueprint = JSON.parse(state.artifacts.find((artifact) => artifact.kind === "blueprint")!.content) as {
       characters: Array<{ id: string; label: string; direction?: { selected?: string } }>;
+      relationships?: { enabled?: boolean };
     };
     expect(blueprint.characters).toHaveLength(2);
     expect(blueprint.characters).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "character-1", label: "甲", direction: expect.objectContaining({ selected: expect.stringContaining("冷靜") }) }),
       expect.objectContaining({ id: "character-2", label: "乙", direction: expect.objectContaining({ selected: expect.stringContaining("熱烈") }) }),
     ]));
+    expect(blueprint.relationships).toMatchObject({ enabled: false });
     const characterCoreChecks = state.blueprint_prechecks[0]?.checks.filter((check) => check.dimension === "character_core");
     expect(characterCoreChecks?.map((check) => check.subject_id)).toEqual(["character-1", "character-2"]);
+  });
+
+  it("materializes per-character modes and relationship participant ids", async () => {
+    const repository = new MemoryProjectRepository("multi-character-mode-project");
+    const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
+    expect((await runtime.request("建立新專案", { actor: "user", attachments: [] })).status).toBe("needs_input");
+    const values = [
+      "角色設定",
+      "多角色卡",
+      "完全原創",
+      "甲、乙、丙",
+      "每名角色分別指定",
+      "zhuji",
+      "palette",
+      "palette",
+      "共同概念",
+      "共同背景",
+      "三名角色性格各異",
+      "關係已整理",
+      "啟用",
+      "指定 participant subset",
+      "甲、丙",
+      "我直接命名",
+      "混合模式專案",
+      "不需要",
+      "甲方向：冷靜可靠且保留反差",
+      "乙方向：熱烈直接但尊重界線",
+      "丙方向：沉著觀察並重視承諾",
+      "自由創作",
+      "沒有",
+    ];
+    let result = await runtime.answerInterview(values[0]!, { actor: "user", attachments: [] });
+    for (const value of values.slice(1)) result = await runtime.answerInterview(value, { actor: "user", attachments: [] });
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    const blueprint = JSON.parse(state.artifacts.find((artifact) => artifact.kind === "blueprint")!.content) as {
+      characters: Array<{ id: string; mode?: string }>;
+      relationships?: { enabled?: boolean; scope?: string; character_ids?: string[] };
+    };
+    expect(blueprint.characters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "character-1", mode: "zhuji" }),
+      expect.objectContaining({ id: "character-2", mode: "palette" }),
+      expect.objectContaining({ id: "character-3", mode: "palette" }),
+    ]));
+    expect(blueprint.relationships).toEqual({ enabled: true, scope: "participant_subset", character_ids: ["character-1", "character-3"] });
+    const modeChecks = state.blueprint_prechecks[0]?.checks.filter((check) => check.dimension === "cross_module_impact");
+    expect(modeChecks?.every((check) => check.uncertainty === "low" && check.action === "preserve_explicit")).toBe(true);
+  });
+
+  it("materializes an independent worldbook without inventing a character", async () => {
+    const repository = new MemoryProjectRepository("world-only-project");
+    const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
+    expect((await runtime.request("建立新專案", { actor: "user", attachments: [] })).status).toBe("needs_input");
+    const values = ["世界設定", "獨立世界書", "有明確魔法規則與地理脈絡的世界", "之前", "世界專案", "自由創作", "沒有"];
+    let result = await runtime.answerInterview(values[0]!, { actor: "user", attachments: [] });
+    for (const value of values.slice(1)) result = await runtime.answerInterview(value, { actor: "user", attachments: [] });
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    const blueprint = JSON.parse(state.artifacts.find((artifact) => artifact.kind === "blueprint")!.content) as {
+      characters: unknown[];
+      world?: { enabled?: boolean; kind?: string; authoring_timing?: string };
+    };
+    expect(blueprint.characters).toEqual([]);
+    expect(blueprint.world).toMatchObject({ enabled: true, kind: "獨立世界書", authoring_timing: "before_characters" });
+  });
+
+  it("keeps characters when the world-first branch explicitly creates a character card", async () => {
+    const repository = new MemoryProjectRepository("world-character-project");
+    const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
+    expect((await runtime.request("建立新專案", { actor: "user", attachments: [] })).status).toBe("needs_input");
+    const values = [
+      "世界設定",
+      "建立含世界的角色卡",
+      "有明確規則的角色生活世界",
+      "之前",
+      "單人角色卡",
+      "完全原創",
+      "palette",
+      "角色概念",
+      "角色背景",
+      "角色性格",
+      "我直接命名",
+      "世界角色專案",
+      "外冷內熱的角色方向",
+      "自由創作",
+      "沒有",
+    ];
+    let result = await runtime.answerInterview(values[0]!, { actor: "user", attachments: [] });
+    for (const value of values.slice(1)) result = await runtime.answerInterview(value, { actor: "user", attachments: [] });
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    const blueprint = JSON.parse(state.artifacts.find((artifact) => artifact.kind === "blueprint")!.content) as {
+      characters: Array<{ id: string; mode?: string }>;
+      world?: { enabled?: boolean; authoring_timing?: string };
+    };
+    expect(blueprint.characters).toEqual([expect.objectContaining({ id: "character-1", mode: "palette" })]);
+    expect(blueprint.world).toMatchObject({ enabled: true, authoring_timing: "before_characters" });
   });
 
   it("creates a temporary project folder and renames it after the interview", async () => {

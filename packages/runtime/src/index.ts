@@ -10,6 +10,7 @@ import {
   internalId,
   InterviewError,
   normalizeInterviewStateForDisplay,
+  parseRelationshipParticipants,
   parseWardrobeMarkdown,
   templateJsonSchemaFor,
   templateProposalValueSchema,
@@ -136,7 +137,9 @@ function blueprintContent(precheck: BlueprintPrecheckRecord): string {
     flow: candidate.flow,
     collaboration_mode: precheck.collaboration_mode,
     source_adaptation: candidate.source_adaptation,
+    world: candidate.world,
     characters: candidate.characters,
+    relationships: candidate.relationships,
     blueprint_direction: candidate.blueprint_direction,
     intake_values: candidate.intake_values,
     provenance: {
@@ -246,6 +249,7 @@ function createBlueprintArtifact(state: ProjectState, precheck: BlueprintPrechec
 }
 
 function interviewCharacterSubjects(interview: InterviewState): InterviewCharacterSubject[] {
+  if (interview.flow === "world" && !/建立含世界的角色卡|character\s*card\s*with\s*world/iu.test(interview.values.world_kind ?? "")) return [];
   return interview.characters !== undefined && interview.characters.length > 0
     ? interview.characters
     : [{ id: "character-1", label: "角色", ordinal: 1 }];
@@ -272,6 +276,55 @@ function directionForSubject(interview: InterviewState, subject: InterviewCharac
   };
 }
 
+function authoringModeForSubject(interview: InterviewState, subject: InterviewCharacterSubject): "zhuji" | "palette" | undefined {
+  const perCharacter = nonEmptyInterviewValue(interview.values, [`authoring_mode:${subject.id}`]);
+  if (perCharacter === "zhuji" || perCharacter === "palette") return perCharacter;
+  const shared = nonEmptyInterviewValue(interview.values, ["authoring_mode", "expansion_mode"]);
+  if (shared === "zhuji" || shared === "palette") return shared;
+  return undefined;
+}
+
+function relationshipConfig(interview: InterviewState, subjects: readonly InterviewCharacterSubject[]): Record<string, unknown> | undefined {
+  const enabledValue = nonEmptyInterviewValue(interview.values, ["relationship_enable"]);
+  if (enabledValue === undefined) return undefined;
+  const enabled = /^(?:啟用|enable|yes|y|true)$/iu.test(enabledValue);
+  if (!enabled) return { enabled: false, scope: "none", character_ids: [] };
+  const scope = nonEmptyInterviewValue(interview.values, ["relationship_scope"]);
+  const completeRoster = scope === "完整 roster" || /full|完整/iu.test(scope ?? "");
+  const characterIds = completeRoster
+    ? subjects.map((subject) => subject.id)
+    : parseRelationshipParticipants(String(interview.values.relationship_participants ?? ""), subjects);
+  return {
+    enabled: true,
+    scope: completeRoster ? "full_roster" : "participant_subset",
+    character_ids: characterIds,
+  };
+}
+
+function worldConfig(interview: InterviewState): Record<string, unknown> | undefined {
+  const values = interview.values;
+  const enabledValue = nonEmptyInterviewValue(values, ["world_enabled"]);
+  const worldCharacterKind = /建立含世界的角色卡|character\s*card\s*with\s*world/iu.test(String(values.world_kind ?? ""));
+  const enabledText = enabledValue ?? "";
+  const explicitlyDisabled = /^(?:不需要|不要|不啟用|關閉|no|n|false)$/iu.test(enabledText) || /不需要(?:任何|什麼)?(?:設定|世界)/iu.test(enabledText);
+  const explicitlyEnabled = /^(?:需要|啟用|enabled|yes|y|true)$/iu.test(enabledText) || /需要(?:世界|設定)/iu.test(enabledText);
+  const enabled = interview.flow === "world" || worldCharacterKind || (!explicitlyDisabled && explicitlyEnabled);
+  if (enabledValue === undefined && interview.flow !== "world" && !worldCharacterKind) return undefined;
+  const timing = interview.flow === "world"
+    ? "before_characters"
+    : /之前|before/iu.test(String(values.world_timing ?? ""))
+      ? "before_characters"
+      : /之後|after/iu.test(String(values.world_timing ?? ""))
+        ? "after_characters"
+        : undefined;
+  return {
+    enabled,
+    ...(nonEmptyInterviewValue(values, ["world_kind"]) === undefined ? {} : { kind: nonEmptyInterviewValue(values, ["world_kind"]) }),
+    ...(nonEmptyInterviewValue(values, ["world_concept"]) === undefined ? {} : { concept: nonEmptyInterviewValue(values, ["world_concept"]) }),
+    ...(timing === undefined ? {} : { authoring_timing: timing }),
+  };
+}
+
 function buildBlueprintPrecheck(projectId: string, operationId: string, interview: InterviewState, actor: string): BlueprintPrecheckRecord {
   const values = interview.values;
   const mode = collaborationMode(values);
@@ -281,6 +334,7 @@ function buildBlueprintPrecheck(projectId: string, operationId: string, intervie
     id: subject.id,
     label: subject.label,
     ordinal: subject.ordinal,
+    ...(authoringModeForSubject(interview, subject) === undefined ? {} : { mode: authoringModeForSubject(interview, subject) }),
     direction: directionForSubject(interview, subject, intakeRevision),
   }));
   const firstDirection = characters[0]?.direction;
@@ -289,7 +343,9 @@ function buildBlueprintPrecheck(projectId: string, operationId: string, intervie
     project_id: projectId,
     flow: interview.flow,
     collaboration_mode: mode,
+    ...(worldConfig(interview) === undefined ? {} : { world: worldConfig(interview) }),
     characters,
+    ...(relationshipConfig(interview, subjects) === undefined ? {} : { relationships: relationshipConfig(interview, subjects) }),
     ...(interview.flow === "source_adaptation" ? { source_adaptation: sourceAdaptationIntentFromValues(values) } : {}),
     // Keep the legacy mirror for old creators and readers when there is one subject.
     ...(subjects.length === 1 && firstDirection !== undefined ? { blueprint_direction: firstDirection } : {}),
@@ -313,7 +369,11 @@ function buildBlueprintPrecheck(projectId: string, operationId: string, intervie
   for (const { dimension, valueKeys, impact, scope } of dimensions) {
     const subjectsForDimension = scope === "character" ? subjects : [{ id: projectId, label: "project", ordinal: 0 }];
     for (const subject of subjectsForDimension) {
-      const explicit = nonEmptyInterviewValue(values, valueKeys);
+      const perCharacterMode = dimension === "cross_module_impact" && /每名角色分別指定/iu.test(String(values.authoring_mode ?? ""));
+      const explicitKeys = perCharacterMode
+        ? [...valueKeys.filter((key) => key !== "authoring_mode"), `authoring_mode:${subject.id}`]
+        : valueKeys;
+      const explicit = nonEmptyInterviewValue(values, explicitKeys);
       if (explicit !== undefined) {
         checks.push({
           subject_id: subject.id,

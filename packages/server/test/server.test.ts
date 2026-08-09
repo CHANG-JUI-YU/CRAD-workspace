@@ -89,6 +89,10 @@ describe("runtime-facing server contract", () => {
       expect(JSON.stringify(await unknownMethod.json())).toContain("method not found");
       const badJson = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "not-json" });
       expect(badJson.status).toBe(500);
+      const invalidUtf8 = Buffer.from([0x7b, 0x22, 0x61, 0x6e, 0x73, 0x77, 0x65, 0x72, 0x22, 0x3a, 0x22, 0xc3, 0x28, 0x22, 0x7d]);
+      const invalidEncoding = await fetch(`${base}/workspace/interview/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: invalidUtf8 });
+      expect(invalidEncoding.status).toBe(400);
+      expect(await invalidEncoding.json()).toMatchObject({ error: "Request body is not valid UTF-8" });
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
@@ -136,7 +140,7 @@ describe("runtime-facing server contract", () => {
       expect((await fetch(`${base}/workspace/project/select`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: "project-001" }) })).status).toBe(200);
       expect((await fetch(`${base}/workspace/request`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: "status" }) })).status).toBe(200);
       expect((await fetch(`${base}/workspace/interview/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) })).status).toBe(400);
-      expect((await fetch(`${base}/workspace/interview/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "a useful answer" }) })).status).toBe(200);
+      expect((await fetch(`${base}/workspace/interview/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "角色設定" }) })).status).toBe(200);
       const rpc = async (id: number, name: string, args?: unknown) => fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, ...(args === undefined ? {} : { arguments: args }) } }) });
       expect(JSON.stringify(await (await rpc(20, "workspace_projects")).json())).toContain("project-001");
       expect(JSON.stringify(await (await rpc(21, "workspace_interview_context")).json())).toContain("project-001");

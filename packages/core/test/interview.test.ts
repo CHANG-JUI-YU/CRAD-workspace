@@ -14,6 +14,31 @@ function answer(state: InterviewState, value: string): InterviewState {
 }
 
 describe("project interview engine", () => {
+  it("rejects corrupted choice answers without advancing the interview", () => {
+    let state = beginInterview(createInterviewState());
+
+    expect(() => answer(state, "????")).toThrowError(expect.objectContaining({ code: "INTERVIEW_CHOICE_INVALID" }));
+    expect(state.current?.id).toBe("work_type");
+    expect(state.answers).toHaveLength(0);
+
+    state = answer(state, "\u89d2\u8272\u8a2d\u5b9a");
+    expect(state.current?.id).toBe("card_shape");
+    expect(() => answer(state, "?????")).toThrowError(expect.objectContaining({ code: "INTERVIEW_CHOICE_INVALID" }));
+    expect(state.current?.id).toBe("card_shape");
+
+    state = answer(state, "\u55ae\u4eba\u89d2\u8272\u5361");
+    expect(state.current?.id).toBe("character_origin");
+    expect(() => answer(state, "????")).toThrowError(expect.objectContaining({ code: "INTERVIEW_CHOICE_INVALID" }));
+    expect(state.current?.id).toBe("character_origin");
+    expect(state.answers).toHaveLength(2);
+  });
+
+  it("rejects replacement characters before they can be persisted", () => {
+    const state = beginInterview(createInterviewState());
+    expect(() => answer(state, "\uFFFD")).toThrowError(expect.objectContaining({ code: "INTERVIEW_ENCODING_INVALID" }));
+    expect(state.answers).toHaveLength(0);
+  });
+
   it("keeps the first work-type question fixed and separate from character branches", () => {
     const state = beginInterview(createInterviewState());
     expect(state.current).toMatchObject({
@@ -22,6 +47,7 @@ describe("project interview engine", () => {
       kind: "choice",
       options: ["角色設定", "世界設定", "繼續專案", "舊卡審核", "擴充既有角色卡"],
     });
+    expect(() => answer(state, "原作改編")).toThrowError(expect.objectContaining({ code: "INTERVIEW_CHOICE_INVALID" }));
   });
 
   it("asks card shape before original or source adaptation", () => {
@@ -108,6 +134,57 @@ describe("project interview engine", () => {
     expect(state.current?.id).toBe("name_source");
   });
 
+  it("assigns authoring mode one character at a time when a multi-character card requests it", () => {
+    let state = beginInterview(createInterviewState());
+    for (const value of ["角色設定", "多角色卡", "完全原創", "甲、乙", "每名角色分別指定"]) state = answer(state, value);
+    expect(state.current?.id).toBe("authoring_mode:character-1");
+    expect(state.current?.subject_label).toBe("甲");
+    state = answer(state, "zhuji");
+    expect(state.current?.id).toBe("authoring_mode:character-2");
+    expect(state.current?.subject_label).toBe("乙");
+    state = answer(state, "palette");
+    expect(state.current?.id).toBe("concept");
+    expect(state.values["authoring_mode"]).toBe("每名角色分別指定");
+    expect(state.values["authoring_mode:character-1"]).toBe("zhuji");
+    expect(state.values["authoring_mode:character-2"]).toBe("palette");
+  });
+
+  it("requires valid existing participants for a relationship subset", () => {
+    let state = beginInterview(createInterviewState());
+    for (const value of ["角色設定", "多角色卡", "完全原創", "甲、乙、丙", "palette", "共同概念", "共同背景", "不同性格", "關係已整理", "啟用", "指定 participant subset"]) state = answer(state, value);
+    expect(state.current?.id).toBe("relationship_participants");
+    expect(() => answer(state, "甲")).toThrowError(expect.objectContaining({ code: "INTERVIEW_PARTICIPANTS_INVALID" }));
+    expect(state.current?.id).toBe("relationship_participants");
+    state = answer(state, "甲、丙");
+    expect(state.current?.id).toBe("name_source");
+    expect(state.values.relationship_participants).toBe("甲、丙");
+  });
+
+  it("describes world timing without contradictory instructions", () => {
+    let state = beginInterview(createInterviewState());
+    for (const value of ["世界設定", "獨立世界書", "世界規則與地理",]) state = answer(state, value);
+    expect(state.current?.id).toBe("world_timing");
+    expect(state.current?.text).toBe("世界設定要在角色設定之前完成，還是之後完成？");
+  });
+
+  it("does not interpret a natural-language refusal as enabling world settings", () => {
+    let state = beginInterview(createInterviewState());
+    for (const value of ["角色設定", "單人角色卡", "完全原創", "palette", "角色概念", "角色背景", "角色性格", "我直接命名", "專案名稱", "不需要世界設定"]) state = answer(state, value);
+    expect(state.current?.id).toBe(BLUEPRINT_DIRECTION_QUESTION_ID);
+    expect(state.values.world_enabled).toBe("不需要世界設定");
+  });
+
+  it("continues from a world-first character-card branch into the character interview", () => {
+    let state = beginInterview(createInterviewState());
+    for (const value of ["世界設定", "建立含世界的角色卡", "世界規則與角色生活脈絡", "之前"]) state = answer(state, value);
+    expect(state.current?.id).toBe("card_shape");
+    state = answer(state, "單人角色卡");
+    expect(state.current?.id).toBe("character_origin");
+    state = answer(state, "完全原創");
+    expect(state.current?.id).toBe("authoring_mode");
+    expect(state.flow).toBe("world");
+  });
+
   it("asks and stores Blueprint direction independently for each character", () => {
     let state = beginInterview(createInterviewState());
     for (const value of ["角色設定", "多角色卡", "完全原創", "甲、乙", "palette", "共同概念", "共同背景", "不同性格", "關係已整理", "不啟用", "我直接命名", "雙人專案", "不需要"]) state = answer(state, value);
@@ -164,6 +241,35 @@ describe("project interview engine", () => {
     expect(state.current?.id).toBe(BLUEPRINT_DIRECTION_QUESTION_ID);
     expect(state.values.source_subject).toContain("某動漫角色");
     expect(state.values.source_identifiers).toContain("官方角色頁");
+  });
+
+  it("keeps a multi-character source adaptation in the source path and scopes directions", () => {
+    let state = beginInterview(createInterviewState());
+    for (const value of [
+      "角色設定",
+      "多角色卡",
+      "原作改編",
+      "甲與乙來自某部作品",
+      "動漫",
+      "官方角色頁、作品名稱",
+      "甲、乙",
+      "palette",
+      "共同改編概念",
+      "共同背景脈絡",
+      "甲冷靜、乙熱烈",
+      "關係已整理",
+      "不啟用",
+      "我直接命名",
+      "多人二創專案",
+      "不需要",
+    ]) state = answer(state, value);
+    expect(state.flow).toBe("source_adaptation");
+    expect(state.current?.id).toBe("blueprint_direction:character-1");
+    state = answer(state, "甲方向：冷靜且可靠");
+    expect(state.current?.id).toBe("blueprint_direction:character-2");
+    state = answer(state, "乙方向：熱烈但尊重界線");
+    expect(state.current?.id).toBe("collaboration_mode");
+    expect(state.values.source_subject).toContain("甲與乙");
   });
 
   it("walks Blueprint direction and character expansion branches", () => {

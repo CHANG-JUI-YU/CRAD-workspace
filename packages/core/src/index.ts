@@ -1610,6 +1610,7 @@ export {
   BLUEPRINT_DIRECTION_QUESTION_ID,
   CHARACTER_ROSTER_QUESTION_ID,
   parseCharacterRoster,
+  parseRelationshipParticipants,
   ZHUJI_SELF_INTRODUCTION_FIELDS,
   type InterviewAnswer,
   type InterviewAnswerInput,

@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { TextDecoder } from "node:util";
 import { HttpSourceFetcher } from "@st-workspace/adapters";
 import { FileProjectRepository, templateProposalJsonSchema, type AdaptationDecision, type RequestResult, type SourceAttachment, zhujiProposalJsonSchema } from "@st-workspace/core";
 import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
@@ -136,11 +137,27 @@ function json(response: ServerResponse, status: number, value: unknown): void {
   response.end(JSON.stringify(value));
 }
 
+class RequestBodyError extends Error {
+  readonly code = "REQUEST_INVALID_UTF8";
+  readonly recoverable = true;
+
+  constructor() {
+    super("Request body is not valid UTF-8");
+    this.name = "RequestBodyError";
+  }
+}
+
 async function body(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   if (chunks.length === 0) return {};
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+  } catch {
+    throw new RequestBodyError();
+  }
+  return JSON.parse(text) as unknown;
 }
 
 function attachmentsFrom(value: unknown): SourceAttachment[] {
@@ -506,7 +523,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       json(response, 404, { error: "NOT_FOUND" });
     } catch (error) {
       const errorCode = error !== null && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "";
-      const recoverableInput = error !== null && typeof error === "object" && "recoverable" in error && (error as { recoverable?: unknown }).recoverable === true && /^(?:INTERVIEW_|PROJECT_)/u.test(errorCode);
+      const recoverableInput = error !== null && typeof error === "object" && "recoverable" in error && (error as { recoverable?: unknown }).recoverable === true && /^(?:INTERVIEW_|PROJECT_|REQUEST_)/u.test(errorCode);
       const details = error !== null && typeof error === "object" && "details" in error ? (error as { details?: unknown }).details : undefined;
       json(response, recoverableInput ? 400 : 500, { error: error instanceof Error ? error.message : String(error), ...(details === undefined ? {} : { details }) });
     }
