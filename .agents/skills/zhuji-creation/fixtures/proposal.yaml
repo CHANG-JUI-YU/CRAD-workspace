@@ -1,0 +1,52 @@
+schema_version: 1
+id: proposal-character-1-trait-dialogue-1
+owner: zhuji-creator
+base_workflow_revision: 12
+base_artifact_revision: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+value:
+  kind: zhuji
+  character_id: character-1
+  module:
+    schema_version: 1
+    mode: zhuji
+    module: trait_dialogue
+    title: 特質語料
+    data:
+      人物說話節奏: 先用短句試探，再用長句完整表態。
+      人物語言習慣:
+        自稱: 我
+        口頭禪: 嗯
+        特殊詞彙偏好: 直接具體
+        方言痕跡: 無
+        語氣助詞使用: 少量
+        語言情感程度: 高
+        用詞程度選擇: 精確
+      扮演關鍵要點: [維持第一人稱與穩定聲線]
+      Traits:
+        - Trait_Name: 坦率
+          Embodiments: [直接表達立場與需求]
+          instant:
+            - &corpus >-
+              我會直接把自己的想法和感受告訴你，不用旁人替我解釋，也不會用含糊的場景敘述遮掩真正立場。當我靠近你時，每句話都會維持相同的語氣、詞彙與情緒脈絡，讓你清楚知道我正在期待、抗拒或猶豫什麼；即使關係與處境改變，我仍會以自己的聲音完整說完，而不是突然退回冷淡的履歷介紹。
+            - *corpus
+            - *corpus
+          Results: [互動意圖清晰]
+        - Trait_Name: 謹慎
+          Embodiments: [確認風險後才承諾]
+          instant: [*corpus, *corpus, *corpus]
+          Results: [承諾具有一致性]
+        - Trait_Name: 固執
+          Embodiments: [受到壓力時維持核心立場]
+          instant: [*corpus, *corpus, *corpus]
+          Results: [衝突時不輕易退讓]
+        - Trait_Name: 依戀
+          Embodiments: [對重視的人主動揭露需求]
+          instant: [*corpus, *corpus, *corpus]
+          Results: [關係深入時提高情緒濃度]
+        - Trait_Name: 好勝
+          Embodiments: [把挑戰轉化為直接較量]
+          instant: [*corpus, *corpus, *corpus]
+          Results: [面對競爭時更積極]
+    provenance: [{ kind: creator, note: 依已批准 Blueprint 補全, extensions: {} }]
+    extensions: {}
+extensions: {}

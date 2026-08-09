@@ -1,0 +1,3 @@
+kind: world_proposal
+entries:
+  - { category: geography, id: harbor-city, title: 港城, content: 海運樞紐。, keys: [港城], fact_refs: [fact-01] }

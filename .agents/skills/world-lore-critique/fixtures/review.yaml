@@ -1,0 +1,7 @@
+target_revision: sha256:world
+findings:
+  - id: WORLD-TRIGGER-GENERIC
+    severity: warning
+    evidence: 三十個條目都使用「城市」作唯一 key。
+    hint: 改用每個條目的專有名稱或穩定別稱。
+    overridable: true

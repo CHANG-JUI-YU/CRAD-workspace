@@ -1,0 +1,82 @@
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { FileProjectRepository } from "@st-workspace/core";
+import { WorkspaceProjectManager, WorkspaceRuntime } from "../src/index.js";
+
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+function manager(root: string, initialProjectId?: string): WorkspaceProjectManager {
+  return new WorkspaceProjectManager({
+    root,
+    ...(initialProjectId === undefined ? {} : { initialProjectId }),
+    createRuntime: (repository) => new WorkspaceRuntime(repository),
+  });
+}
+
+describe("workspace project manager", () => {
+  it("exposes a lazy project and enriches runtime results", async () => {
+    const root = path.join(os.tmpdir(), `st-workspace-v3-missing-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    roots.push(root);
+    const projects = manager(root);
+    expect(projects.root).toBe(root);
+    expect(projects.repository.projectId).toBe("project-001");
+    expect(projects.runtime).toBe(await projects.ensureRuntime());
+    expect((await projects.listProjects()).map((item) => item.project_id)).toEqual(["project-001"]);
+    const status = await projects.status();
+    expect(status.project_id).toBe("project-001");
+    expect(status.project_path).toContain("project-001");
+    expect((await projects.interviewContext()).project_id).toBe("project-001");
+    const paused = await projects.answerInterview("a useful answer", { actor: "user", attachments: [] });
+    expect(paused.project_id).toBe("project-001");
+    expect(paused.project_path).toContain("project-001");
+  });
+
+  it("starts sequential projects, filters incomplete folders and selects by id or folder", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-manager-"));
+    roots.push(root);
+    const projects = manager(root);
+    await projects.startNewProject();
+    await projects.startNewProject();
+    await mkdir(path.join(root, ".hidden", ".workspace"), { recursive: true });
+    await mkdir(path.join(root, "incomplete"), { recursive: true });
+    await mkdir(path.join(root, "broken", ".workspace"), { recursive: true });
+    await writeFile(path.join(root, "broken", ".workspace", "state.json"), "not-json", "utf8");
+    const listed = await projects.listProjects();
+    expect(listed.map((item) => item.project_id)).toEqual(["project-001", "project-002"]);
+    await expect(projects.select("")).rejects.toThrow("project name or id");
+    await expect(projects.select("../outside")).rejects.toThrow("project name or id");
+    await expect(projects.select("missing")).rejects.toThrow("was not found");
+    expect((await projects.select("project-001")).project_id).toBe("project-001");
+    expect((await projects.select("project-002")).project_id).toBe("project-002");
+  });
+
+  it("finalizes names safely and avoids directory collisions", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-finalize-"));
+    roots.push(root);
+    const projects = manager(root);
+    const pending = await projects.finalizeIfNamed({ operation_id: "pending", status: "needs_input", summary: "waiting", completed: [], blocked: [] });
+    expect(pending.project_id).toBe("project-001");
+    await mkdir(path.join(root, "Demo"), { recursive: true });
+    const first = await projects.finalizeIfNamed({ operation_id: "done", status: "completed", summary: "done", completed: [], blocked: [], project_name: "Demo" });
+    expect(first.project_id).toBe("Demo-2");
+    expect(first.project_path).toContain("Demo-2");
+    await access(path.join(root, "Demo-2", "project.json"));
+    const second = await projects.finalizeIfNamed({ operation_id: "done-2", status: "completed", summary: "done", completed: [], blocked: [], project_name: "..." });
+    expect(second.project_id).toBe("project");
+  });
+
+  it("creates a fresh project before a new-project request", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-new-project-"));
+    roots.push(root);
+    const projects = manager(root);
+    await projects.startNewProject();
+    const result = await projects.request("new project", { actor: "user", attachments: [] });
+    expect(result.project_id).toBe("project-002");
+  });
+});

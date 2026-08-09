@@ -1,0 +1,1509 @@
+import {
+  buildZhujiTemplateContext,
+  buildTemplateContext,
+  beginInterview,
+  canonicalJson,
+  CoreError,
+  contentHash,
+  createQualityPolicySnapshot,
+  validateFactReferences,
+  internalId,
+  InterviewError,
+  normalizeInterviewStateForDisplay,
+  parseWardrobeMarkdown,
+  templateJsonSchemaFor,
+  templateProposalValueSchema,
+  zhujiProposalJsonSchema,
+  zhujiProposalValueSchema,
+  sourceContextFromRecord,
+  workflow_answer_interview,
+  type OperationRecord,
+  type ArtifactRecord,
+  type AdaptationDecision,
+  type AuthoringKnowledgeContext,
+  type FactReviewContext,
+  type ProjectState,
+  type ProjectRepository,
+  type RequestResult,
+  type BlueprintPrecheckCheck,
+  type BlueprintPrecheckRecord,
+  type InterviewState,
+  type InterviewCharacterSubject,
+  type QualityLevel,
+  type IssueSeverity,
+  type TemplateKind,
+  type TemplateInstance,
+  type TemplateProposalValue,
+  type WorkspaceContext,
+  type SourceAdaptationIntent,
+  type ZhujiModuleKind,
+  type ZhujiProposalValue,
+} from "@st-workspace/core";
+import {
+  AuthoringService,
+  BuildService,
+  ImportService,
+  KnowledgeService,
+  ReviewService,
+  SourceService,
+  type SourceSelectionDecision,
+  type SourceFetcher,
+} from "@st-workspace/domain";
+import { AgentRouter } from "./agent-router.js";
+
+function now(): string {
+  return new Date().toISOString();
+}
+
+type BuildModeSelection = "zhuji" | "palette" | "both";
+
+function parseBuildModeSelection(value: string): BuildModeSelection | undefined {
+  const normalized = value.trim().toLocaleLowerCase();
+  if (/(?:both|兩者|兩個都有|兩種|珠璣[、,\s]+調色盤|調色盤[、,\s]+珠璣)/iu.test(normalized)) return "both";
+  if (/(?:zhuji|珠璣|珠玑|珠机)/iu.test(normalized) && !/(?:palette|調色盤|调色盘)/iu.test(normalized)) return "zhuji";
+  if (/(?:palette|調色盤|调色盘)/iu.test(normalized) && !/(?:zhuji|珠璣|珠玑|珠机)/iu.test(normalized)) return "palette";
+  return undefined;
+}
+
+function nonEmptyInterviewValue(values: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = values[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+}
+
+function collaborationMode(values: Record<string, unknown>): "free" | "assisted" {
+  const value = String(values.collaboration_mode ?? "");
+  return /assisted|assist|協助/iu.test(value) ? "assisted" : "free";
+}
+
+function isBlueprintRevisionRequest(value: string): boolean {
+  return /(?:blueprint|藍圖|方向)/iu.test(value) && /(?:修改|更新|調整|改成|revise|change|update)/iu.test(value);
+}
+
+function isBlueprintConfirmation(value: string): boolean {
+  return /^(?:確認|確定|接受|同意|可以|好|yes|y|ok|okay|confirm|accept)(?:[\s,，。.!！]|$)/iu.test(value.trim());
+}
+
+const ZHUJI_MODULE_ORDER: readonly ZhujiModuleKind[] = [
+  "appearance",
+  "inner_nature",
+  "extension",
+  "trait_refinement",
+  "trait_dialogue",
+  "scene_dialogue",
+  "self_introduction",
+];
+
+const PALETTE_MODULE_ORDER = [
+  "basic_information",
+  "personality_palette",
+  "tri_faceted",
+  "secondary_interpretation",
+] as const;
+
+function hasUsableArtifact(_artifact: ProjectState["artifacts"][number]): boolean {
+  // v3 currently models artifact liveness through revision replacement rather
+  // than stale/missing statuses; keep this boundary for future status growth.
+  return true;
+}
+
+function parsedModeModules(state: ProjectState, kind: "zhuji" | "palette", characterId: string): Set<string> {
+  const modules = new Set<string>();
+  for (const artifact of state.artifacts) {
+    if (artifact.kind !== kind || !hasUsableArtifact(artifact)) continue;
+    try {
+      const value = JSON.parse(artifact.content) as { character_id?: unknown; module?: { module?: unknown } };
+      if (value.character_id === characterId && typeof value.module?.module === "string") modules.add(value.module.module);
+    } catch {
+      // Malformed historical artifacts are ignored here and reported by normal review/gate diagnostics.
+    }
+  }
+  return modules;
+}
+
+function blueprintKey(projectId: string): string {
+  return `blueprint:${projectId}`;
+}
+
+function blueprintContent(precheck: BlueprintPrecheckRecord): string {
+  const candidate = precheck.candidate_blueprint;
+  return canonicalJson({
+    schema_version: 1,
+    kind: "blueprint",
+    project_id: precheck.project_id,
+    flow: candidate.flow,
+    collaboration_mode: precheck.collaboration_mode,
+    source_adaptation: candidate.source_adaptation,
+    characters: candidate.characters,
+    blueprint_direction: candidate.blueprint_direction,
+    intake_values: candidate.intake_values,
+    provenance: {
+      blueprint_precheck_id: precheck.id,
+      candidate_blueprint_revision: precheck.candidate_blueprint_revision,
+      checks: precheck.checks,
+    },
+  });
+}
+
+function sourceAdaptationIntentFromValues(values: Record<string, unknown>): SourceAdaptationIntent | undefined {
+  const subject = nonEmptyInterviewValue(values, ["source_subject"]);
+  if (subject === undefined) return undefined;
+  const identifiers = nonEmptyInterviewValue(values, ["source_identifiers"])
+    ?.split(/[\n,，、]+/u)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+  const medium = nonEmptyInterviewValue(values, ["source_medium"]);
+  return {
+    subject_name: subject,
+    ...(medium === undefined ? {} : { source_medium: medium }),
+    ...(identifiers === undefined || identifiers.length === 0 ? {} : { source_identifiers: identifiers }),
+    adaptation_intent: nonEmptyInterviewValue(values, ["concept"]) ?? subject,
+    canon_policy: "canon_inspired",
+  };
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function latestBlueprintSnapshot(state: ProjectState): Record<string, unknown> | undefined {
+  const artifact = [...state.artifacts].reverse().find((item) => item.kind === "blueprint" && hasUsableArtifact(item));
+  if (artifact === undefined) return undefined;
+  try {
+    return objectValue(JSON.parse(artifact.content));
+  } catch {
+    return undefined;
+  }
+}
+
+function isSourceAdaptationProject(state: ProjectState): boolean {
+  if (state.interview.flow === "source_adaptation") return true;
+  return objectValue(latestBlueprintSnapshot(state)?.source_adaptation)?.subject_name !== undefined;
+}
+
+function sourceFactsReady(state: ProjectState): boolean {
+  if (state.sources.length === 0 || state.facts.length === 0) return false;
+  if (state.facts.some((fact) => fact.status === "candidate" || fact.status === "conflict")) return false;
+  const run = [...state.fact_review_runs].reverse().find((candidate) => candidate.status !== "superseded");
+  if (run === undefined || run.status !== "completed") return false;
+  const latest = new Map<string, ProjectState["fact_review_decisions"][number]>();
+  for (const decision of state.fact_review_decisions) {
+    if (decision.review_run_id === run.id) latest.set(decision.candidate_occurrence_id, decision);
+  }
+  if (run.candidate_occurrence_ids.some((occurrenceId) => latest.get(occurrenceId)?.decision !== "accepted" && latest.get(occurrenceId)?.decision !== "rejected")) return false;
+  const sourceById = new Map(state.sources.map((source) => [source.id, source]));
+  return state.facts.every((fact) => {
+    if (fact.status !== "accepted") return true;
+    const refs = fact.evidence_refs ?? [];
+    return refs.length > 0 && refs.every((reference) => sourceById.get(reference.source_id)?.revision === reference.source_revision_id);
+  });
+}
+
+function buildAuthoringKnowledgeContext(state: ProjectState): AuthoringKnowledgeContext {
+  const blueprint = latestBlueprintSnapshot(state);
+  const candidateById = new Map(state.candidates.map((candidate) => [candidate.id, candidate]));
+  return {
+    ...(blueprint === undefined ? {} : { blueprint }),
+    ...(objectValue(blueprint?.source_adaptation)?.subject_name === undefined ? {} : { source_adaptation: blueprint?.source_adaptation as SourceAdaptationIntent }),
+    accepted_facts: state.facts.filter((fact) => fact.status === "accepted"),
+    unresolved_facts: state.facts.filter((fact) => fact.status !== "accepted"),
+    sources: state.sources.map((source) => sourceContextFromRecord(source, candidateById.get(source.candidate_id))),
+    fact_register_revision: contentHash(canonicalJson(state.facts.map((fact) => ({ id: fact.id, status: fact.status, updated_at: fact.updated_at })))),
+    adaptation_decisions: [...state.adaptation_decisions],
+  };
+}
+
+function createBlueprintArtifact(state: ProjectState, precheck: BlueprintPrecheckRecord, operationId: string, actor: string): ArtifactRecord | undefined {
+  const content = blueprintContent(precheck);
+  const hash = contentHash(content);
+  const key = blueprintKey(state.project_id);
+  const previous = [...state.artifacts].reverse().find((artifact) => artifact.key === key);
+  if (previous?.content_hash === hash) return undefined;
+  return {
+    id: internalId("artifact"),
+    key,
+    kind: "blueprint",
+    name: "project-blueprint",
+    content,
+    media_type: "application/json",
+    content_hash: hash,
+    revision: hash,
+    status: "draft",
+    created_at: now(),
+    updated_at: now(),
+    created_by: actor,
+    operation_id: operationId,
+    ...(previous === undefined ? {} : { based_on: previous.revision }),
+    blueprint_precheck_id: precheck.id,
+    blueprint_precheck_revision: precheck.candidate_blueprint_revision,
+  };
+}
+
+function interviewCharacterSubjects(interview: InterviewState): InterviewCharacterSubject[] {
+  return interview.characters !== undefined && interview.characters.length > 0
+    ? interview.characters
+    : [{ id: "character-1", label: "角色", ordinal: 1 }];
+}
+
+function directionForSubject(interview: InterviewState, subject: InterviewCharacterSubject, intakeRevision: string): Record<string, unknown> | undefined {
+  const scopedQuestionId = `blueprint_direction:${subject.id}`;
+  const questionIds = subject.ordinal === 1 ? [scopedQuestionId, "blueprint_direction"] : [scopedQuestionId];
+  const directionAnswers = interview.answers
+    .filter((item) => questionIds.includes(item.question_id))
+    .map((item) => ({ answer: item.answer, actor: item.actor, occurred_at: item.occurred_at, question_id: item.question_id }));
+  const selectedDirectionAnswer = directionAnswers.filter((item) => !/再給幾個|換一批|regenerate|more options/iu.test(item.answer)).at(-1);
+  const selected = selectedDirectionAnswer?.answer ?? nonEmptyInterviewValue(interview.values, questionIds);
+  if (selected === undefined) return undefined;
+  return {
+    scope: "character_setting",
+    selected,
+    character_setting_direction: selected,
+    source_question_id: selectedDirectionAnswer?.question_id ?? scopedQuestionId,
+    candidate_summary: selected,
+    ...(selectedDirectionAnswer?.occurred_at === undefined ? {} : { selected_at: selectedDirectionAnswer.occurred_at }),
+    intake_revision: intakeRevision,
+    history: directionAnswers,
+  };
+}
+
+function buildBlueprintPrecheck(projectId: string, operationId: string, interview: InterviewState, actor: string): BlueprintPrecheckRecord {
+  const values = interview.values;
+  const mode = collaborationMode(values);
+  const intakeRevision = contentHash(canonicalJson(values));
+  const subjects = interviewCharacterSubjects(interview);
+  const characters = subjects.map((subject) => ({
+    id: subject.id,
+    label: subject.label,
+    ordinal: subject.ordinal,
+    direction: directionForSubject(interview, subject, intakeRevision),
+  }));
+  const firstDirection = characters[0]?.direction;
+  const candidateBlueprint: Record<string, unknown> = {
+    schema_version: 1,
+    project_id: projectId,
+    flow: interview.flow,
+    collaboration_mode: mode,
+    characters,
+    ...(interview.flow === "source_adaptation" ? { source_adaptation: sourceAdaptationIntentFromValues(values) } : {}),
+    // Keep the legacy mirror for old creators and readers when there is one subject.
+    ...(subjects.length === 1 && firstDirection !== undefined ? { blueprint_direction: firstDirection } : {}),
+    intake_values: values,
+  };
+  const dimensions: Array<{
+    dimension: BlueprintPrecheckCheck["dimension"];
+    valueKeys: string[];
+    impact: BlueprintPrecheckCheck["impact"];
+    scope: "character" | "project";
+  }> = [
+    { dimension: "character_core", valueKeys: ["concept", "expansion_concept"], impact: "high", scope: "character" },
+    { dimension: "background", valueKeys: ["background", "expansion_background"], impact: "high", scope: "character" },
+    { dimension: "personality", valueKeys: ["personality", "expansion_personality"], impact: "high", scope: "character" },
+    { dimension: "relationships_boundaries", valueKeys: ["relationships", "relationship_enable", "expansion_relationships"], impact: "low", scope: "project" },
+    { dimension: "world_dependencies", valueKeys: ["world_concept", "world_enabled", "world_kind", "world_timing"], impact: "low", scope: "project" },
+    { dimension: "cross_module_impact", valueKeys: ["authoring_mode", "expansion_mode", "card_shape"], impact: "high", scope: "character" },
+  ];
+  let needsInput = false;
+  const checks: BlueprintPrecheckCheck[] = [];
+  for (const { dimension, valueKeys, impact, scope } of dimensions) {
+    const subjectsForDimension = scope === "character" ? subjects : [{ id: projectId, label: "project", ordinal: 0 }];
+    for (const subject of subjectsForDimension) {
+      const explicit = nonEmptyInterviewValue(values, valueKeys);
+      if (explicit !== undefined) {
+        checks.push({
+          subject_id: subject.id,
+          dimension,
+          uncertainty: "low",
+          impact,
+          basis: `Interview answer recorded for ${dimension} (${subject.label}).`,
+          action: "preserve_explicit",
+        });
+        continue;
+      }
+      const highImpact = impact === "high";
+      const needsExplicitConfirmation = mode === "assisted" && highImpact;
+      if (needsExplicitConfirmation) needsInput = true;
+      checks.push({
+        subject_id: subject.id,
+        dimension,
+        // A free-flow safe extension is intentionally treated as a resolved
+        // low-uncertainty default; the schema rejects high/high safe_extension.
+        uncertainty: needsExplicitConfirmation ? "high" : "low",
+        // Assisted mode never silently extends an unresolved high-impact item.
+        impact: highImpact ? "high" : "low",
+        basis: needsExplicitConfirmation
+          ? `No explicit interview answer for ${dimension} (${subject.label}); confirmation is required.`
+          : `No explicit interview answer for ${dimension} (${subject.label}); a safe default may be extended.`,
+        ...(needsExplicitConfirmation
+          ? { action: "user_confirmed" as const, user_answer: "pending confirmation" }
+          : { action: "safe_extension" as const }),
+      });
+    }
+  }
+  const candidateRevision = contentHash(canonicalJson(candidateBlueprint));
+  return {
+    id: internalId("blueprint_precheck"),
+    schema_version: 1,
+    project_id: projectId,
+    operation_id: operationId,
+    collaboration_mode: mode,
+    candidate_blueprint: candidateBlueprint,
+    candidate_blueprint_revision: candidateRevision,
+    checks,
+    status: needsInput ? "needs_input" : "recorded",
+    created_at: now(),
+    created_by: actor,
+  };
+}
+
+function responseFromOperation(operation: OperationRecord): RequestResult {
+  const completed = operation.progress.filter((item) => item.status === "completed").map((item) => item.item_id);
+  const blocked = operation.progress.filter((item) => item.status !== "completed").map((item) => item.item_id);
+  return {
+    operation_id: operation.id,
+    status: operation.status,
+    summary: operation.result_summary ?? "操作正在處理中。",
+    completed,
+    blocked,
+    ...(operation.question === undefined ? {} : { question: operation.question }),
+  };
+}
+
+export class WorkspaceRuntime {
+  private readonly sources: SourceService;
+  private readonly knowledge: KnowledgeService;
+  private readonly authoring: AuthoringService;
+  private readonly review: ReviewService;
+  private readonly build: BuildService;
+  private readonly importer: ImportService;
+  private readonly searcher: ((request: string) => Promise<Array<{ title: string; url: string; snippet?: string; content?: string; media_type?: string }>>) | undefined;
+  private readonly fetcher: SourceFetcher | undefined;
+  private readonly interviewRequired: boolean;
+  private readonly agents = new AgentRouter();
+
+  constructor(private readonly repository: ProjectRepository, options: { searcher?: (request: string) => Promise<Array<{ title: string; url: string; snippet?: string; content?: string; media_type?: string; domain?: string; official?: boolean }>>; fetcher?: SourceFetcher; interviewRequired?: boolean } = {}) {
+    this.sources = new SourceService(repository);
+    this.knowledge = new KnowledgeService(repository);
+    this.authoring = new AuthoringService(repository);
+    this.review = new ReviewService(repository);
+    this.build = new BuildService(repository);
+    this.importer = new ImportService(repository);
+    this.searcher = options.searcher;
+    this.fetcher = options.fetcher;
+    this.interviewRequired = options.interviewRequired ?? false;
+  }
+
+  async interviewContext(): Promise<{
+    project_id: string;
+    status: InterviewState["status"];
+    flow: InterviewState["flow"];
+    question?: InterviewState["current"];
+    answers: InterviewState["answers"];
+    values: InterviewState["values"];
+    characters?: InterviewState["characters"];
+    active_character_id?: string;
+  }> {
+    const state = await this.repository.read();
+    const interview = normalizeInterviewStateForDisplay(state.interview);
+    return {
+      project_id: state.project_id,
+      status: interview.status,
+      flow: interview.flow,
+      ...(interview.current === undefined ? {} : { question: interview.current }),
+      answers: interview.answers,
+      values: interview.values,
+      ...(interview.characters === undefined ? {} : { characters: interview.characters }),
+      ...(interview.active_character_id === undefined ? {} : { active_character_id: interview.active_character_id }),
+    };
+  }
+
+  private async startInterview(request: string, context: WorkspaceContext): Promise<RequestResult> {
+    const initial = await this.repository.read();
+    const interview = beginInterview(initial.interview);
+    const operation: OperationRecord = {
+      id: internalId("operation"),
+      kind: "interview",
+      request,
+      actor: context.actor,
+      status: "needs_input",
+      created_at: now(),
+      updated_at: now(),
+      progress: [],
+      ...(interview.current?.text === undefined ? {} : { question: interview.current.text }),
+    };
+    await this.repository.commit(initial.revision, (current) => ({
+      ...current,
+      project_status: "interviewing",
+      interview,
+      operations: [...current.operations, operation],
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "interview.started",
+        actor: context.actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { question_id: interview.current?.id, request },
+      }],
+    }));
+    return {
+      operation_id: operation.id,
+      status: "needs_input",
+      summary: "已開始專案訪談，請回答目前問題。",
+      completed: [],
+      blocked: [],
+      ...(interview.current?.text === undefined ? {} : { question: interview.current.text }),
+      project_id: initial.project_id,
+      ...(interview.current === undefined ? {} : { interview_question: interview.current }),
+    };
+  }
+
+  async answerInterview(answer: string, context: WorkspaceContext): Promise<RequestResult> {
+    const initial = await this.repository.read();
+    let state = initial;
+    let operation = [...initial.operations].reverse().find((item) => item.kind === "interview" && !["completed", "cancelled", "failed"].includes(item.status));
+    if (state.interview.status === "idle") {
+      const interview = beginInterview(state.interview);
+      const created: OperationRecord = {
+        id: internalId("operation"),
+        kind: "interview",
+        request: "project interview",
+        actor: context.actor,
+        status: "needs_input",
+        created_at: now(),
+        updated_at: now(),
+        progress: [],
+        ...(interview.current?.text === undefined ? {} : { question: interview.current.text }),
+      };
+      state = await this.repository.commit(state.revision, (current) => ({
+        ...current,
+        project_status: "interviewing",
+        interview,
+        operations: [...current.operations, created],
+      }));
+      operation = created;
+    }
+    if (operation === undefined) throw new CoreError("INTERVIEW_OPERATION_NOT_FOUND", "找不到目前的訪談操作", true);
+    const pendingPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "needs_input");
+    if (state.interview.status === "complete" && pendingPrecheck !== undefined) {
+      const confirmation = answer.trim();
+      if (confirmation.length === 0) throw new CoreError("INTERVIEW_ANSWER_EMPTY", "interview answer 不可為空", true);
+      const confirmedPrecheck: BlueprintPrecheckRecord = {
+        ...pendingPrecheck,
+        status: "recorded",
+        checks: pendingPrecheck.checks.map((check) => check.action === "user_confirmed"
+          ? { ...check, user_answer: confirmation }
+          : check),
+      };
+      const blueprintArtifact = createBlueprintArtifact(state, confirmedPrecheck, operation.id, context.actor);
+      const finalized = await this.repository.commit(state.revision, (current) => ({
+        ...current,
+        project_status: "ready",
+        blueprint_prechecks: current.blueprint_prechecks.map((item) => item.id === pendingPrecheck.id ? confirmedPrecheck : item),
+        artifacts: blueprintArtifact === undefined ? current.artifacts : [...current.artifacts, blueprintArtifact],
+        operations: current.operations.map((item) => item.id === operation!.id
+          ? {
+            ...item,
+            status: "completed" as const,
+            result_summary: "Blueprint precheck confirmed; Blueprint saved.",
+            updated_at: now(),
+            progress: [
+              ...item.progress,
+              { item_id: confirmedPrecheck.id, status: "completed" as const, message: "Blueprint precheck confirmed." },
+              ...(blueprintArtifact === undefined ? [] : [{ item_id: blueprintArtifact.id, status: "completed" as const, message: "Blueprint revision saved." }]),
+            ],
+          }
+          : item),
+        audit: [
+          ...(blueprintArtifact === undefined ? [] : [{
+            id: internalId("audit"),
+            operation_id: operation!.id,
+            event: "blueprint.created",
+            actor: context.actor,
+            occurred_at: now(),
+            project_revision: current.revision + 1,
+            details: { artifact_id: blueprintArtifact.id, precheck_id: confirmedPrecheck.id, revision: blueprintArtifact.revision, based_on: blueprintArtifact.based_on },
+          }]),
+          {
+            id: internalId("audit"),
+            operation_id: operation!.id,
+            event: "blueprint.precheck.confirmed",
+            actor: context.actor,
+            occurred_at: now(),
+            project_revision: current.revision + 1,
+            details: { precheck_id: pendingPrecheck.id, answer: confirmation, blueprint_artifact_id: blueprintArtifact?.id },
+          },
+        ],
+      }));
+      return {
+        operation_id: operation.id,
+        status: "completed",
+        summary: blueprintArtifact === undefined ? "Blueprint precheck confirmed." : "Blueprint precheck confirmed; Blueprint saved.",
+        completed: [pendingPrecheck.id, ...(blueprintArtifact === undefined ? [] : [blueprintArtifact.id])],
+        blocked: [],
+        project_id: finalized.project_id,
+      };
+    }
+    let interview: InterviewState;
+    try {
+      interview = workflow_answer_interview(state.interview, { answer, actor: context.actor });
+    } catch (error) {
+      if (error instanceof InterviewError) throw new CoreError(error.code, error.message, error.recoverable);
+      throw error;
+    }
+    const projectName = typeof interview.values.project_name === "string" ? interview.values.project_name : undefined;
+    const interviewComplete = interview.status === "complete";
+    const precheck = interviewComplete ? buildBlueprintPrecheck(state.project_id, operation.id, interview, context.actor) : undefined;
+    const workflowComplete = interviewComplete && precheck?.status !== "needs_input";
+    const complete = workflowComplete;
+    const blueprintArtifact = workflowComplete && precheck !== undefined
+      ? createBlueprintArtifact(state, precheck, operation.id, context.actor)
+      : undefined;
+    const precheckAudit = precheck === undefined ? [] : [{
+      id: internalId("audit"),
+      operation_id: operation.id,
+      event: "blueprint.precheck.recorded" as const,
+      actor: context.actor,
+      occurred_at: now(),
+      project_revision: state.revision + 1,
+      details: { precheck_id: precheck.id, candidate_blueprint_revision: precheck.candidate_blueprint_revision, collaboration_mode: precheck.collaboration_mode, status: precheck.status },
+    }];
+    const updated = await this.repository.commit(state.revision, (current) => ({
+      ...current,
+      ...(projectName === undefined ? {} : { project_name: projectName }),
+      project_status: workflowComplete ? "ready" : "interviewing",
+      interview,
+      ...(precheck === undefined ? {} : {
+        blueprint_prechecks: [
+          ...current.blueprint_prechecks.map((item) => item.status === "recorded" ? { ...item, status: "superseded" as const } : item),
+          precheck,
+        ],
+      }),
+      artifacts: blueprintArtifact === undefined ? current.artifacts : [...current.artifacts, blueprintArtifact],
+      operations: current.operations.map((item) => {
+        if (item.id !== operation!.id) return item;
+        const updatedOperation = { ...item, status: complete ? "completed" as const : "needs_input" as const, result_summary: complete ? "專案訪談完成，已保存所有 intake_answers。" : "訪談回答已保存，請回答下一題。", updated_at: now() };
+        const withProgress = blueprintArtifact === undefined
+          ? updatedOperation
+          : { ...updatedOperation, progress: [...updatedOperation.progress, { item_id: blueprintArtifact.id, status: "completed" as const, message: "Blueprint saved." }] };
+        return interview.current === undefined ? withProgress : { ...withProgress, question: interview.current.text };
+      }),
+      audit: [
+        ...current.audit,
+        ...precheckAudit,
+        ...(blueprintArtifact === undefined ? [] : [{
+          id: internalId("audit"),
+          operation_id: operation!.id,
+          event: "blueprint.created",
+          actor: context.actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: { artifact_id: blueprintArtifact.id, precheck_id: precheck?.id, revision: blueprintArtifact.revision, based_on: blueprintArtifact.based_on },
+        }]),
+        {
+          id: internalId("audit"),
+          operation_id: operation!.id,
+          event: "interview.answer.recorded",
+          actor: context.actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: { question_id: state.interview.current?.id, answer, complete, blueprint_artifact_id: blueprintArtifact?.id },
+        },
+      ],
+    }));
+    return {
+      operation_id: operation.id,
+      status: workflowComplete ? "completed" : "needs_input",
+      summary: complete ? "專案訪談完成，已保存所有 intake_answers。" : "回答已保存，請繼續目前的訪談。",
+      completed: workflowComplete ? ["interview", ...(precheck === undefined ? [] : [precheck.id]), ...(blueprintArtifact === undefined ? [] : [blueprintArtifact.id])] : [],
+      blocked: [],
+      ...(interview.current === undefined ? {} : { question: interview.current.text, interview_question: interview.current }),
+      project_id: updated.project_id,
+      ...(projectName === undefined ? {} : { project_name: projectName }),
+    };
+  }
+
+  /** Return operations that can be safely resumed after a process restart. */
+  async recoverableOperations(): Promise<readonly OperationRecord[]> {
+    const state = await this.repository.read();
+    return state.operations.filter((operation) => ["created", "resolving", "running"].includes(operation.status));
+  }
+
+  /**
+   * Continue one persisted operation without creating a duplicate operation.
+   * Operations that asked a user a question are intentionally excluded from this path.
+   */
+  async recoverOperation(operationId: string, context: WorkspaceContext = { actor: "worker", attachments: [] }, options: { agent?: string } = {}): Promise<RequestResult> {
+    const state = await this.repository.read();
+    const operation = state.operations.find((item) => item.id === operationId);
+    if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
+    if (!["created", "resolving", "running"].includes(operation.status)) return responseFromOperation(operation);
+    const actor = context.actor.trim().length > 0 ? context.actor : operation.actor ?? "worker";
+    const effectiveContext = { ...context, actor };
+    const latest = await this.repository.read();
+    await this.repository.commit(latest.revision, (current) => ({
+      ...current,
+      operations: current.operations.map((item) => item.id === operationId
+        ? { ...item, actor, status: "running", updated_at: now() }
+        : item),
+    }));
+    const resolution = this.agents.resolve(operation.request, options.agent);
+    return this.executeExistingOperation(operation, effectiveContext, resolution.agent_id);
+  }
+
+  /** Mark an operation failed after the worker exhausted its retry budget. */
+  async failOperation(operationId: string, error: unknown, actor = "worker"): Promise<void> {
+    const message = error instanceof Error ? error.message : String(error);
+    const state = await this.repository.read();
+    await this.repository.commit(state.revision, (current) => ({
+      ...current,
+      operations: current.operations.map((item) => item.id === operationId
+        ? { ...item, status: "failed", result_summary: message, updated_at: now() }
+        : item),
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operationId,
+        event: "operation.failed",
+        actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { message },
+      }],
+    }));
+  }
+
+  /* c8 ignore start -- recovery delegates to the same domain services covered by the runtime and worker tests. */
+  private async executeExistingOperation(operation: OperationRecord, context: WorkspaceContext, agent?: string): Promise<RequestResult> {
+    const kind = operation.kind;
+    if (kind === "source") {
+      const executionContext = this.fetcher === undefined ? context : { ...context, fetcher: this.fetcher };
+      const result = context.attachments.length > 0 || /https?:\/\//iu.test(operation.request)
+        ? await this.sources.resume(operation.id, operation.request, executionContext)
+        : await this.sources.execute(operation.id, executionContext);
+      return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.completed, blocked: result.blocked, ...(agent === undefined ? {} : { agent_id: agent }) };
+    }
+    if (kind === "knowledge") {
+      const result = await this.knowledge.refresh(operation.id, operation.request, context.actor);
+      const latest = await this.repository.read();
+      const finalOperation = latest.operations.find((item) => item.id === operation.id);
+      return { operation_id: operation.id, status: result.status, summary: result.summary, completed: [...result.chunks, ...result.facts], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
+    }
+    if (kind === "authoring") {
+      const result = await this.authoring.create(operation.id, operation.request, context.actor);
+      const latest = await this.repository.read();
+      const finalOperation = latest.operations.find((item) => item.id === operation.id);
+      return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.artifact_id === undefined ? [] : [result.artifact_id], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
+    }
+    if (kind === "review") {
+      const result = /re-?evaluate|quality profile/iu.test(operation.request)
+        ? await this.review.reevaluate(operation.id, context.actor)
+        : await this.review.review(operation.id, operation.request, context.actor);
+      const latest = await this.repository.read();
+      const finalOperation = latest.operations.find((item) => item.id === operation.id);
+      return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.review_id === undefined ? [] : [result.review_id], blocked: result.status === "blocked" ? [operation.id] : [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
+    }
+    if (kind === "build") {
+      const result = await this.build.run(operation.id, operation.request, context.actor);
+      const latest = await this.repository.read();
+      const finalOperation = latest.operations.find((item) => item.id === operation.id);
+      return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.build_id === undefined ? [] : [result.build_id], blocked: result.status === "blocked" ? [operation.id] : [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
+    }
+    if (kind === "import") {
+      const result = await this.importer.run(operation.id, operation.request, context.actor, context.attachments);
+      const latest = await this.repository.read();
+      const finalOperation = latest.operations.find((item) => item.id === operation.id);
+      return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.artifact_id === undefined ? (result.import_id === undefined ? [] : [result.import_id]) : [result.artifact_id], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
+    }
+    const latest = await this.repository.read();
+    await this.repository.commit(latest.revision, (current) => ({
+      ...current,
+      operations: current.operations.map((item) => item.id === operation.id
+        ? { ...item, status: "needs_input", question: "請描述要執行的來源、知識、創作、審查或建置操作。", updated_at: now() }
+        : item),
+    }));
+    return { operation_id: operation.id, status: "needs_input", summary: "需要更多工作描述才能繼續。", completed: [], blocked: [], question: "請描述要執行的來源、知識、創作、審查或建置操作。", ...(agent === undefined ? {} : { agent_id: agent }) };
+  }
+
+  /* c8 ignore stop */
+  async zhujiContext(characterId?: string): Promise<{ schema: Record<string, unknown>; context: ReturnType<typeof buildZhujiTemplateContext> }> {
+    const state = await this.repository.read();
+    const knowledge = buildAuthoringKnowledgeContext(state);
+    const existing = state.artifacts.flatMap((artifact) => {
+      if (artifact.kind !== "zhuji") return [];
+      try {
+        const value = JSON.parse(artifact.content) as { character_id?: unknown; module?: { module?: unknown; title?: unknown } };
+        if (typeof value.character_id !== "string" || typeof value.module?.module !== "string" || typeof value.module.title !== "string") return [];
+        if (characterId !== undefined && value.character_id !== characterId) return [];
+        return [{ artifact_id: artifact.id, character_id: value.character_id, module: value.module.module as ZhujiModuleKind, title: value.module.title, content: value, revision: artifact.revision }];
+      } catch {
+        return [];
+      }
+    });
+    return { schema: zhujiProposalJsonSchema as Record<string, unknown>, context: buildZhujiTemplateContext(existing, knowledge) };
+  }
+
+  async templateContext(kind: TemplateKind): Promise<{ schema: Record<string, unknown>; context: ReturnType<typeof buildTemplateContext> }> {
+    const state = await this.repository.read();
+    const factReview = kind === "fact_review" ? await this.knowledge.factReviewContext() : undefined;
+    const knowledge: AuthoringKnowledgeContext = {
+      ...buildAuthoringKnowledgeContext(state),
+      ...(factReview === undefined ? {} : { fact_review: factReview as FactReviewContext }),
+    };
+    const existing = state.artifacts.flatMap<TemplateInstance>((artifact): TemplateInstance[] => {
+      if (kind === "wardrobe" && artifact.kind === "wardrobe") {
+        const characterId = artifact.name.split("/")[0]?.trim();
+        if (characterId === undefined || characterId.length === 0) return [];
+        const content = artifact.content;
+        const parsed = parseWardrobeMarkdown(content);
+        return [{ artifact_id: artifact.id, kind, name: artifact.name, value: { kind: "wardrobe", character_id: characterId, content }, content: parsed.document, markdown: content, revision: artifact.revision }];
+      }
+      try {
+        const value = JSON.parse(artifact.content) as { kind?: unknown };
+        if (value.kind !== kind) return [];
+        const name = artifact.name;
+        return [{ artifact_id: artifact.id, kind, name, value, content: value, revision: artifact.revision }];
+      } catch {
+        return [];
+      }
+    });
+    const context = buildTemplateContext(kind, existing, knowledge);
+    return { schema: templateJsonSchemaFor(kind), context };
+  }
+
+  async authoringKnowledgeContext(): Promise<AuthoringKnowledgeContext> {
+    return buildAuthoringKnowledgeContext(await this.repository.read());
+  }
+
+  async sourceCandidates(): Promise<ReadonlyArray<ProjectState["candidates"][number]>> {
+    return (await this.repository.read()).candidates;
+  }
+
+  async selectSourceCandidates(decisions: SourceSelectionDecision[], context: WorkspaceContext): Promise<RequestResult> {
+    if (decisions.length === 0) throw new CoreError("SOURCE_SELECTION_EMPTY", "至少要選擇一個候選來源。", true);
+    const initial = await this.repository.read();
+    const operation: OperationRecord = {
+      id: internalId("operation"),
+      kind: "source",
+      request: "select source candidates",
+      actor: context.actor,
+      status: "running",
+      created_at: now(),
+      updated_at: now(),
+      progress: [],
+    };
+    await this.repository.commit(initial.revision, (current) => ({
+      ...current,
+      operations: [...current.operations, operation],
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "operation.created",
+        actor: context.actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { kind: "source_selection", candidate_ids: decisions.map((decision) => decision.candidate_id) },
+      }],
+    }));
+    const result = await this.sources.selectCandidates(operation.id, decisions, context.actor);
+    return {
+      operation_id: operation.id,
+      status: result.status,
+      summary: result.summary,
+      completed: [...result.approved, ...result.rejected],
+      blocked: [],
+    };
+  }
+
+  async createAdaptationDecision(input: Omit<AdaptationDecision, "id" | "created_at" | "created_by">, context: WorkspaceContext): Promise<RequestResult> {
+    const initial = await this.repository.read();
+    const factFindings = validateFactReferences({ fact_refs: input.fact_refs ?? [] }, initial.facts, initial.sources);
+    if (factFindings.length > 0) throw new CoreError("ADAPTATION_DECISION_FACT_INVALID", "Adaptation decision refers to unusable facts.", true, factFindings);
+    const decision: AdaptationDecision = { ...input, id: internalId("adaptation_decision"), created_at: now(), created_by: context.actor };
+    const operation: OperationRecord = {
+      id: internalId("operation"),
+      kind: "authoring",
+      request: `adaptation decision ${decision.topic}`,
+      actor: context.actor,
+      status: "completed",
+      created_at: now(),
+      updated_at: now(),
+      progress: [{ item_id: decision.id, status: "completed", message: "Adaptation decision saved." }],
+      result_summary: "Adaptation decision saved.",
+    };
+    await this.repository.commit(initial.revision, (current) => ({
+      ...current,
+      adaptation_decisions: [...current.adaptation_decisions, decision],
+      operations: [...current.operations, operation],
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "adaptation.decision.created",
+        actor: context.actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { decision_id: decision.id, topic: decision.topic, choice: decision.choice, fact_refs: decision.fact_refs ?? [] },
+      }],
+    }));
+    return { operation_id: operation.id, status: "completed", summary: "Adaptation decision saved.", completed: [decision.id], blocked: [] };
+  }
+
+  async submitTemplateProposal(proposal: unknown, context: WorkspaceContext, options: { agent?: string } = {}): Promise<RequestResult> {
+    const parsed = templateProposalValueSchema.safeParse(proposal);
+    if (!parsed.success) throw new CoreError("TEMPLATE_SCHEMA_INVALID", parsed.error.message, true);
+    await this.ensureInterviewComplete();
+    const knowledgeState = await this.repository.read();
+    if (parsed.data.kind !== "source_research" && parsed.data.kind !== "fact_curation" && parsed.data.kind !== "fact_review" && parsed.data.kind !== "review") {
+      this.ensureSourceAdaptationFactsReady(knowledgeState);
+    }
+    const factFindings = validateFactReferences(parsed.data, knowledgeState.facts, knowledgeState.sources);
+    if (factFindings.length > 0) {
+      throw new CoreError("FACT_REFERENCE_INVALID", "Fact provenance validation failed.", true, factFindings);
+    }
+    if (parsed.data.kind === "palette") {
+      await this.ensureBlueprintAuthoringReady("palette", parsed.data.character_id, parsed.data.module.module);
+    }
+    if (parsed.data.kind === "wardrobe") {
+      await this.ensureWardrobeAuthoringReady(parsed.data.character_id);
+    }
+    const request = `create ${parsed.data.kind}`;
+    const fallbackAgent = parsed.data.kind === "fact_review"
+      ? nextFactReviewer(knowledgeState)
+      : defaultAgentForTemplate(parsed.data);
+    const resolution = this.agents.resolve(request, options.agent ?? fallbackAgent);
+    const initial = await this.repository.read();
+    const operation: OperationRecord = {
+      id: internalId("operation"),
+      kind: parsed.data.kind === "review" || parsed.data.kind === "fact_review" ? "review" : "authoring",
+      request,
+      actor: context.actor,
+      status: "running",
+      created_at: now(),
+      updated_at: now(),
+      progress: [],
+    };
+    await this.repository.commit(initial.revision, (current) => ({
+      ...current,
+      operations: [...current.operations, operation],
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "operation.created",
+        actor: context.actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { template_kind: parsed.data.kind, agent_id: resolution.agent_id },
+      }],
+    }));
+    const candidateResult = parsed.data.kind === "source_research" && parsed.data.candidates.length > 0
+      ? await this.sources.registerCandidates(operation.id, parsed.data.candidates.map((candidate) => ({
+        title: candidate.title,
+        ...(candidate.url === undefined ? {} : { url: candidate.url }),
+        ...(candidate.domain === undefined ? {} : { domain: candidate.domain }),
+        ...(candidate.official === undefined ? {} : { official: candidate.official }),
+        ...(candidate.snippet === undefined ? {} : { snippet: candidate.snippet }),
+        ...(candidate.content === undefined ? {} : { content: candidate.content }),
+      })), context.actor)
+      : undefined;
+    let domainSummary: string | undefined;
+    let domainCompleted: string[] = [];
+    if (parsed.data.kind === "fact_curation") {
+      const applied = await this.knowledge.applyCuration(operation.id, parsed.data.claims, context.actor);
+      domainSummary = applied.summary;
+      domainCompleted = applied.facts;
+    } else if (parsed.data.kind === "fact_review") {
+      const run = await this.knowledge.beginFactReviewRun(operation.id, resolution.agent_id);
+      const reviewProjection = (await this.knowledge.factReviewContext()).projection_revision;
+      const applied = await this.knowledge.applyReviewBatch(operation.id, parsed.data.decisions, context.actor, resolution.agent_id, run.id, reviewProjection);
+      domainSummary = applied.summary;
+      domainCompleted = applied.fact_ids;
+      const result = await this.authoring.createTemplate(operation.id, parsed.data as TemplateProposalValue, context.actor);
+      if (applied.status === "needs_input") {
+        const latest = await this.repository.read();
+        await this.repository.commit(latest.revision, (current) => ({
+          ...current,
+          operations: current.operations.map((item) => item.id === operation.id
+            ? { ...item, status: "needs_input" as const, question: "Fact review needs additional evidence or Director conflict resolution.", updated_at: now() }
+            : item),
+        }));
+      }
+      return {
+        operation_id: operation.id,
+        status: applied.status === "needs_input" ? "needs_input" : result.status,
+        summary: [domainSummary, result.summary].filter((item): item is string => item !== undefined).join(" "),
+        completed: [...domainCompleted, ...(result.artifact_ids ?? (result.artifact_id === undefined ? [] : [result.artifact_id]))],
+        blocked: applied.status === "needs_input" ? domainCompleted : [],
+        agent_id: resolution.agent_id,
+        agent_role: resolution.agent_role,
+      };
+    } else if (parsed.data.kind === "review") {
+      const applied = await this.review.applyProposal(operation.id, parsed.data, context.actor);
+      domainSummary = applied.summary;
+      domainCompleted = [...(applied.review_id === undefined ? [] : [applied.review_id]), ...applied.issue_ids];
+    }
+    const result = await this.authoring.createTemplate(operation.id, parsed.data as TemplateProposalValue, context.actor);
+    return {
+      operation_id: operation.id,
+      status: result.status,
+      summary: [domainSummary, result.summary].filter((item): item is string => item !== undefined).join(" "),
+      completed: [...(candidateResult?.completed ?? []), ...domainCompleted, ...(result.artifact_ids ?? (result.artifact_id === undefined ? [] : [result.artifact_id]))],
+      blocked: [],
+      agent_id: resolution.agent_id,
+      agent_role: resolution.agent_role,
+    };
+  }
+
+  async submitZhujiProposal(proposal: unknown, context: WorkspaceContext, options: { agent?: string } = {}): Promise<RequestResult> {
+    const parsed = zhujiProposalValueSchema.safeParse(proposal);
+    if (!parsed.success) throw new CoreError("ZHUJI_SCHEMA_INVALID", parsed.error.message, true);
+    await this.ensureInterviewComplete();
+    const knowledgeState = await this.repository.read();
+    this.ensureSourceAdaptationFactsReady(knowledgeState);
+    const factFindings = validateFactReferences(parsed.data, knowledgeState.facts, knowledgeState.sources);
+    if (factFindings.length > 0) throw new CoreError("FACT_REFERENCE_INVALID", "Fact provenance validation failed.", true, factFindings);
+    await this.ensureBlueprintAuthoringReady("zhuji", parsed.data.character_id, parsed.data.module.module);
+    const request = `建立珠璣 ${parsed.data.character_id} ${parsed.data.module.module}`;
+    const resolution = this.agents.resolve(request, options.agent ?? "zhuji-creator");
+    const initial = await this.repository.read();
+    const operation: OperationRecord = {
+      id: internalId("operation"),
+      kind: "authoring",
+      request,
+      actor: context.actor,
+      status: "running",
+      created_at: now(),
+      updated_at: now(),
+      progress: [],
+    };
+    await this.repository.commit(initial.revision, (current) => ({
+      ...current,
+      operations: [...current.operations, operation],
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "operation.created",
+        actor: context.actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { kind: "authoring", request, agent_id: resolution.agent_id, module: parsed.data.module.module },
+      }],
+    }));
+    const result = await this.authoring.createZhuji(operation.id, parsed.data as ZhujiProposalValue, context.actor);
+    return {
+      operation_id: operation.id,
+      status: result.status,
+      summary: result.summary,
+      completed: result.artifact_id === undefined ? [] : [result.artifact_id],
+      blocked: [],
+      agent_id: resolution.agent_id,
+      agent_role: resolution.agent_role,
+    };
+  }
+
+  /** Configure quality with a compact preset instead of exposing blocking internals. */
+  async configureQualityProfile(level: QualityLevel, context: WorkspaceContext, overrides: Record<string, IssueSeverity> = {}): Promise<RequestResult> {
+    const initial = await this.repository.read();
+    const operation: OperationRecord = {
+      id: internalId("operation"),
+      kind: "status",
+      request: `quality profile ${level}`,
+      actor: context.actor,
+      status: "running",
+      created_at: now(),
+      updated_at: now(),
+      progress: [],
+    };
+    const created = await this.repository.commit(initial.revision, (current) => ({
+      ...current,
+      operations: [...current.operations, operation],
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "operation.created",
+        actor: context.actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { kind: "quality_profile", level },
+      }],
+    }));
+    const result = await this.review.configureQualityProfile(operation.id, level, context.actor, overrides);
+    return {
+      operation_id: operation.id,
+      status: result.status,
+      summary: result.summary,
+      completed: [operation.id],
+      blocked: [],
+      project_id: created.project_id,
+    };
+  }
+
+  private async proposeBlueprintRevision(request: string, context: WorkspaceContext): Promise<RequestResult> {
+    const initial = await this.repository.read();
+    const previousPrecheck = [...initial.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
+    if (previousPrecheck === undefined) {
+      throw new CoreError("BLUEPRINT_REQUIRED", "請先完成並保存 Blueprint，再提出方向修改。", true);
+    }
+    const candidateBeforeRevision = previousPrecheck.candidate_blueprint;
+    const rawCharacters = Array.isArray(candidateBeforeRevision.characters)
+      ? candidateBeforeRevision.characters.map(objectValue).filter((value): value is Record<string, unknown> => value !== undefined)
+      : [];
+    const revisionCharacters = rawCharacters.length > 0
+      ? rawCharacters
+      : [{ id: "character-1", label: "角色", ordinal: 1 }];
+    const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    const namedMatches = revisionCharacters.filter((character) => {
+      const label = nonEmptyString(character.label);
+      return label !== undefined && new RegExp(escapeRegex(label), "iu").test(request);
+    });
+    const ordinalMatch = request.match(/(?:character[- _]?(\d+)|第\s*(\d+)\s*名|角色\s*(\d+))/iu);
+    const ordinal = ordinalMatch === null ? undefined : Number(ordinalMatch[1] ?? ordinalMatch[2] ?? ordinalMatch[3]);
+    const ordinalMatchCharacter = ordinal === undefined ? undefined : revisionCharacters.find((character) => Number(character.ordinal) === ordinal || character.id === `character-${ordinal}`);
+    const targetCharacter = namedMatches.length === 1
+      ? namedMatches[0]
+      : ordinalMatchCharacter ?? (revisionCharacters.length === 1 ? revisionCharacters[0] : undefined);
+    if (targetCharacter === undefined) {
+      const labels = revisionCharacters.map((character) => nonEmptyString(character.label) ?? String(character.id ?? "角色")).join("、");
+      throw new CoreError("BLUEPRINT_CHARACTER_REQUIRED", `請指出要修改哪名角色的方向（${labels}）。`, true);
+    }
+    const targetCharacterId = nonEmptyString(targetCharacter.id) ?? "character-1";
+    const targetCharacterLabel = nonEmptyString(targetCharacter.label) ?? targetCharacterId;
+    const operation: OperationRecord = {
+      id: internalId("operation"),
+      kind: "interview",
+      request,
+      actor: context.actor,
+      status: "needs_input",
+      created_at: now(),
+      updated_at: now(),
+      progress: [],
+       question: `已更新「${targetCharacterLabel}」的 Blueprint 方向草案；請回答「確認」保存，或繼續提供短句修改。`,
+    };
+    const candidate = JSON.parse(JSON.stringify(previousPrecheck.candidate_blueprint)) as Record<string, unknown>;
+    const existingIntake = candidate.intake_values !== null && typeof candidate.intake_values === "object" && !Array.isArray(candidate.intake_values)
+      ? candidate.intake_values as Record<string, unknown>
+      : {};
+    const requestWithoutCommand = request.replace(/^\s*(?:修改|更新|調整|change|revise|update)\s*/iu, "").trim();
+    const genericStripped = request.replace(/^\s*(?:修改|更新|調整|change|revise|update)\s*(?:blueprint\s*)?(?:方向|direction)?\s*[:：-]?\s*/iu, "").trim();
+    const directionPrefixes = [
+      `${targetCharacterLabel}的 Blueprint 方向`,
+      `${targetCharacterLabel}的角色設定方向`,
+      `${targetCharacterId} Blueprint direction`,
+      `${targetCharacterId} direction`,
+    ];
+    const normalizedRequest = requestWithoutCommand.toLocaleLowerCase();
+    const matchedPrefix = directionPrefixes.find((prefix) => normalizedRequest.startsWith(prefix.toLocaleLowerCase()));
+    const selected = (matchedPrefix === undefined
+      ? (revisionCharacters.length === 1 ? genericStripped || request.trim() : request.trim())
+      : requestWithoutCommand.slice(matchedPrefix.length).replace(/^[\s:：-]+/u, "").trim()) || request.trim();
+    const revisedIntake = { ...existingIntake, [`blueprint_direction:${targetCharacterId}`]: selected };
+    if (revisionCharacters.length === 1) revisedIntake.blueprint_direction = selected;
+    const candidateCharacters = revisionCharacters.map((character) => {
+      if (String(character.id) !== targetCharacterId) return character;
+      const previousDirection = objectValue(character.direction) ?? {};
+      const history = Array.isArray(previousDirection.history) ? previousDirection.history : [];
+      return {
+        ...character,
+        direction: {
+          ...previousDirection,
+          scope: "character_setting",
+          selected,
+          character_setting_direction: selected,
+          candidate_summary: selected,
+          source_question_id: `blueprint_direction:${targetCharacterId}`,
+          selected_at: now(),
+          intake_revision: contentHash(canonicalJson(revisedIntake)),
+          history: [...history, { answer: selected, actor: context.actor, occurred_at: now() }],
+        },
+      };
+    });
+    candidate.intake_values = revisedIntake;
+    candidate.characters = candidateCharacters;
+    if (candidateCharacters.length === 1) candidate.blueprint_direction = objectValue(candidateCharacters[0]?.direction);
+    const confirmationCheck: BlueprintPrecheckCheck = {
+      subject_id: targetCharacterId,
+      dimension: "cross_module_impact",
+      uncertainty: "high",
+      impact: "high",
+      basis: "A direction revision can affect downstream mode modules.",
+      action: "user_confirmed",
+      user_answer: "pending confirmation",
+    };
+    const checks = previousPrecheck.checks.some((check) => check.dimension === "cross_module_impact" && check.subject_id === targetCharacterId)
+      ? previousPrecheck.checks.map((check) => check.dimension === "cross_module_impact" && check.subject_id === targetCharacterId ? confirmationCheck : check)
+      : [...previousPrecheck.checks, confirmationCheck];
+    const precheck: BlueprintPrecheckRecord = {
+      id: internalId("blueprint_precheck"),
+      schema_version: 1,
+      project_id: initial.project_id,
+      operation_id: operation.id,
+      collaboration_mode: previousPrecheck.collaboration_mode,
+      candidate_blueprint: candidate,
+      candidate_blueprint_revision: contentHash(canonicalJson(candidate)),
+      checks,
+      status: "needs_input",
+      created_at: now(),
+      created_by: context.actor,
+    };
+    const updated = await this.repository.commit(initial.revision, (current) => ({
+      ...current,
+      project_status: current.project_status === "published" ? "ready" : current.project_status,
+      blueprint_prechecks: [
+        ...current.blueprint_prechecks.map((item) => item.status === "recorded" ? { ...item, status: "superseded" as const } : item),
+        precheck,
+      ],
+      operations: [...current.operations, operation],
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "blueprint.revision.proposed",
+        actor: context.actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { precheck_id: precheck.id, previous_precheck_id: previousPrecheck.id, candidate_blueprint_revision: precheck.candidate_blueprint_revision },
+      }],
+    }));
+    return {
+      operation_id: operation.id,
+      status: "needs_input",
+      summary: "已建立 Blueprint 方向修訂草案；請確認後才會保存新版本。",
+      completed: [],
+      blocked: [precheck.id],
+      ...(operation.question === undefined ? {} : { question: operation.question }),
+      project_id: updated.project_id,
+      agent_id: "director",
+      agent_role: "orchestrator",
+    };
+  }
+
+  async request(request: string, context: WorkspaceContext, options: { agent?: string } = {}): Promise<RequestResult> {
+    const trimmed = request.trim();
+    if (trimmed.length === 0) {
+      throw new CoreError("REQUEST_EMPTY", "請描述想完成的事情", true);
+    }
+    const qualityRequest = trimmed.match(/(?:quality|品質|審查)\s*(?:profile|模式|設定)?\s*[:：\s]*(none|light|normal|strict|無|輕量|正常|嚴格)/iu);
+    if (qualityRequest?.[1] !== undefined) {
+      const labels: Record<string, QualityLevel> = { none: "none", light: "light", normal: "normal", strict: "strict", "無": "none", "輕量": "light", "正常": "normal", "嚴格": "strict" };
+      const level = labels[qualityRequest[1].toLocaleLowerCase()];
+      if (level !== undefined) return this.configureQualityProfile(level, context);
+    }
+    const resolution = this.agents.resolve(trimmed, options.agent);
+    const kind = resolution.kind;
+    if (kind === "status") return this.status();
+    const existing = await this.repository.read();
+    const pendingBlueprintPrecheck = [...existing.blueprint_prechecks].reverse().find((item) => item.status === "needs_input");
+    if (this.interviewRequired && pendingBlueprintPrecheck !== undefined) {
+      if (existing.interview.status === "complete" && isBlueprintConfirmation(trimmed)) {
+        return this.answerInterview(trimmed, context);
+      }
+      throw new CoreError("BLUEPRINT_PRECHECK_REQUIRED", "Blueprint precheck needs a short confirmation before the next workflow step.", true);
+    }
+    if (this.interviewRequired && existing.interview.status === "complete" && isBlueprintRevisionRequest(trimmed)) {
+      return this.proposeBlueprintRevision(trimmed, context);
+    }
+    const projectNeedsInterview = (existing.project_status === "uninitialized" || existing.project_status === "interviewing") && existing.interview.status !== "complete";
+    if (this.interviewRequired && projectNeedsInterview) {
+      return existing.interview.status === "active"
+        ? this.answerInterview(trimmed, context)
+        : this.startInterview(trimmed, context);
+    }
+    const pending = [...existing.operations].reverse().find((operation) => operation.status === "needs_input");
+    if (pending?.kind === "source" && (context.attachments.length > 0 || /重試|retry|上傳|貼上|https?:\/\//iu.test(trimmed))) {
+      const resumed = await this.sources.resume(pending.id, trimmed, this.fetcher === undefined ? context : { ...context, fetcher: this.fetcher });
+      return { operation_id: pending.id, status: resumed.status, summary: resumed.summary, completed: resumed.completed, blocked: resumed.blocked };
+    }
+    const pendingBuildQuestion = pending?.kind === "build" && /模式|珠璣|調色盤|zhuji|palette/iu.test(pending.question ?? "");
+    if (pendingBuildQuestion && pending !== undefined) {
+      const pendingBuildMode = parseBuildModeSelection(trimmed);
+      if (pendingBuildMode !== undefined) {
+        const resumed = await this.build.run(pending.id, pending.request, context.actor, { mode_selection: pendingBuildMode });
+        const latest = await this.repository.read();
+        const finalOperation = latest.operations.find((item) => item.id === pending.id);
+        return {
+          operation_id: pending.id,
+          status: resumed.status,
+          summary: resumed.summary,
+          completed: resumed.build_id === undefined ? [] : [resumed.build_id],
+          blocked: resumed.status === "blocked" ? [pending.id] : [],
+          ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+        };
+      }
+      return {
+        operation_id: pending.id,
+        status: "needs_input",
+        summary: pending.question ?? "請選擇本次打包要使用的模式：珠璣、調色盤，或兩者。",
+        completed: [],
+        blocked: [],
+        ...(pending.question === undefined ? {} : { question: pending.question }),
+      };
+    }
+    const state = existing;
+    if (kind === "authoring") this.ensureSourceAdaptationFactsReady(state);
+    const operation: OperationRecord = {
+      id: internalId("operation"),
+      kind,
+      request: trimmed,
+      actor: context.actor,
+      status: "resolving",
+      created_at: now(),
+      updated_at: now(),
+      progress: [],
+    };
+    const created = await this.repository.commit(state.revision, (current) => ({
+      ...current,
+      operations: [...current.operations, operation],
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "operation.created",
+        actor: context.actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { kind, request: trimmed, agent_id: resolution.agent_id },
+      }],
+    }));
+    if (kind === "source") {
+      await this.repository.commit(created.revision, (current) => ({
+        ...current,
+        operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "running", updated_at: now() } : item),
+      }));
+      if (/搜尋|找來源|research|search/iu.test(trimmed) && !/加入|匯入|保存|批准/iu.test(trimmed)) {
+        const results = context.research_results ?? (this.searcher === undefined ? [] : await this.searcher(trimmed));
+        const searched = await this.sources.registerCandidates(operation.id, results, context.actor);
+        return { operation_id: operation.id, status: searched.status, summary: searched.summary, completed: searched.completed, blocked: searched.blocked };
+      }
+      const executionContext = this.fetcher === undefined ? context : { ...context, fetcher: this.fetcher };
+      const result = context.attachments.length > 0 || /https?:\/\//iu.test(trimmed)
+        ? await this.sources.resume(operation.id, trimmed, executionContext)
+        : await this.sources.execute(operation.id, executionContext);
+      const latest = await this.repository.read();
+      const finalOperation = latest.operations.find((item) => item.id === operation.id);
+      if (finalOperation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operation.id} does not exist`);
+      return { ...responseFromOperation(finalOperation), status: result.status, summary: result.summary, completed: result.completed, blocked: result.blocked };
+    }
+    if (kind === "knowledge" || kind === "authoring" || kind === "review") {
+      await this.repository.commit(created.revision, (current) => ({
+        ...current,
+        operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "running", updated_at: now() } : item),
+      }));
+      if (kind === "knowledge") {
+        const result = await this.knowledge.refresh(operation.id, trimmed, context.actor);
+        const latest = await this.repository.read();
+        const finalOperation = latest.operations.find((item) => item.id === operation.id);
+        return { operation_id: operation.id, status: result.status, summary: result.summary, completed: [...result.chunks, ...result.facts], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }) };
+      }
+      if (kind === "authoring") {
+        const result = await this.authoring.create(operation.id, trimmed, context.actor);
+        const latest = await this.repository.read();
+        const finalOperation = latest.operations.find((item) => item.id === operation.id);
+        return {
+          operation_id: operation.id,
+          status: result.status,
+          summary: result.summary,
+          completed: result.artifact_id === undefined ? [] : [result.artifact_id],
+          blocked: [],
+          ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+        };
+      }
+      const result = /重新評估|re-?evaluate|quality profile/iu.test(trimmed)
+        ? await this.review.reevaluate(operation.id, context.actor)
+        : await this.review.review(operation.id, trimmed, context.actor);
+      const latest = await this.repository.read();
+      const finalOperation = latest.operations.find((item) => item.id === operation.id);
+      return {
+        operation_id: operation.id,
+        status: result.status,
+        summary: result.summary,
+        completed: result.review_id === undefined ? [] : [result.review_id],
+        blocked: result.status === "blocked" ? [operation.id] : [],
+        ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+      };
+    }
+    if (kind === "build" || kind === "import") {
+      await this.repository.commit(created.revision, (current) => ({
+        ...current,
+        operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "running", updated_at: now() } : item),
+      }));
+      if (kind === "build") {
+        const result = await this.build.run(operation.id, trimmed, context.actor);
+        const latest = await this.repository.read();
+        const finalOperation = latest.operations.find((item) => item.id === operation.id);
+        return {
+          operation_id: operation.id,
+          status: result.status,
+          summary: result.summary,
+          completed: result.build_id === undefined ? [] : [result.build_id],
+          blocked: result.status === "blocked" ? [operation.id] : [],
+          ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+        };
+      }
+      const result = await this.importer.run(operation.id, trimmed, context.actor, context.attachments);
+      const latest = await this.repository.read();
+      const finalOperation = latest.operations.find((item) => item.id === operation.id);
+      return {
+        operation_id: operation.id,
+        status: result.status,
+        summary: result.summary,
+        completed: result.artifact_id === undefined ? (result.import_id === undefined ? [] : [result.import_id]) : [result.artifact_id],
+        blocked: [],
+        ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+      };
+    }
+    const latest = await this.repository.read();
+    await this.repository.commit(latest.revision, (current) => ({
+      ...current,
+      operations: current.operations.map((item) => item.id === operation.id
+        ? { ...item, status: "needs_input", question: "請描述要執行的來源、知識、創作、審查或建置操作。", updated_at: now() }
+        : item),
+    }));
+    return {
+      operation_id: operation.id,
+      status: "needs_input",
+      summary: "我需要更明確的操作目標。",
+      completed: [],
+      blocked: [],
+      question: "請描述要執行的來源、知識、創作、審查或建置操作。",
+    };
+  }
+
+  async status(): Promise<RequestResult> {
+    const state = await this.repository.read();
+    const active = [...state.operations].reverse().find((operation) => !["completed", "cancelled", "failed"].includes(operation.status));
+    if (active !== undefined) return responseFromOperation(active);
+    return {
+      status: "completed",
+      summary: `目前有 ${state.sources.length} 個已入庫來源、${state.candidates.length} 個候選來源。`,
+      completed: state.sources.map((source) => source.id),
+      blocked: state.candidates.filter((candidate) => candidate.status === "blocked_external" || candidate.status === "failed").map((candidate) => candidate.id),
+    };
+  }
+
+  private async ensureBlueprintAuthoringReady(kind: "zhuji" | "palette", characterId: string, module: string): Promise<void> {
+    // The low-level template endpoints remain usable for isolated authoring and
+    // migration fixtures. The Blueprint-first contract is enforced for the
+    // interview-backed workspace runtime only.
+    if (!this.interviewRequired) return;
+    const state = await this.repository.read();
+    const workflowBacked = state.interview.status === "complete" || ["ready", "published"].includes(state.project_status);
+    if (!workflowBacked) return;
+    const latestRecordedPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
+    const blueprint = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint"
+      && hasUsableArtifact(artifact)
+      && (latestRecordedPrecheck === undefined || artifact.blueprint_precheck_id === latestRecordedPrecheck.id));
+    if (blueprint === undefined) {
+      throw new CoreError("BLUEPRINT_REQUIRED", "請先完成並保存 Blueprint，確認後才能開始珠璣或調色盤模組創作。", true);
+    }
+    const order: readonly string[] = kind === "zhuji" ? ZHUJI_MODULE_ORDER : PALETTE_MODULE_ORDER;
+    const index = order.indexOf(module);
+    if (index < 0) return;
+    const existing = parsedModeModules(state, kind, characterId);
+    const missing = order.slice(0, index).filter((required) => !existing.has(required));
+    if (missing.length > 0) {
+      throw new CoreError(
+        "AUTHORING_PREVIOUS_MODULE_REQUIRED",
+        `請先完成前置模組：${missing.join("、")}，再建立 ${module}。`,
+        true,
+      );
+    }
+  }
+
+  private ensureSourceAdaptationFactsReady(state: ProjectState): void {
+    if (!this.interviewRequired || !isSourceAdaptationProject(state) || sourceFactsReady(state)) return;
+    throw new CoreError(
+      "SOURCE_FACTS_REQUIRED",
+      "原作改編必須先完成來源搜尋、來源擷取、事實提取與固定 Review Run 的嚴格裁決，才能開始世界設定或角色創作。",
+      true,
+    );
+  }
+
+  private async ensureWardrobeAuthoringReady(characterId: string): Promise<void> {
+    if (!this.interviewRequired) return;
+    const state = await this.repository.read();
+    const workflowBacked = state.interview.status === "complete" || ["ready", "published"].includes(state.project_status);
+    if (!workflowBacked) return;
+    const latestRecordedPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
+    const blueprint = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint"
+      && hasUsableArtifact(artifact)
+      && (latestRecordedPrecheck === undefined || artifact.blueprint_precheck_id === latestRecordedPrecheck.id));
+    if (blueprint === undefined) {
+      throw new CoreError("BLUEPRINT_REQUIRED", "請先完成並保存 Blueprint，確認後才能建立衣櫃。", true);
+    }
+    const hasCharacterSettings = state.artifacts.some((artifact) => {
+      if (artifact.kind !== "zhuji" && artifact.kind !== "palette") return false;
+      try {
+        const value = JSON.parse(artifact.content) as { character_id?: unknown };
+        return value.character_id === characterId;
+      } catch {
+        return false;
+      }
+    });
+    if (!hasCharacterSettings) {
+      throw new CoreError("CHARACTER_SETTINGS_REQUIRED", "請先完成至少一個珠璣或調色盤角色設定模組，再建立衣櫃。", true);
+    }
+  }
+
+  private async ensureInterviewComplete(): Promise<void> {
+    if (!this.interviewRequired) return;
+    const state = await this.repository.read();
+    if ((state.project_status === "uninitialized" || state.project_status === "interviewing") && state.interview.status !== "complete") {
+      throw new CoreError("INTERVIEW_REQUIRED", state.interview.current?.text ?? "請先完成專案訪談。", true);
+    }
+    const pendingPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "needs_input");
+    if (pendingPrecheck !== undefined) {
+      throw new CoreError("BLUEPRINT_PRECHECK_REQUIRED", "Blueprint precheck needs a short confirmation before authoring can continue.", true);
+    }
+  }
+}
+
+function defaultAgentForTemplate(proposal: TemplateProposalValue): string {
+  if (proposal.kind === "plugin") {
+    if (proposal.plugin_id === "official.ejs") return "ejs-creator";
+    if (proposal.plugin_id === "official.html") return "html-creator";
+    return "mvu-creator";
+  }
+  if (proposal.kind === "review") {
+    const target = proposal.target.kind.toLocaleLowerCase();
+    if (/world|lore/iu.test(target)) return "world-lore-critic";
+    if (/greeting/iu.test(target)) return "greetings-critic";
+    if (/mvu/iu.test(target)) return "mvu-critic";
+    if (/ejs/iu.test(target)) return "ejs-critic";
+    if (/html/iu.test(target)) return "html-critic";
+    return "character-critic";
+  }
+  switch (proposal.kind) {
+    case "director_routing": return "director";
+    case "source_research": return "source-researcher";
+    case "fact_curation": return "fact-curator";
+    case "fact_review": return "fact-reviewer-1";
+    case "zhuji": return "zhuji-creator";
+    case "palette": return "palette-creator";
+    case "wardrobe": return "wardrobe-creator";
+    case "character": return "director";
+    case "relationships": return "relationship-creator";
+    case "greetings": return "greetings-creator";
+    case "world": return "world-lore-creator";
+    case "conversion": return "mode-conversion";
+    case "import_analysis": return "card-import-analyst";
+  }
+}
+
+function nextFactReviewer(state: ProjectState): string {
+  const reviewers = ["fact-reviewer-1", "fact-reviewer-2", "fact-reviewer-3"] as const;
+  const counts = new Map(reviewers.map((reviewer) => [reviewer, 0]));
+  for (const decision of state.fact_review_decisions) {
+    if (counts.has(decision.reviewer_identity as (typeof reviewers)[number])) {
+      const reviewer = decision.reviewer_identity as (typeof reviewers)[number];
+      counts.set(reviewer, (counts.get(reviewer) ?? 0) + 1);
+    }
+  }
+  return [...reviewers].sort((left, right) => (counts.get(left)! - counts.get(right)!) || left.localeCompare(right))[0]!;
+}
+
+export { AgentAdapter, type AgentRequest } from "./agent-adapter.js";
+export { AgentRegistry, AGENT_ALIASES, AGENT_DEFINITIONS, type AgentDefinition, type AgentRole } from "./agent-registry.js";
+export { AgentRouter, classifyIntent, type AgentResolution } from "./agent-router.js";
+export { WorkspaceWorker, type WorkspaceRuntimeProvider, type WorkspaceWorkerEvent, type WorkspaceWorkerOptions, type WorkspaceWorkerStatus } from "./worker.js";
+export { WorkspaceProjectManager, type WorkspaceProjectManagerOptions, type WorkspaceProjectSummary } from "./project-manager.js";

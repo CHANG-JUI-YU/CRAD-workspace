@@ -1,0 +1,22 @@
+{
+  "name": "@st-workspace/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@st-workspace/adapters": "workspace:*",
+    "@st-workspace/core": "workspace:*",
+    "@st-workspace/runtime": "workspace:*"
+  }
+}

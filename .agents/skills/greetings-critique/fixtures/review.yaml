@@ -1,0 +1,7 @@
+target_revision: sha256:greetings
+findings:
+  - id: GREETING-PUPPETEERING
+    severity: error
+    evidence: 文本替玩家說出接受邀請的台詞。
+    hint: 在角色動作後留出玩家回應空間。
+    overridable: true

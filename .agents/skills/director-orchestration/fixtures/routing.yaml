@@ -1,0 +1,5 @@
+stage: post_world_review
+workflow_revision: 12
+next_action: ask_one_question
+question: World Critic review task 尚未完成，請選擇重試或提供決策。
+must_not_emit: complete_character_module

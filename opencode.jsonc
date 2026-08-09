@@ -1,0 +1,121 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "director",
+  "agent": {
+    "director": {
+      "description": "ST Workspace director agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/director.md}\n\n--- Personality runtime instructions ---\n{file:./.agents/personalities/runtime-instructions.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/director.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/director-orchestration/SKILL.md}"
+    },
+    "source-researcher": {
+      "description": "ST Workspace source-researcher agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/source-researcher.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/source-researcher.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/source-research/SKILL.md}"
+    },
+    "fact-curator": {
+      "description": "ST Workspace fact-curator agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/fact-curator.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/fact-curator.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/fact-curation/SKILL.md}"
+    },
+    "fact-reviewer-1": {
+      "description": "ST Workspace fact-reviewer-1 agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/fact-reviewer.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/fact-reviewer.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/fact-review/SKILL.md}"
+    },
+    "fact-reviewer-2": {
+      "description": "ST Workspace fact-reviewer-2 agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/fact-reviewer.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/fact-reviewer.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/fact-review/SKILL.md}"
+    },
+    "fact-reviewer-3": {
+      "description": "ST Workspace fact-reviewer-3 agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/fact-reviewer.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/fact-reviewer.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/fact-review/SKILL.md}"
+    },
+    "zhuji-creator": {
+      "description": "ST Workspace zhuji-creator agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/zhuji-creator.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/zhuji-creator.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/zhuji-creation/SKILL.md}"
+    },
+    "palette-creator": {
+      "description": "ST Workspace palette-creator agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/palette-creator.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/palette-creator.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/palette-creation/SKILL.md}"
+    },
+    "wardrobe-creator": {
+      "description": "ST Workspace wardrobe-creator agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/wardrobe-creator.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/wardrobe-creator.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/wardrobe-creation/SKILL.md}"
+    },
+    "character-critic": {
+      "description": "ST Workspace character-critic agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/character-critic.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/character-critic.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/character-critique/SKILL.md}"
+    },
+    "relationship-creator": {
+      "description": "ST Workspace relationship-creator agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/relationship-creator.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/relationship-creator.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/relationship-creation/SKILL.md}"
+    },
+    "greetings-creator": {
+      "description": "ST Workspace greetings-creator agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/greetings-creator.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/greetings-creator.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/greetings-creation/SKILL.md}"
+    },
+    "greetings-critic": {
+      "description": "ST Workspace greetings-critic agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/greetings-critic.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/greetings-critic.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/greetings-critique/SKILL.md}"
+    },
+    "mode-conversion": {
+      "description": "ST Workspace mode-conversion agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/mode-conversion.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/mode-conversion.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/mode-conversion/SKILL.md}"
+    },
+    "card-import-analyst": {
+      "description": "ST Workspace card-import-analyst agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/card-import-analyst.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/card-import-analyst.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/card-import-analysis/SKILL.md}"
+    },
+    "world-lore-creator": {
+      "description": "ST Workspace world-lore-creator agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/world-lore-creator.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/world-lore-creator.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/world-lore-creation/SKILL.md}"
+    },
+    "world-lore-critic": {
+      "description": "ST Workspace world-lore-critic agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/world-lore-critic.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/world-lore-critic.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/world-lore-critique/SKILL.md}"
+    },
+    "mvu-creator": {
+      "description": "ST Workspace mvu-creator agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/mvu-creator.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/mvu-creator.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/mvu-creation/SKILL.md}"
+    },
+    "mvu-critic": {
+      "description": "ST Workspace mvu-critic agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/mvu-creator-critic.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/mvu-creator-critic.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/mvu-critique/SKILL.md}"
+    },
+    "ejs-creator": {
+      "description": "ST Workspace ejs-creator agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/ejs-creator.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/ejs-creator.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/ejs-creation/SKILL.md}"
+    },
+    "ejs-critic": {
+      "description": "ST Workspace ejs-critic agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/ejs-creator-critic.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/ejs-creator-critic.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/ejs-critique/SKILL.md}"
+    },
+    "html-creator": {
+      "description": "ST Workspace html-creator agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/html-creator.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/html-creator.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/html-creation/SKILL.md}"
+    },
+    "html-critic": {
+      "description": "ST Workspace html-critic agent",
+      "mode": "primary",
+      "prompt": "{file:./.agents/agents/html-creator-critic.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/html-creator-critic.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/html-critique/SKILL.md}"
+    }
+  }
+}

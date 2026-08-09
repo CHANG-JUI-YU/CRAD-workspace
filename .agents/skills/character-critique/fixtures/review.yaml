@@ -1,0 +1,7 @@
+target_revision: sha256:proposal
+findings:
+  - id: CHAR-MODULE7-GREETING
+    severity: error
+    evidence: 模組7包含開場場景。
+    hint: 改為角色自我介紹常態設定。
+    overridable: false

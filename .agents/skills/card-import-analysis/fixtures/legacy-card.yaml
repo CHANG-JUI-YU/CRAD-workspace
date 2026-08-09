@@ -1,0 +1,8 @@
+name: Legacy Fixture
+description: Legacy description retained for inspection.
+personality: Careful and direct.
+scenario: A deterministic test scenario.
+first_mes: Hello, {{user}}.
+mes_example: "<START>\n{{char}}: Hello."
+vendor_future:
+  retained: true

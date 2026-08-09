@@ -1,0 +1,431 @@
+export const ZHUJI_SELF_INTRODUCTION_FIELDS = [
+  "核心標籤與特質的風格表現",
+  "對 {{user}} 的態度與互動模式",
+  "外在印象與他人觀感",
+  "性格基礎與內在驅動力",
+  "能力與興趣專長",
+  "背景設定與成長經歷",
+  "人際關係與情感模式",
+  "性相關",
+] as const;
+
+export const BLUEPRINT_DIRECTION_QUESTION_ID = "blueprint_direction";
+export const CHARACTER_ROSTER_QUESTION_ID = "character_roster";
+
+export interface InterviewCharacterSubject {
+  /** Stable internal subject id; never derived from user-provided paths. */
+  id: string;
+  /** The user-facing label captured during the roster step. */
+  label: string;
+  ordinal: number;
+}
+
+export type InterviewFlow = "new_project" | "character" | "source_adaptation" | "world" | "continue" | "legacy_review" | "character_expansion";
+
+export type InterviewStatus = "idle" | "active" | "complete";
+
+export type InterviewQuestionKind = "choice" | "free_text" | "name" | "confirmation" | "self_introduction" | "blueprint_direction";
+
+export interface InterviewQuestion {
+  id: string;
+  text: string;
+  kind: InterviewQuestionKind;
+  options?: readonly string[];
+  min_length?: number;
+  subject_id?: string;
+  subject_label?: string;
+}
+
+export interface InterviewAnswer {
+  question_id: string;
+  answer: string;
+  actor: string;
+  occurred_at: string;
+}
+
+export interface InterviewState {
+  schema_version: 1;
+  status: InterviewStatus;
+  flow: InterviewFlow;
+  current?: InterviewQuestion;
+  answers: InterviewAnswer[];
+  values: Record<string, string>;
+  /** Per-character subjects for multi-character cards. */
+  characters?: InterviewCharacterSubject[];
+  /** Subject currently receiving a character-scoped question. */
+  active_character_id?: string;
+  confirmed_no_additional_settings?: boolean;
+}
+
+export interface InterviewAnswerInput {
+  answer: string;
+  actor: string;
+}
+
+export class InterviewError extends Error {
+  readonly code: string;
+  readonly recoverable: boolean;
+
+  constructor(code: string, message: string, recoverable = true) {
+    super(message);
+    this.name = "InterviewError";
+    this.code = code;
+    this.recoverable = recoverable;
+  }
+}
+
+const WORK_TYPE_OPTIONS = ["角色設定", "世界設定", "繼續專案", "舊卡審核", "擴充既有角色卡"] as const;
+
+const isNo = (value: string): boolean => /^(?:no|n|沒有|不需要|不想|不要|無|算了)$/iu.test(value.trim()) || /不需要(?:任何|什麼)?(?:設定|世界)/iu.test(value);
+const isYes = (value: string): boolean => /^(?:yes|y|需要|好|要|啟用|開啟|开启)$/iu.test(value.trim()) || /需要(?:世界|設定)/iu.test(value);
+const isMulti = (value: string): boolean => /multi/iu.test(value) || /多人卡|多角色卡/iu.test(value);
+const isWorld = (value: string): boolean => /world/iu.test(value) || /世界|世界觀/iu.test(value);
+const isExpansion = (value: string): boolean => /expan/iu.test(value) || /新增角色|擴充/iu.test(value);
+const isLegacy = (value: string): boolean => /legacy/iu.test(value) || /舊卡|審核/iu.test(value);
+const isContinue = (value: string): boolean => /continue/iu.test(value) || /繼續|繼續專案/iu.test(value);
+const isSourceAdaptation = (value: string): boolean => /source[_ -]?adaptation|二創|同人|原作改編|動漫角色|改編角色|fan character/iu.test(value);
+const isRegenerate = (value: string): boolean => /^(?:重新產生|再來|換一個|再給|更多選項|more options|regenerate)/iu.test(value.trim()) || /再給幾個|換一批/iu.test(value);
+
+const SENSITIVE_SELF_INTRODUCTION_FIELD = "性相關" as const;
+const EXPLICIT_ADULT_CONTEXT = /(?:性相關|性經驗|性癖|性生活|性行為|性器官|性交|性愛|性慾|性關係|情色|色情|成人向|成人內容|sexual|sex\b|porn|erotic)/iu;
+
+const hasExplicitAdultContext = (state: InterviewState): boolean => {
+  const evidence = [
+    ...state.answers.map((item) => item.answer),
+    ...Object.values(state.values),
+  ].join("\n");
+  return EXPLICIT_ADULT_CONTEXT.test(evidence);
+};
+
+const now = (): string => new Date().toISOString();
+
+const question = (id: string, text: string, kind: InterviewQuestionKind, options?: readonly string[], min_length?: number): InterviewQuestion => ({
+  id,
+  text,
+  kind,
+  ...(options === undefined ? {} : { options }),
+  ...(min_length === undefined ? {} : { min_length }),
+});
+
+const firstQuestion = (): InterviewQuestion => question("work_type", "請選擇哪一種工作類型：角色設定、世界設定、繼續專案、舊卡審核或擴充既有角色卡。", "choice", WORK_TYPE_OPTIONS);
+
+const characterOriginQuestion = (): InterviewQuestion => question("character_origin", "這次要建立完全原創角色，還是原作改編角色？", "choice", ["完全原創", "原作改編"]);
+
+const characterShapeQuestion = (): InterviewQuestion => question("card_shape", "這是單人角色卡還是多人角色卡？", "choice", ["單人角色卡", "多人角色卡"]);
+
+const characterRosterQuestion = (needsMultiple = false): InterviewQuestion => question(
+  CHARACTER_ROSTER_QUESTION_ID,
+  needsMultiple
+    ? "多人角色卡需要至少兩名角色。請列出角色的暫時名稱或簡短標籤，每行一名；之後可在建立專案後再正式命名。"
+    : "請列出這張多人角色卡的角色暫時名稱或簡短標籤，每行一名；之後可在建立專案後再正式命名。",
+  "free_text",
+);
+
+const authoringModeQuestion = (): InterviewQuestion => question("authoring_mode", "每個角色要使用珠璣（zhuji）還是調色盤（palette）模式？", "choice", ["zhuji", "palette", "每名角色分別指定"]);
+
+const conceptQuestion = (id = "concept", prefix = "角色概念"): InterviewQuestion => question(id, `請詳細描述${prefix}：核心標籤、屬性與整體印象。`, "free_text");
+
+const sourceSubjectQuestion = (): InterviewQuestion => question("source_subject", "請提供要二創的原作角色與作品名稱；可以是動漫、漫畫、遊戲或小說角色。", "free_text");
+
+const sourceMediumQuestion = (): InterviewQuestion => question("source_medium", "這個角色主要來自哪一種媒體？", "choice", ["動漫", "漫畫", "遊戲", "小說", "其他"]);
+
+const sourceReferenceQuestion = (): InterviewQuestion => question("source_identifiers", "請提供原作辨識資訊：官方頁面、作品名稱、別名或你希望研究的關鍵詞；之後可再由 Source Researcher 找候選來源。", "free_text");
+
+const collaborationQuestion = (): InterviewQuestion => question("collaboration_mode", "這個專案要自由創作還是協助創作？", "choice", ["自由創作", "協助創作"]);
+
+const confirmationQuestion = (): InterviewQuestion => question("additional_settings", "訪談資料是否已齊全？還是要補充其他設定？", "confirmation", ["沒有，開始建立", "有，繼續補充"]);
+
+const blueprintDirectionQuestion = (
+  subjects: readonly InterviewCharacterSubject[] = [],
+  subject?: InterviewCharacterSubject,
+): InterviewQuestion => {
+  const selectedSubject = subject ?? subjects[0];
+  const isScoped = subjects.length > 1 && selectedSubject !== undefined;
+  const id = isScoped ? `${BLUEPRINT_DIRECTION_QUESTION_ID}:${selectedSubject.id}` : BLUEPRINT_DIRECTION_QUESTION_ID;
+  const subjectPrefix = isScoped
+    ? `目前先處理「${selectedSubject.label}」的角色設定方向。`
+    : "目前先處理這名角色的角色設定方向。";
+  const base = "核心概念、背景與性格資料已彙整。請依 Director 提出的 3 個「角色設定方向」選擇核心：外在定位、內在驅動、反差、主要矛盾與創作影響；與 {{user}} 的關係只作為其中一項可能影響，不是本題唯一焦點。你可以選一個、要求重新產生、組合多個方向，或用短語補充自己的方向。這一步只確認角色設定 Blueprint，不是撰寫珠璣或調色盤模組。";
+  return {
+    ...question(id, `${subjectPrefix}${base}`, "blueprint_direction"),
+    ...(isScoped ? { subject_id: selectedSubject.id, subject_label: selectedSubject.label } : {}),
+  };
+};
+
+/** Parse a natural-language roster without making the user provide ids. */
+export const parseCharacterRoster = (answer: string): InterviewCharacterSubject[] => {
+  const labels = answer
+    .split(/[\r\n、，,；;|]+/u)
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0)
+    .filter((value, index, all) => all.indexOf(value) === index);
+  return labels.map((label, index) => ({ id: `character-${index + 1}`, label, ordinal: index + 1 }));
+};
+
+const defaultCharacterSubjects = (): InterviewCharacterSubject[] => [{ id: "character-1", label: "角色", ordinal: 1 }];
+
+const characterSubjectsFor = (state: InterviewState): InterviewCharacterSubject[] => (
+  state.characters && state.characters.length > 0 ? state.characters : defaultCharacterSubjects()
+);
+
+const directionSubjectId = (questionId: string): string | undefined => {
+  const prefix = `${BLUEPRINT_DIRECTION_QUESTION_ID}:`;
+  return questionId.startsWith(prefix) ? questionId.slice(prefix.length) : undefined;
+};
+
+const nextSelfIntroductionQuestion = (state: InterviewState, startIndex: number): InterviewQuestion | undefined => {
+  for (let index = startIndex; index < ZHUJI_SELF_INTRODUCTION_FIELDS.length; index += 1) {
+    const field = ZHUJI_SELF_INTRODUCTION_FIELDS[index];
+    if (field === SENSITIVE_SELF_INTRODUCTION_FIELD && !hasExplicitAdultContext(state)) continue;
+    return question(`zhuji_intro:${field}`, `請以角色第一人稱面向 {{user}} 回答「${field}」，至少 30 個 Unicode 字元，請使用第一人稱面向 {{user}} 表示。`, "self_introduction", undefined, 30);
+  }
+  return undefined;
+};
+
+/**
+ * Keep legacy self-introduction states compatible without surfacing the adult
+ * field unless the intake already contains an explicit user mention.
+ */
+export const normalizeInterviewStateForDisplay = (state: InterviewState): InterviewState => {
+  if (state.status !== "active" || state.current === undefined || !state.current.id.startsWith("zhuji_intro:")) return state;
+  const currentField = state.current.id.slice("zhuji_intro:".length);
+  if (currentField !== SENSITIVE_SELF_INTRODUCTION_FIELD || hasExplicitAdultContext(state)) return state;
+  const index = ZHUJI_SELF_INTRODUCTION_FIELDS.indexOf(currentField as (typeof ZHUJI_SELF_INTRODUCTION_FIELDS)[number]);
+  if (index < 0) return state;
+  const nextField = nextSelfIntroductionQuestion(state, index + 1);
+  return nextField === undefined ? { ...state, current: conceptQuestion() } : { ...state, current: nextField };
+};
+
+const nextBeforeCollaboration = (state: InterviewState): InterviewQuestion => (
+  state.flow === "character" || state.flow === "source_adaptation" || state.flow === "character_expansion"
+    ? blueprintDirectionQuestion(characterSubjectsFor(state), characterSubjectsFor(state)[0])
+    : collaborationQuestion()
+);
+
+const nextAfterPersonality = (state: InterviewState): InterviewQuestion => (
+  (state.flow === "character" || state.flow === "source_adaptation") && isMulti(state.values.card_shape ?? "")
+    ? question("relationships", "請描述角色之間的關係：關係網絡、互動模式與潛在衝突。", "free_text")
+    : question("name_source", "角色概念成形後，名稱要由你直接命名，還是由 Director 提出候選名稱供你選擇？", "choice", ["我直接命名", "請 Director 提出候選"])
+);
+
+interface NextTransition {
+  flow: InterviewFlow;
+  question?: InterviewQuestion;
+  characters?: InterviewCharacterSubject[];
+  active_character_id?: string;
+  complete?: boolean;
+  confirmed?: boolean;
+  retry?: boolean;
+}
+
+const next = (q: InterviewQuestion, flow: InterviewFlow = "character"): NextTransition => ({ flow, question: q });
+
+const afterCardShape = (state: InterviewState): NextTransition => {
+  if (isMulti(state.values.card_shape ?? "")) return { flow: state.flow, question: characterRosterQuestion() };
+  return {
+    ...next(authoringModeQuestion(), state.flow),
+    characters: defaultCharacterSubjects(),
+    active_character_id: "character-1",
+  };
+};
+
+const nextQuestion = (state: InterviewState, current: InterviewQuestion, answer: string): NextTransition => {
+  const scopedDirection = directionSubjectId(current.id);
+  if (current.id === BLUEPRINT_DIRECTION_QUESTION_ID || scopedDirection !== undefined) {
+    const subjects = characterSubjectsFor(state);
+    const activeSubject = subjects.find((subject) => subject.id === (current.subject_id ?? scopedDirection)) ?? subjects[0]!;
+    const subjectId = activeSubject.id;
+    const subjectIndex = subjects.findIndex((subject) => subject.id === subjectId);
+    if (isRegenerate(answer)) {
+      return {
+        flow: state.flow,
+        question: current,
+        active_character_id: subjectId,
+        retry: true,
+      };
+    }
+    const nextSubject = subjectIndex >= 0 ? subjects[subjectIndex + 1] : undefined;
+    return nextSubject === undefined
+      ? { flow: state.flow, question: collaborationQuestion(), active_character_id: subjectId }
+      : {
+        flow: state.flow,
+        question: blueprintDirectionQuestion(subjects, nextSubject),
+        active_character_id: nextSubject.id,
+      };
+  }
+  switch (current.id) {
+    case "work_type":
+      if (isExpansion(answer)) return { flow: "character_expansion", question: conceptQuestion("expansion_concept", "要新增的角色") };
+      // Keep accepting the legacy free-text source entry, but still ask card shape first.
+      if (isSourceAdaptation(answer)) return { flow: "source_adaptation", question: characterShapeQuestion() };
+      if (isWorld(answer)) return { flow: "world", question: question("world_kind", "這是獨立世界書、既有專案補世界，還是建立含世界的角色卡？", "choice", ["獨立世界書", "既有專案補世界", "建立含世界的角色卡"]) };
+      if (isContinue(answer)) return { flow: "continue", question: question("continue_project", "請提供要繼續的專案名稱或路徑。", "free_text") };
+      if (isLegacy(answer)) return { flow: "legacy_review", question: question("import_path", "請提供要審核的舊卡檔案路徑（PNG/JSON/YAML）。", "free_text") };
+      return { flow: "character", question: characterShapeQuestion() };
+    case "character_origin":
+      return isSourceAdaptation(answer)
+        ? { flow: "source_adaptation", question: sourceSubjectQuestion() }
+        : afterCardShape(state);
+    case "source_subject":
+      return { flow: state.flow, question: sourceMediumQuestion() };
+    case "source_medium":
+      return { flow: state.flow, question: sourceReferenceQuestion() };
+    case "source_identifiers":
+      return afterCardShape(state);
+    case "card_shape":
+      if (state.flow === "source_adaptation" && isSourceAdaptation(state.values.work_type ?? "")) return { flow: state.flow, question: sourceSubjectQuestion() };
+      return { flow: state.flow, question: characterOriginQuestion() };
+    case CHARACTER_ROSTER_QUESTION_ID: {
+      const subjects = parseCharacterRoster(answer);
+      if (subjects.length < 2) return { flow: state.flow, question: characterRosterQuestion(true), retry: true };
+      const firstSubject = subjects[0]!;
+      return {
+        flow: state.flow,
+        question: authoringModeQuestion(),
+        characters: subjects,
+        active_character_id: firstSubject.id,
+      };
+    }
+    case "authoring_mode":
+      return next(conceptQuestion(), state.flow);
+    case "concept":
+      return next(question("background", "請描述角色的背景、成長經歷、家庭、社會身分與重要經歷。", "free_text"), state.flow);
+    case "background":
+      return next(question("personality", "請描述角色的性格、內在動機、道德界線、恐懼與當下追求。", "free_text"), state.flow);
+    case "personality":
+      return { flow: state.flow, question: nextAfterPersonality(state) };
+    case "relationships":
+      return next(question("relationship_enable", "是否啟用 project-level relationships？", "choice", ["啟用", "不啟用"]), state.flow);
+    case "relationship_enable":
+      return isYes(answer)
+        ? next(question("relationship_scope", "關係涵蓋完整 roster 還是指定的 participant subset？", "choice", ["完整 roster", "指定 participant subset"]), state.flow)
+        : next(question("name_source", "角色概念成形後，名稱要由你直接命名，還是由 Director 提出候選名稱供你選擇？", "choice", ["我直接命名", "請 Director 提出候選"]), state.flow);
+    case "relationship_scope":
+      return next(question("name_source", "角色概念成形後，名稱要由你直接命名，還是由 Director 提出候選名稱供你選擇？", "choice", ["我直接命名", "請 Director 提出候選"]), state.flow);
+    case "name_source":
+      return next(question("project_name", "請確認專案顯示名稱。這個名稱會在訪談完成後成為專案資料夾名稱；不會要求你提供內部 ID。", "name"), state.flow);
+    case "project_name":
+      return state.flow === "world"
+        ? { flow: state.flow, question: collaborationQuestion() }
+        : { flow: state.flow, question: question("world_enabled", "是否需要世界設定？", "choice", ["需要", "不需要"]) };
+    case "world_kind":
+      return { flow: state.flow, question: question("world_concept", "請描述世界的核心概念、規則、時代、地理與不可違反的設定。", "free_text") };
+    case "world_concept":
+      return { flow: state.flow, question: question("world_timing", "世界設定要在角色設定之前完成？之後再設定世界則固定選「之前」。", "choice", ["之前", "之後"]) };
+    case "world_enabled":
+      return isYes(answer)
+        ? next(question("world_kind", "這是獨立世界書、既有專案補世界，還是建立含世界的角色卡？", "choice", ["獨立世界書", "既有專案補世界", "建立含世界的角色卡"]), state.flow)
+        : { flow: state.flow, question: nextBeforeCollaboration(state) };
+    case "world_timing":
+      return state.flow === "world"
+        ? { flow: state.flow, question: question("project_name", "請確認專案顯示名稱。這個名稱會在訪談完成後成為專案資料夾名稱；不會要求你提供內部 ID。", "name") }
+        : { flow: state.flow, question: nextBeforeCollaboration(state) };
+    case "collaboration_mode":
+      return { flow: state.flow, question: confirmationQuestion() };
+    case "additional_settings":
+      return isNo(answer)
+        ? { flow: state.flow, complete: true, confirmed: true }
+        : { flow: state.flow, question: question("supplement", "請補充要加入的其他設定。", "free_text") };
+    case "supplement":
+      return { flow: state.flow, question: confirmationQuestion() };
+    case "continue_project":
+      return { flow: state.flow, question: question("project_name", "請確認專案顯示名稱。這個名稱會在訪談完成後成為專案資料夾名稱；不會要求你提供內部 ID。", "name") };
+    case "import_path":
+      return { flow: state.flow, question: question("project_name", "請確認專案顯示名稱。這個名稱會在訪談完成後成為專案資料夾名稱；不會要求你提供內部 ID。", "name") };
+    case "expansion_concept":
+      return { flow: state.flow, question: question("expansion_background", "請描述要新增角色的背景、成長經歷、家庭、社會身分與重要經歷。", "free_text") };
+    case "expansion_background":
+      return { flow: state.flow, question: question("expansion_personality", "請描述要新增角色的性格、內在動機、道德界線、恐懼與當下追求。", "free_text") };
+    case "expansion_personality":
+      return { flow: state.flow, question: question("expansion_mode", "這個角色要使用珠璣（zhuji）還是調色盤（palette）模式？", "choice", ["zhuji", "palette"]) };
+    case "expansion_mode":
+      return { flow: state.flow, question: question("expansion_relationships", "請描述新角色與既有 roster 的關係：互信與衝突界線。", "free_text") };
+    case "expansion_relationships":
+      return { flow: state.flow, question: question("project_name", "請確認專案顯示名稱。這個名稱會在訪談完成後成為專案資料夾名稱；不會要求你提供內部 ID。", "name") };
+    default:
+      if (current.id.startsWith("zhuji_intro:")) {
+        const index = ZHUJI_SELF_INTRODUCTION_FIELDS.indexOf(current.id.slice("zhuji_intro:".length) as (typeof ZHUJI_SELF_INTRODUCTION_FIELDS)[number]);
+        const nextField = nextSelfIntroductionQuestion(state, index + 1);
+        if (nextField === undefined) return next(conceptQuestion(), state.flow);
+        return next(nextField, state.flow);
+      }
+      return { flow: state.flow, question: confirmationQuestion() };
+  }
+};
+
+export const recordInterviewAnswer = (current: InterviewQuestion, answer: string, actor: string): InterviewAnswer => {
+  const trimmed = answer.trim();
+  if (trimmed.length === 0) throw new InterviewError("INTERVIEW_ANSWER_EMPTY", "interview answer 不可為空");
+  if (current.min_length !== undefined && [...trimmed].length < current.min_length) {
+    throw new InterviewError("INTERVIEW_ANSWER_TOO_SHORT", `回答至少需要 ${current.min_length} 個字元`);
+  }
+  return { question_id: current.id, answer: trimmed, actor, occurred_at: now() };
+};
+
+export const createInterviewState = (): InterviewState => ({
+  schema_version: 1,
+  status: "idle",
+  flow: "new_project",
+  answers: [],
+  values: {},
+});
+
+export const beginInterview = (state: InterviewState): InterviewState => {
+  if (state.status === "active") return state;
+  const {
+    characters: _characters,
+    active_character_id: _activeCharacterId,
+    confirmed_no_additional_settings: _confirmed,
+    ...base
+  } = state;
+  return {
+    ...base,
+    status: "active",
+    flow: "new_project",
+    current: firstQuestion(),
+    answers: [],
+    values: {},
+  };
+};
+
+export const workflow_answer_interview = (state: InterviewState, input: InterviewAnswerInput): InterviewState => {
+  const normalized = normalizeInterviewStateForDisplay(state);
+  if (normalized !== state) return normalized;
+  if (state.status !== "active" || state.current === undefined) {
+    throw new InterviewError("INTERVIEW_NOT_ACTIVE", "目前沒有進行中的訪談");
+  }
+  const recorded = recordInterviewAnswer(state.current, input.answer, input.actor);
+  const candidateValues = { ...state.values, [state.current.id]: input.answer };
+  const transition = nextQuestion({ ...state, values: candidateValues }, state.current, input.answer);
+  const values = transition.retry === true ? state.values : candidateValues;
+  const answers = [...state.answers, recorded];
+  const characters = transition.characters ?? state.characters;
+  const activeCharacterId = transition.active_character_id ?? state.active_character_id;
+  if (transition.complete === true) {
+    return {
+      schema_version: state.schema_version,
+      status: "complete",
+      flow: transition.flow,
+      answers,
+      values,
+      ...(characters === undefined ? {} : { characters }),
+      ...(activeCharacterId === undefined ? {} : { active_character_id: activeCharacterId }),
+      confirmed_no_additional_settings: transition.confirmed === true,
+    };
+  }
+  if (transition.question === undefined) {
+    throw new InterviewError("INTERVIEW_TRANSITION_INVALID", "訪談流程沒有產生下一個問題", false);
+  }
+  return {
+    ...state,
+    flow: transition.flow,
+    current: transition.question,
+    answers,
+    values,
+    ...(characters === undefined ? {} : { characters }),
+    ...(activeCharacterId === undefined ? {} : { active_character_id: activeCharacterId }),
+  };
+};
+
+/** Backward-compatible camelCase alias for callers using the v2 naming convention. */
+export const workflowAnswerInterview = workflow_answer_interview;

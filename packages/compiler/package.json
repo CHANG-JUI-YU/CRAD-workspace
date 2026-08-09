@@ -1,0 +1,22 @@
+{
+  "name": "@st-workspace/compiler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@st-workspace/adapters-ccv3": "workspace:*",
+    "@st-workspace/adapters-png": "workspace:*",
+    "@st-workspace/core": "workspace:*",
+    "@st-workspace/plugins": "workspace:*"
+  }
+}

@@ -1,0 +1,27 @@
+schema_version: 1
+id: relationships-proposal-1
+owner: relationship-creator
+base_workflow_revision: 12
+base_artifact_revision: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+value:
+  kind: relationships
+  document:
+    schema_version: 1
+    team_code: ABC123
+    character_ids: [alice, beth]
+    character_summaries:
+      - { character_id: alice, summary: 主動維繫聯盟但保留戒心 }
+      - { character_id: beth, summary: 以觀察和試探維持距離 }
+    perspectives:
+      - { source_character_id: alice, target_character_id: alice, summary: 自認是關係的穩定核心 }
+      - { source_character_id: alice, target_character_id: beth, summary: 信任能力但警戒其沉默 }
+      - { source_character_id: beth, target_character_id: alice, summary: 依賴其決斷又抗拒被支配 }
+      - { source_character_id: beth, target_character_id: beth, summary: 自認冷靜但知道自己會逃避 }
+    groups: []
+    summary:
+      network_character: 互賴且持續試探的雙人網絡
+      inter_group_relations: 尚無獨立群組
+      stability: 外部壓力低時穩定
+      conflict_triggers: [{ trigger: 單方面隱瞞重大風險, severity: high }]
+      intimacy_opportunities: [共同承擔可驗證的風險]
+extensions: {}

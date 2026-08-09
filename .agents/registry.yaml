@@ -1,0 +1,155 @@
+schema_version: 2
+interface: high-level-intent
+default_agent: director
+agents:
+  - id: director
+    role: orchestrator
+    prompt: .agents/agents/director.md
+    personality: director
+    skills: [director-orchestration]
+    intents: [route, interview, continue, status]
+  - id: source-researcher
+    role: researcher
+    prompt: .agents/agents/source-researcher.md
+    personality: source-researcher
+    skills: [source-research]
+    intents: [source-research, source-verify]
+  - id: fact-curator
+    role: curator
+    prompt: .agents/agents/fact-curator.md
+    personality: fact-curator
+    skills: [fact-curation]
+    intents: [fact-curation, evidence-summary]
+  - id: fact-reviewer-1
+    role: reviewer
+    prompt: .agents/agents/fact-reviewer.md
+    personality: fact-reviewer
+    skills: [fact-review]
+    intents: [fact-review]
+    shared_executor: fact-reviewer
+    read_only: true
+  - id: fact-reviewer-2
+    role: reviewer
+    prompt: .agents/agents/fact-reviewer.md
+    personality: fact-reviewer
+    skills: [fact-review]
+    intents: [fact-review]
+    shared_executor: fact-reviewer
+    read_only: true
+  - id: fact-reviewer-3
+    role: reviewer
+    prompt: .agents/agents/fact-reviewer.md
+    personality: fact-reviewer
+    skills: [fact-review]
+    intents: [fact-review]
+    shared_executor: fact-reviewer
+    read_only: true
+  - id: zhuji-creator
+    role: creator
+    prompt: .agents/agents/zhuji-creator.md
+    personality: zhuji-creator
+    skills: [zhuji-creation]
+    intents: [character-authoring, zhuji]
+  - id: palette-creator
+    role: creator
+    prompt: .agents/agents/palette-creator.md
+    personality: palette-creator
+    skills: [palette-creation]
+    intents: [character-authoring, palette]
+  - id: wardrobe-creator
+    role: creator
+    prompt: .agents/agents/wardrobe-creator.md
+    personality: wardrobe-creator
+    skills: [wardrobe-creation]
+    intents: [character-authoring, wardrobe]
+  - id: character-critic
+    role: critic
+    prompt: .agents/agents/character-critic.md
+    personality: character-critic
+    skills: [character-critique]
+    intents: [character-review]
+    read_only: true
+  - id: relationship-creator
+    role: creator
+    prompt: .agents/agents/relationship-creator.md
+    personality: relationship-creator
+    skills: [relationship-creation]
+    intents: [relationship-authoring]
+  - id: greetings-creator
+    role: creator
+    prompt: .agents/agents/greetings-creator.md
+    personality: greetings-creator
+    skills: [greetings-creation]
+    intents: [greeting-authoring]
+  - id: greetings-critic
+    role: critic
+    prompt: .agents/agents/greetings-critic.md
+    personality: greetings-critic
+    skills: [greetings-critique]
+    intents: [greeting-review]
+    read_only: true
+  - id: mode-conversion
+    role: converter
+    prompt: .agents/agents/mode-conversion.md
+    personality: mode-conversion
+    skills: [mode-conversion]
+    intents: [mode-conversion]
+  - id: card-import-analyst
+    role: importer
+    prompt: .agents/agents/card-import-analyst.md
+    personality: card-import-analyst
+    skills: [card-import-analysis]
+    intents: [card-import, legacy-analysis]
+    read_only: true
+  - id: world-lore-creator
+    role: creator
+    prompt: .agents/agents/world-lore-creator.md
+    personality: world-lore-creator
+    skills: [world-lore-creation]
+    intents: [world-authoring]
+  - id: world-lore-critic
+    role: critic
+    prompt: .agents/agents/world-lore-critic.md
+    personality: world-lore-critic
+    skills: [world-lore-critique]
+    intents: [world-review]
+    read_only: true
+  - id: mvu-creator
+    role: creator
+    prompt: .agents/agents/mvu-creator.md
+    personality: mvu-creator
+    skills: [mvu-creation]
+    intents: [plugin-authoring, mvu]
+  - id: mvu-critic
+    role: critic
+    prompt: .agents/agents/mvu-creator-critic.md
+    personality: mvu-creator-critic
+    skills: [mvu-critique]
+    intents: [plugin-review, mvu]
+    read_only: true
+  - id: ejs-creator
+    role: creator
+    prompt: .agents/agents/ejs-creator.md
+    personality: ejs-creator
+    skills: [ejs-creation]
+    intents: [plugin-authoring, ejs]
+  - id: ejs-critic
+    role: critic
+    prompt: .agents/agents/ejs-creator-critic.md
+    personality: ejs-creator-critic
+    skills: [ejs-critique]
+    intents: [plugin-review, ejs]
+    read_only: true
+  - id: html-creator
+    role: creator
+    prompt: .agents/agents/html-creator.md
+    personality: html-creator
+    skills: [html-creation]
+    intents: [plugin-authoring, html]
+  - id: html-critic
+    role: critic
+    prompt: .agents/agents/html-creator-critic.md
+    personality: html-creator-critic
+    skills: [html-critique]
+    intents: [plugin-review, html]
+    read_only: true
