@@ -33,7 +33,9 @@ describe("runtime-facing server contract", () => {
     expect(JSON.stringify(toolDefinitions)).not.toMatch(/project_id|revision|capability|stage|steps|file_path|bytes_base64/iu);
     expect(toolDefinitions.find((tool) => tool.name === "workspace_interview_context")?.description).toMatch(/exactly one current/iu);
     expect(toolDefinitions.find((tool) => tool.name === "workspace_interview_answer")?.description).toMatch(/one answer atomically.*batch answers/iu);
-    expect(JSON.stringify(toolDefinitions.find((tool) => tool.name === "workspace_template_submit"))).toContain("official.html");
+    const templateSubmit = toolDefinitions.find((tool) => tool.name === "workspace_template_submit");
+    expect(JSON.stringify(templateSubmit)).toContain("official.html");
+    expect(templateSubmit?.inputSchema).toMatchObject({ type: "object" });
   });
 
   it("serves the dashboard, REST request/status and MCP tool calls", async () => {
@@ -71,8 +73,10 @@ describe("runtime-facing server contract", () => {
       expect((await fetch(`${base}/workspace/request`, { method: "POST" })).status).toBe(400);
       const attachmentResponse = await fetch(`${base}/workspace/request`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: "Import character card", attachments: [null, {}, { name: 3, content_base64: "" }, { name: "invalid", content_base64: 3, media_type: 3 }, { name: "card.json", content_base64: Buffer.from(JSON.stringify({ name: "Attached", description: "A complete attached card" })).toString("base64"), media_type: "application/json" }] }) });
       expect((await attachmentResponse.json() as { status: string }).status).toBe("completed");
-      const initialize = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "initialize" }) });
-      expect(JSON.stringify(await initialize.json())).toContain("serverInfo");
+      const initialize = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "initialize", params: { protocolVersion: "2025-06-18" } }) });
+      expect(await initialize.json()).toMatchObject({ result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "st-workspace-v3" } } });
+      const modernInitialize = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "initialize", params: { protocolVersion: "2025-11-25" } }) });
+      expect(await modernInitialize.json()).toMatchObject({ result: { protocolVersion: "2025-11-25", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "st-workspace-v3" } } });
       const requestCall = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "workspace_request", arguments: { request: "Create greeting: Hello. This is enough content." } } }) });
       expect(JSON.stringify(await requestCall.json())).toContain("completed");
       const zhujiRest = await fetch(`${base}/workspace/zhuji`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(zhujiProposal()) });

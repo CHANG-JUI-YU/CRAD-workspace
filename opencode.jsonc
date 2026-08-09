@@ -1,10 +1,22 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "default_agent": "director",
+  "mcp": {
+    "st-workspace": {
+      "type": "local",
+      "command": ["node", "--import", "tsx/esm", "tools/opencode-mcp.ts"],
+      "cwd": ".",
+      "enabled": true,
+      "timeout": 120000
+    }
+  },
   "agent": {
     "director": {
       "description": "ST Workspace director agent",
       "mode": "primary",
+      "permission": {
+        "question": "allow"
+      },
       "prompt": "{file:./.agents/agents/director.md}\n\n--- Personality runtime instructions ---\n{file:./.agents/personalities/runtime-instructions.md}\n\n--- Base personality ---\n{file:./.agents/personalities/base-adult.yaml}\n\n--- Agent personality ---\n{file:./.agents/personalities/director.yaml}\n\n--- Skill contract ---\n{file:./.agents/skills/director-orchestration/SKILL.md}"
     },
     "source-researcher": {
