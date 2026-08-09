@@ -9,7 +9,7 @@ export interface WorkspaceWorkerOptions {
   readonly onEvent?: (event: WorkspaceWorkerEvent) => void;
 }
 
-export type WorkspaceRuntimeProvider = WorkspaceRuntime | (() => WorkspaceRuntime);
+export type WorkspaceRuntimeProvider = WorkspaceRuntime | (() => WorkspaceRuntime | Promise<WorkspaceRuntime>);
 
 export type WorkspaceWorkerEvent =
   | { type: "ready" }
@@ -64,7 +64,7 @@ export class WorkspaceWorker {
   private activeOperationId: string | undefined;
   private lastError: string | undefined;
 
-  private readonly runtimeProvider: () => WorkspaceRuntime;
+  private readonly runtimeProvider: () => WorkspaceRuntime | Promise<WorkspaceRuntime>;
 
   constructor(runtime: WorkspaceRuntimeProvider, options: WorkspaceWorkerOptions = {}) {
     this.runtimeProvider = typeof runtime === "function" ? runtime : () => runtime;
@@ -128,7 +128,7 @@ export class WorkspaceWorker {
         await this.runJob(job);
         return;
       }
-      const recoverable = await this.runtimeProvider().recoverableOperations();
+      const recoverable = await (await this.runtimeProvider()).recoverableOperations();
       for (const operation of recoverable) {
         if (this.activeOperationId !== undefined) break;
         await this.runOperation(operation.id, operation.actor ?? this.actor);
@@ -145,7 +145,7 @@ export class WorkspaceWorker {
     while (job.attempts <= this.maxRetries) {
       job.attempts += 1;
       try {
-        const result = await this.runtimeProvider().request(job.request, job.context, job.agent === undefined ? {} : { agent: job.agent });
+        const result = await (await this.runtimeProvider()).request(job.request, job.context, job.agent === undefined ? {} : { agent: job.agent });
         job.resolve(result);
         return;
       } catch (error) {
@@ -167,7 +167,7 @@ export class WorkspaceWorker {
     this.activeOperationId = operationId;
     this.onEvent({ type: "operation.started", operation_id: operationId, attempt });
     try {
-      const result = await this.runtimeProvider().recoverOperation(operationId, { actor, attachments: [] });
+      const result = await (await this.runtimeProvider()).recoverOperation(operationId, { actor, attachments: [] });
       this.attempts.delete(operationId);
       this.onEvent({ type: "operation.completed", operation_id: operationId, result });
     } catch (error) {
@@ -176,7 +176,7 @@ export class WorkspaceWorker {
         this.onEvent({ type: "operation.retry", operation_id: operationId, attempt, error: message });
         await delay(this.retryDelayMs * attempt);
       } else {
-        await this.runtimeProvider().failOperation(operationId, error, actor);
+        await (await this.runtimeProvider()).failOperation(operationId, error, actor);
         this.attempts.delete(operationId);
         this.lastError = message;
         this.onEvent({ type: "operation.failed", operation_id: operationId, error: message });

@@ -60,8 +60,10 @@ worker state. The worker is stopped automatically when the server closes.
 ## Project folders and interview
 
 When no project is selected explicitly, the server and CLI use the workspace
-`projects/` directory. A new request starts a high-level interview; answers
-are stored atomically in `.workspace/interview.json`. The interview delays the
+`projects/` directory and create a fresh `project-###` session on first use; an
+existing project is never reopened implicitly. A new request starts a
+high-level interview; answers are stored atomically in `.workspace/interview.json`.
+The interview delays the
 project name until the concept is clear, asks world and multi-character
 relationship questions when relevant, and then presents mode-neutral Blueprint
 direction choices. A direction can be selected, regenerated, mixed or revised
@@ -69,12 +71,13 @@ with a short natural-language answer; it never becomes a Zhuji or palette
 module directly. The Zhuji `self_introduction` 30-Unicode-character rule is
 enforced only by the final formal Zhuji module, not by the interview.
 
-The first persistence point may be a recoverable folder such as
-`projects/project-001`. Once the interview is complete and a display name is
-confirmed, the folder is safely renamed to that name (with a numeric suffix on
-collision). Users never need to create folders or supply internal workflow
-values. Existing projects can be listed and selected through
-`workspace_projects` and `workspace_project_select`.
+The first persistence point is a recoverable folder such as
+`projects/project-002` when `project-001` already exists. Once the interview is
+complete and a display name is confirmed, the folder is safely renamed to that
+name (with a numeric suffix on collision). Users never need to create folders
+or supply internal workflow values. Existing projects can be listed and
+selected through `workspace_projects` and `workspace_project_select`; in
+OpenCode, Director presents those choices with the native `question` menu.
 
 After a character's Blueprint and Zhuji or palette settings are ready, the
 Director routes a cross-mode wardrobe task to `wardrobe-creator` by default.

@@ -37,6 +37,32 @@ describe("workspace project manager", () => {
     expect(paused.project_path).toContain("project-001");
   });
 
+  it("starts a new session instead of reopening an existing project-001", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-fresh-session-"));
+    roots.push(root);
+    const previous = new FileProjectRepository(root, "project-001", { layout: "project", materialize: true });
+    const previousState = await previous.read();
+    await previous.commit(previousState.revision, (state) => ({
+      ...state,
+      project_name: "舊專案",
+      project_slug: "舊專案",
+      project_status: "ready",
+    }));
+
+    const projects = manager(root);
+    const context = await projects.interviewContext();
+    expect(context.project_id).toBe("project-002");
+    expect(context.status).toBe("idle");
+    expect(context.answers).toEqual([]);
+    expect((await projects.status()).project_id).toBe("project-002");
+    expect((await projects.listProjects()).map((item) => item.project_id)).toEqual(["project-001", "project-002"]);
+    expect((await previous.read()).project_name).toBe("舊專案");
+
+    await projects.select("project-001");
+    expect((await projects.status()).project_id).toBe("project-001");
+    expect((await projects.status()).project_name).toBe("舊專案");
+  });
+
   it("starts sequential projects, filters incomplete folders and selects by id or folder", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-manager-"));
     roots.push(root);

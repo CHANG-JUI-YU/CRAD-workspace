@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { FileProjectRepository } from "@st-workspace/core";
 import { startWorkspaceServer } from "../src/index.js";
 
 const roots: string[] = [];
@@ -61,6 +62,40 @@ describe("project manager HTTP and MCP boundary", () => {
       expect(JSON.stringify(await selectCall.json())).toContain("HTTP 專案");
       const missingProject = await post("/workspace/project/select", {});
       expect(missingProject.status).toBe(400);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  });
+
+  it("does not load an existing project when the server starts without a selection", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-server-fresh-session-"));
+    roots.push(root);
+    const previous = new FileProjectRepository(root, "project-001", { layout: "project", materialize: true });
+    const previousState = await previous.read();
+    await previous.commit(previousState.revision, (state) => ({
+      ...state,
+      project_name: "舊專案",
+      project_slug: "舊專案",
+      project_status: "ready",
+    }));
+
+    const server = await startWorkspaceServer({ port: 0, projectRoot: root, actor: "user" });
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("server did not bind");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const context = await (await fetch(`${base}/workspace/interview/context`)).json() as { project_id: string; status: string; answers: unknown[] };
+      expect(context).toMatchObject({ project_id: "project-002", status: "idle", answers: [] });
+      const listed = await (await fetch(`${base}/workspace/projects`)).json() as { projects: Array<{ project_id: string; project_name?: string }> };
+      expect(listed.projects).toEqual([{ project_id: "project-001", project_name: "舊專案", status: "ready", path: expect.any(String) }]);
+      const mcpProjects = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "workspace_projects", arguments: {} } }) });
+      const mcpProjectsText = JSON.stringify(await mcpProjects.json());
+      expect(mcpProjectsText).toContain("project-001");
+      expect(mcpProjectsText).not.toContain("project-002");
+
+      const selected = await fetch(`${base}/workspace/project/select`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: "舊專案" }) });
+      expect(await selected.json()).toMatchObject({ project_id: "project-001", project_name: "舊專案" });
+      expect((await (await fetch(`${base}/workspace/status`)).json() as { project_id: string; project_name?: string })).toMatchObject({ project_id: "project-001", project_name: "舊專案" });
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }

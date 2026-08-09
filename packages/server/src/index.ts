@@ -257,7 +257,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
   const router = new AgentRouter();
   const runtimeForWorker = options.projectManager === undefined
     ? options.runtime
-    : () => options.projectManager!.runtime;
+    : () => options.projectManager!.ensureRuntime();
   if (runtimeForWorker === undefined) throw new Error("workspace server could not initialize a runtime");
   const worker = options.worker ?? new WorkspaceWorker(runtimeForWorker, { actor: `${actor}-worker`, ...options.workerOptions });
   const getRuntime = async (): Promise<WorkspaceRuntime> => options.projectManager === undefined ? options.runtime! : options.projectManager.ensureRuntime();
@@ -313,8 +313,10 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         if (options.projectManager === undefined) {
           json(response, 200, { projects: [] });
         } else {
-          const projects = await options.projectManager.listProjects();
-          const current = await options.projectManager.repository.read();
+          const manager = options.projectManager;
+          await manager.ensureRuntime();
+          const projects = await manager.listProjects();
+          const current = await manager.repository.read();
           const visible = current.project_status === "uninitialized" && current.interview.status === "idle" && current.operations.length === 0
             ? projects.filter((project) => project.project_id !== current.project_id)
             : projects;
@@ -487,8 +489,18 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
             return;
           }
           if (params?.name === "workspace_projects") {
-            const projects = options.projectManager === undefined ? [] : await options.projectManager.listProjects();
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify({ projects }) }] } });
+            if (options.projectManager === undefined) {
+              json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify({ projects: [] }) }] } });
+            } else {
+              const manager = options.projectManager;
+              await manager.ensureRuntime();
+              const projects = await manager.listProjects();
+              const current = await manager.repository.read();
+              const visible = current.project_status === "uninitialized" && current.interview.status === "idle" && current.operations.length === 0
+                ? projects.filter((project) => project.project_id !== current.project_id)
+                : projects;
+              json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify({ projects: visible }) }] } });
+            }
             return;
           }
           if (params?.name === "workspace_project_select") {
@@ -535,11 +547,19 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
 export async function startWorkspaceServer(options: { port?: number; host?: string; projectRoot?: string; projectId?: string; actor?: string } = {}): Promise<Server> {
   const projectRoot = options.projectRoot ?? process.env.ST_WORKSPACE_PROJECT_ROOT ?? "projects";
   const fetcher = new HttpSourceFetcher();
-  const requestedProject = options.projectId ?? process.env.ST_WORKSPACE_PROJECT;
+  // An explicitly supplied root is already a complete workspace selection;
+  // do not let an inherited project environment variable silently redirect it.
+  // Environment-based project selection remains available for the default root
+  // and for callers that pass projectId explicitly.
+  const requestedProject = options.projectId ?? (options.projectRoot === undefined ? process.env.ST_WORKSPACE_PROJECT : undefined);
   const selectedProject = typeof requestedProject === "string" && requestedProject.trim().length > 0 ? requestedProject.trim() : undefined;
-  const serverOptions: WorkspaceServerOptions = selectedProject === undefined
-    ? { projectManager: new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true }) }), actor: options.actor ?? "server" }
-    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject, { layout: "project", materialize: true }), { fetcher: fetcher.fetch }), actor: options.actor ?? "server" };
+  const manager = selectedProject === undefined
+    ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true }) })
+    : undefined;
+  if (manager !== undefined) await manager.ensureRuntime();
+  const serverOptions: WorkspaceServerOptions = manager !== undefined
+    ? { projectManager: manager, actor: options.actor ?? "server" }
+    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch }), actor: options.actor ?? "server" };
   const server = createWorkspaceServer(serverOptions);
   await new Promise<void>((resolve) => server.listen(options.port ?? Number(process.env.ST_WORKSPACE_PORT ?? 8787), options.host ?? "127.0.0.1", resolve));
   return server;

@@ -14,6 +14,15 @@ Skill: .agents/skills/director-orchestration/SKILL.md
 
 訪談必須嚴格一題一答：開始或繼續訪談時先呼叫 `workspace_interview_context`，只提出回傳的這一題及其選項，然後停下等待主人回答；收到回答後只呼叫 `workspace_interview_answer` 保存目前答案，才可呈現工具回傳的下一題。禁止把工作類型、單／多角色卡、原創／原作改編、來源資訊與角色概念合併成一次性的前置問卷，也不得在同一回覆預先要求多個決定。多人卡必須逐名處理每名角色的方向。主人主動附帶其他資訊時，只保存目前問題的回答，不自行跳題或替後續問題作答。
 
+在 OpenCode 中，遇到引擎回傳的選項題，必須使用內建 `question` 工具顯示互動式選單，
+讓主人可用方向鍵、Enter 與 Esc 操作；不得用一般文字模擬選單後繼續工具鏈。每次
+`question` 只能包含目前一題，選項 label／順序原樣沿用 engine。若 OpenCode 自帶
+「Type your own answer」入口，主人可以使用，但自訂答案仍交回 engine 驗證，不能自行
+當成新選項或替主人跳題。若主人在首題選「繼續專案」，先讀取
+`workspace_projects`，再以另一個單題 `question` 讓主人選擇，呼叫
+`workspace_project_select` 後重新讀取該專案 context；不要把這個選擇先寫入新 session。
+`question` 不可用時才用純文字 fallback，並如實維持一題一答。
+
 引擎回傳選項時，選項就是該題的完整範圍，必須原樣呈現，不得為了「彈性」自行加入自行描述、混合或情色化選項；只有 `free_text`／`blueprint_direction` 題可以在等待回答時補充少量非決策例子。
 
 如果目前 `workspace_interview_context` 的問題是新專案首題，必須原樣呈現引擎提供的工作類型問題與五個選項：「角色設定」「世界設定」「繼續專案」「舊卡審核」「擴充既有角色卡」。不得自行改寫成「原創角色／原作改編／多角色／匯入卡片」問卷，也不得加入「自行描述」或情色化的選項與說明。選擇「角色設定」後，才依引擎順序詢問單／多角色卡，再詢問完全原創／原作改編。

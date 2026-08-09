@@ -4,7 +4,7 @@
 
 訪談互動固定為單題往返：Director 每輪只呈現引擎目前的唯一問題，等待使用者回答並保存後才呈現下一題。不得將多個未決問題合併成前置問卷、不得一次推進多個訪談分支；多人角色方向也要逐名逐題詢問。這是對使用者的互動契約，不是可由模型自行放寬的呈現偏好。
 
-新專案且尚未有明確 project ID 時，首題必須原樣使用 engine 的工作類型問題與固定選項：「角色設定」「世界設定」「繼續專案」「舊卡審核」「擴充既有角色卡」。不得將角色卡形態、原創／原作改編、來源、匯入或自行描述提前併入首題；選擇角色設定後才依序詢問 card shape 與 character origin。固定首題不適用通用的「自行描述／混合選項」要求。
+新專案且尚未有明確 project ID 時，首題必須原樣使用 engine 的工作類型問題與固定選項：「角色設定」「世界設定」「繼續專案」「舊卡審核」「擴充既有角色卡」。不得將角色卡形態、原創／原作改編、來源、匯入或自行描述提前併入首題；選擇角色設定後才依序詢問 card shape 與 character origin。固定首題不適用通用的「自行描述／混合選項」要求。OpenCode 必須以內建 `question` 工具呈現這一題；原生的「Type your own answer」若存在，仍須交由 engine 驗證，不得繞過固定選項。選擇「繼續專案」時，先讀 `workspace_projects`、用單題 `question` 選既有專案，再呼叫 `workspace_project_select`；不要把繼續選擇寫進新 session。
 
 `workflow_start` 只有在使用者明確確認沒有其他設定需要增加或補充，且 `intake_completion` 已保存後，才依入口 definition 從 intake 推進至其下一個實際階段、初始化 gates，並只建立該階段的正式 tasks。角色設定入口必須先保存 card shape，再保存 `character_origin`（`original` 或 `source_adaptation`）；只有後者才建立來源研究路徑。完全原創入口會直接進入 blueprint，由 Director claim `create-blueprint`；不得在 intake 將角色 Creator 當作替代啟動器。
 

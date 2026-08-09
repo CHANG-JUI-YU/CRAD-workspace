@@ -14,6 +14,11 @@ export interface WorkspaceProjectManagerOptions {
   readonly root: string;
   readonly createRuntime: (repository: FileProjectRepository) => WorkspaceRuntime;
   readonly initialProjectId?: string;
+  /**
+   * Start an unselected manager in a new project instead of implicitly
+   * reopening the conventional project-001 directory.
+   */
+  readonly freshByDefault?: boolean;
 }
 
 function safeSegment(value: string): string {
@@ -36,11 +41,16 @@ export class WorkspaceProjectManager {
   private repositoryValue: FileProjectRepository;
   private runtimeValue: WorkspaceRuntime;
   private placeholderReuseAllowed = true;
+  private readonly freshByDefault: boolean;
+  private sessionPrepared: boolean;
+  private preparePromise: Promise<WorkspaceRuntime> | undefined;
 
   constructor(private readonly options: WorkspaceProjectManagerOptions) {
     const initialProjectId = options.initialProjectId ?? "project-001";
     this.repositoryValue = new FileProjectRepository(options.root, initialProjectId, { layout: "project", materialize: true });
     this.runtimeValue = options.createRuntime(this.repositoryValue);
+    this.freshByDefault = options.freshByDefault ?? true;
+    this.sessionPrepared = options.initialProjectId !== undefined;
   }
 
   get root(): string {
@@ -56,7 +66,25 @@ export class WorkspaceProjectManager {
   }
 
   async ensureRuntime(): Promise<WorkspaceRuntime> {
+    if (this.sessionPrepared || !this.freshByDefault) {
+      await this.repositoryValue.read();
+      return this.runtimeValue;
+    }
+    this.preparePromise ??= this.prepareFreshSession();
+    try {
+      return await this.preparePromise;
+    } finally {
+      this.preparePromise = undefined;
+    }
+  }
+
+  private async prepareFreshSession(): Promise<WorkspaceRuntime> {
+    // The constructor intentionally does not read the conventional placeholder.
+    // If its directory already exists, it belongs to a previous session and must
+    // never become the implicit active project for this manager.
+    if (await exists(this.repositoryValue.projectDirectory)) await this.startNewProject();
     await this.repositoryValue.read();
+    this.sessionPrepared = true;
     return this.runtimeValue;
   }
 
@@ -81,6 +109,7 @@ export class WorkspaceProjectManager {
   }
 
   async select(project: string): Promise<WorkspaceProjectSummary> {
+    if (this.preparePromise !== undefined) await this.preparePromise;
     const requested = project.trim();
     if (requested.length === 0 || requested.includes("/") || requested.includes("\\") || requested === "." || requested === "..") throw new CoreError("PROJECT_SELECTION_INVALID", "請提供可見的專案名稱或資料夾名稱 (project selection must be a project name or id)", true);
     const summaries = await this.listProjects();
@@ -89,6 +118,7 @@ export class WorkspaceProjectManager {
     this.repositoryValue = new FileProjectRepository(this.options.root, selected.project_id, { layout: "project", materialize: true });
     this.runtimeValue = this.options.createRuntime(this.repositoryValue);
     this.placeholderReuseAllowed = false;
+    this.sessionPrepared = true;
     return selected;
   }
 
@@ -104,6 +134,7 @@ export class WorkspaceProjectManager {
     this.repositoryValue = new FileProjectRepository(this.options.root, id, { layout: "project", materialize: true });
     this.runtimeValue = this.options.createRuntime(this.repositoryValue);
     this.placeholderReuseAllowed = false;
+    this.sessionPrepared = true;
     await this.repositoryValue.read();
     return this.runtimeValue;
   }
@@ -136,6 +167,7 @@ export class WorkspaceProjectManager {
   }
 
   async request(request: string, context: WorkspaceContext, options: { agent?: string } = {}): Promise<RequestResult> {
+    await this.ensureRuntime();
     if (/^(?:建立|新增|開始|start|new)\s*(?:新)?專案|^new project/iu.test(request.trim())) {
       const current = await this.repositoryValue.read();
       const canReusePlaceholder = this.placeholderReuseAllowed && current.project_status === "uninitialized" && current.interview.status === "idle" && current.operations.length === 0;
@@ -146,14 +178,17 @@ export class WorkspaceProjectManager {
   }
 
   async answerInterview(answer: string, context: WorkspaceContext): Promise<RequestResult> {
+    await this.ensureRuntime();
     return this.finalizeIfNamed(await this.runtimeValue.answerInterview(answer, context));
   }
 
   async interviewContext(): Promise<ReturnType<WorkspaceRuntime["interviewContext"]>> {
+    await this.ensureRuntime();
     return this.runtimeValue.interviewContext();
   }
 
   async status(): Promise<RequestResult> {
+    await this.ensureRuntime();
     return this.enrich(await this.runtimeValue.status());
   }
 

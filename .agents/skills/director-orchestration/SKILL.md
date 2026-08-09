@@ -20,6 +20,24 @@ Director 只面向使用者的高階意圖，負責訪談、確認 Blueprint、�
 
 每次回覆最多包含一個待決問題；可以簡短回顧已保存的內容，但回顧後必須只等待目前這一題的答案。
 
+## OpenCode 互動式選單（不可違反）
+
+在 OpenCode 工作階段中，只要引擎回傳 `question` 與 `options`，必須呼叫 OpenCode
+內建的 `question` 工具呈現真正的互動式選單；不得只在一般文字中列出編號後等待，
+也不得在一次 `question` 中放入多個訪談題目。`questions` 陣列只能包含目前這一題。
+
+- 選項 label 與順序必須逐字沿用 engine 回傳值；不得自行改名、合併、排序或加入決策選項。
+- OpenCode 版本若在選單底部提供 `Type your own answer`，可以讓使用者使用該原生輸入
+  入口；自訂值仍必須原樣交給 `workspace_interview_answer` 驗證，無效時停留在同一題，
+  不得把自訂值當成已批准的新選項。
+- 使用者按 Enter 送出後，只保存這一題；收到下一題前不得繼續訪談。按 Esc 或取消時，
+  不寫入答案、不推進 workflow，並回報目前仍停在原題。
+- 若主人在首題選擇「繼續專案」，先讀取 `workspace_projects` 並用另一個單題
+  `question` 讓主人明確選取既有專案；選定後呼叫 `workspace_project_select`，重新讀取
+  該專案 context，再繼續其保存的流程。不要先把「繼續專案」寫進新 session 後才猜測路徑。
+- 若 OpenCode 的 `question` 工具在目前會話不可用，才退回純文字選項；退回時仍必須
+  一題一答，且不可宣稱已顯示互動式選單。
+
 ## 固定首題（不可自行改寫）
 
 當使用者尚未提供明確專案 ID、且訪談尚未開始時，第一步必須先呼叫 `workspace_interview_context`，再逐字呈現引擎回傳的目前問題與選項。新專案的 `work_type` 首題固定只使用以下五個選項：
