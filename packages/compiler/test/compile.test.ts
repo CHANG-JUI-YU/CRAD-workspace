@@ -375,4 +375,45 @@ value:
     expect(result.diagnostics).toEqual([expect.objectContaining({ code: "PRIMARY_CHARACTER_ID_INVALID", severity: "warning" })]);
     expect(JSON.stringify(result.card)).not.toContain('"primary_character_id":"missing"');
   });
+
+  it("filters latest artifacts and card metadata to the selected mode", async () => {
+    const repository = new MemoryProjectRepository("filtered");
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_name: "Filtered Project",
+      artifacts: [
+        artifact("character", "character:demo", "character", "Demo", character("demo", "Demo")),
+        artifact("zhuji-appearance", "zhuji:demo/appearance", "zhuji", "demo/appearance", zhuji("demo", "appearance", { summary: "Zhuji appearance" })),
+        artifact("palette-basic", "palette:demo/basic_information", "palette", "demo/basic_information", palette("demo", "basic_information", "Palette basic")),
+        artifact("review", "review:1", "review", "review", { review: "not part of the card" }),
+      ],
+    }));
+    const state = await repository.read();
+    const zhujiResult = compileProject(state, { mode_selection: "zhuji" });
+    expect(zhujiResult.normalized.latestArtifacts.map((item) => item.id)).toEqual(["character", "zhuji-appearance"]);
+    expect(zhujiResult.normalized.project.artifact_ids).toEqual(["character", "zhuji-appearance"]);
+    expect(Object.keys(zhujiResult.normalized.project.artifact_revisions)).toEqual(["character:demo", "zhuji:demo/appearance"]);
+    const paletteResult = compileProject(state, { mode_selection: "palette" });
+    expect(paletteResult.normalized.latestArtifacts.map((item) => item.id)).toEqual(["character", "palette-basic"]);
+    expect(paletteResult.normalized.project.artifact_ids).toEqual(["character", "palette-basic"]);
+    const bothResult = compileProject(state, { mode_selection: "both" });
+    expect(bothResult.normalized.latestArtifacts.map((item) => item.id)).toEqual(["character", "palette-basic", "zhuji-appearance"]);
+    expect(bothResult.normalized.project.artifact_ids).toEqual(["character", "palette-basic", "zhuji-appearance"]);
+  });
+
+  it("reports MODE_SELECTION_UNAVAILABLE instead of silently downgrading", async () => {
+    const repository = new MemoryProjectRepository("no-palette");
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_name: "Zhuji Only",
+      artifacts: [
+        artifact("character", "character:demo", "character", "Demo", character("demo", "Demo")),
+        artifact("zhuji-appearance", "zhuji:demo/appearance", "zhuji", "demo/appearance", zhuji("demo", "appearance", { summary: "Zhuji appearance" })),
+      ],
+    }));
+    const result = compileProject(await repository.read(), { mode_selection: "both" });
+    expect(result.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "MODE_SELECTION_UNAVAILABLE", severity: "error" })]));
+    expect(result.normalized.mode_selection).toBeUndefined();
+    expect(result.normalized.latestArtifacts.map((item) => item.id)).toEqual(["character"]);
+  });
 });

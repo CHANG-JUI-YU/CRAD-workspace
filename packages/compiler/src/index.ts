@@ -307,10 +307,15 @@ function selectedMode(mode: "zhuji" | "palette", selection: CardModeSelection | 
 }
 
 function resolvedModeSelection(available: AvailableCardModes, requested: CardModeSelection | undefined): CardModeSelection | undefined {
-  if (available.zhuji && available.palette) return requested ?? "both";
-  if (available.zhuji) return "zhuji";
-  if (available.palette) return "palette";
-  return undefined;
+  if (requested === undefined) {
+    if (available.zhuji && available.palette) return "both";
+    if (available.zhuji) return "zhuji";
+    if (available.palette) return "palette";
+    return undefined;
+  }
+  if (requested === "both") return available.zhuji && available.palette ? "both" : undefined;
+  if (requested === "zhuji") return available.zhuji ? "zhuji" : undefined;
+  return available.palette ? "palette" : undefined;
 }
 
 function localizedModeName(mode: "zhuji" | "palette", module: string): string {
@@ -746,19 +751,54 @@ function projectMetadata(latestArtifacts: readonly ArtifactRecord[], primaryChar
   };
 }
 
+const NON_CARD_ARTIFACT_KINDS: ReadonlySet<ArtifactRecord["kind"]> = new Set([
+  "review",
+  "source_research",
+  "fact_curation",
+  "fact_review",
+  "conversion",
+  "import_analysis",
+  "director_routing",
+  "unknown",
+]);
+
+function isIncludedArtifact(artifact: ArtifactRecord, modeSelection: CardModeSelection | undefined): boolean {
+  const projection = modeProjection(artifact);
+  if (projection !== undefined) return selectedMode(projection.mode, modeSelection);
+  return !NON_CARD_ARTIFACT_KINDS.has(artifact.kind);
+}
+
+function unavailableModeMessage(requested: CardModeSelection, available: AvailableCardModes): string {
+  const availableText = available.zhuji && available.palette
+    ? "zhuji、palette"
+    : available.zhuji
+    ? "zhuji"
+    : available.palette
+    ? "palette"
+    : "無";
+  return `無法建置所選模式「${requested}」：本次可用模式為 ${availableText}。`;
+}
+
 export function normalizeProject(state: ProjectState, options: CompileOptions = {}): NormalizedProject {
   const latest = latestArtifacts(state.artifacts);
   const sourceOrdered = latestArtifactsInSourceOrder(state.artifacts);
   const available = availableCardModes(latest);
-  const modeSelection = resolvedModeSelection(available, options.mode_selection);
-  const primarySelection = primaryCharacterIdFor(latest, sourceOrdered);
+  const requested = options.mode_selection;
+  const modeSelection = resolvedModeSelection(available, requested);
+  const selected = latest.filter((artifact) => isIncludedArtifact(artifact, modeSelection));
+  const selectedIds = new Set(selected.map((artifact) => artifact.id));
+  const selectedSourceOrdered = sourceOrdered.filter((artifact) => selectedIds.has(artifact.id));
+  const primarySelection = primaryCharacterIdFor(selected, selectedSourceOrdered);
   const primaryCharacterId = primarySelection.id;
-  const names = characterDisplayNames(latest);
+  const names = characterDisplayNames(selected);
   const title = textValue(state.project_name) ?? state.project_id;
-  const parts = latest.map((artifact) => artifactEntries(artifact, names, modeSelection));
-  const artifactIds = latest.map((artifact) => artifact.id);
-  const artifactRevisions = Object.fromEntries(latest.map((artifact) => [artifact.key, artifact.revision]));
-  const projectMetadataValue = projectMetadata(latest, primaryCharacterId, modeSelection);
+  const parts = selected.map((artifact) => artifactEntries(artifact, names, modeSelection));
+  const artifactIds = selected.map((artifact) => artifact.id);
+  const artifactRevisions = Object.fromEntries(selected.map((artifact) => [artifact.key, artifact.revision]));
+  const projectMetadataValue = projectMetadata(selected, primaryCharacterId, modeSelection);
+  const diagnostics = requested !== undefined && modeSelection === undefined
+    ? [...primarySelection.diagnostics, { code: "MODE_SELECTION_UNAVAILABLE", severity: "error" as const, message: unavailableModeMessage(requested, available) }]
+    : primarySelection.diagnostics;
   const project: Ccv3Project = {
     project_id: state.project_id,
     title,
@@ -773,7 +813,7 @@ export function normalizeProject(state: ProjectState, options: CompileOptions = 
     group_only_greetings: parts.flatMap((part) => part.group_only),
     lore_entries: parts.flatMap((part) => part.entries),
     extensions: {
-      source_counts: { artifacts: latest.length, sources: state.sources.length },
+      source_counts: { artifacts: selected.length, sources: state.sources.length },
       "card-workspace": { project: projectMetadataValue },
       "card-workspace-project": projectMetadataValue,
     },
@@ -782,8 +822,8 @@ export function normalizeProject(state: ProjectState, options: CompileOptions = 
   };
   return {
     project,
-    latestArtifacts: latest,
-    diagnostics: primarySelection.diagnostics,
+    latestArtifacts: selected,
+    diagnostics,
     ...(modeSelection === undefined ? {} : { mode_selection: modeSelection }),
   };
 }
