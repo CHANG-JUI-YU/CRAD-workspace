@@ -287,8 +287,16 @@ export class SourceService {
     const operation = initial.operations.find((candidate) => candidate.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
 
-    const candidates = initial.candidates.filter((candidate) => candidate.status === "approved");
+    const candidates = initial.candidates.filter((candidate) => candidate.status === "approved"
+      && (candidate.selection_snapshot === undefined || candidate.selection_snapshot.operation_id === operationId));
     if (candidates.length === 0) {
+      const concurrent = initial.candidates.filter((candidate) => candidate.status === "ingested"
+        && (candidate.selection_snapshot === undefined || candidate.selection_snapshot.operation_id === operationId));
+      if (concurrent.length > 0) {
+        const summary = `${concurrent.length} 個候選來源已被並行處理入庫。`;
+        await this.setOperation(operationId, "completed", summary, initial.revision);
+        return { completed: concurrent.map((candidate) => candidate.id), blocked: [], summary, status: "completed" };
+      }
       const hasPending = initial.candidates.some((candidate) => candidate.status === "pending");
       const question = hasPending ? "請先明確批准要使用的候選來源，再執行來源入庫。" : "沒有已批准且尚未入庫的候選來源。";
       await this.setOperation(operationId, "needs_input", question, initial.revision);
@@ -304,6 +312,13 @@ export class SourceService {
       try {
         if ((candidate.url !== undefined || candidate.domain !== undefined) && !domainAllowed(candidateDomain(candidate), allowedDomains)) {
           throw new CoreError("SOURCE_DOMAIN_NOT_ALLOWED", `Source domain ${candidateDomain(candidate) ?? "unknown"} is outside the approved domain policy.`, true);
+        }
+        const preState = await this.repository.read();
+        const preCandidate = preState.candidates.find((item) => item.id === candidate.id);
+        if (preCandidate !== undefined && preCandidate.status === "ingested") {
+          completed.push(candidate.id);
+          if (isOfficialCandidate(candidate)) officialCompleted.add(candidate.id);
+          continue;
         }
         const acquired = await this.acquire(candidate, context);
         const text = decodeText(acquired.content);
@@ -323,6 +338,17 @@ export class SourceService {
         await this.repository.commit(state.revision, (current) => {
           const currentOperation = current.operations.find((item) => item.id === operationId);
           if (currentOperation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
+          const currentCandidate = current.candidates.find((item) => item.id === candidate.id);
+          if (currentCandidate?.status === "ingested") {
+            return {
+              ...current,
+              operations: current.operations.map((item) => item.id === operationId
+                ? updateOperation(item, {
+                  progress: [...item.progress, { item_id: candidate.id, status: "completed", message: "來源已被並行處理入庫。" }],
+                })
+                : item),
+            };
+          }
           return {
             ...current,
             sources: [...current.sources, source],

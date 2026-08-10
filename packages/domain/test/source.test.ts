@@ -211,4 +211,49 @@ describe("source vertical slice", () => {
     expect(result.summary).toContain("SOURCE_RESEARCH_OFFICIAL_REQUIRED");
     expect((await repository.read()).sources).toHaveLength(1);
   });
+
+  it("scopes execute to the approved selection snapshot of its operation", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({
+      ...state,
+      candidates: [
+        { id: "candidate-a", title: "A", status: "pending", content: "a content" },
+        { id: "candidate-b", title: "B", status: "pending", content: "b content" },
+      ],
+      operations: [
+        { id: "operation-a", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] },
+        { id: "operation-b", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] },
+      ],
+    }));
+    const service = new SourceService(repository);
+    await service.selectCandidates("operation-a", [{ candidate_id: "candidate-a", decision: "approve" }], "director");
+    await service.selectCandidates("operation-b", [{ candidate_id: "candidate-b", decision: "approve" }], "director");
+    const resultA = await service.execute("operation-a", { actor: "director", attachments: [] });
+    expect(resultA.completed).toEqual(["candidate-a"]);
+    const afterA = await repository.read();
+    expect(afterA.sources.map((source) => source.candidate_id)).toEqual(["candidate-a"]);
+    expect(afterA.candidates.find((candidate) => candidate.id === "candidate-b")?.status).toBe("approved");
+    const resultB = await service.execute("operation-b", { actor: "director", attachments: [] });
+    expect(resultB.completed).toEqual(["candidate-b"]);
+    expect((await repository.read()).sources.map((source) => source.candidate_id)).toEqual(["candidate-a", "candidate-b"]);
+  });
+
+  it("skips candidates that a concurrent operation already ingested", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({
+      ...state,
+      candidates: [{ id: "candidate-shared", title: "Shared", status: "approved", content: "shared content" }],
+      operations: [{ id: "operation-x", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+    const service = new SourceService(repository);
+    await repository.commit((await repository.read()).revision, (state) => ({
+      ...state,
+      candidates: state.candidates.map((candidate) => ({ ...candidate, status: "ingested" as const })),
+    }));
+    const result = await service.execute("operation-x", { actor: "director", attachments: [] });
+    expect(result.status).toBe("completed");
+    expect(result.completed).toEqual(["candidate-shared"]);
+    const final = await repository.read();
+    expect(final.sources).toHaveLength(0);
+  });
 });

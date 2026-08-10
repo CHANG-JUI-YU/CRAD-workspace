@@ -411,4 +411,55 @@ describe("workflow gates and editable publish", () => {
     const result = validateWorkflow(await repository.read(), "publish");
     expect(result.diagnostics.map((item) => item.code)).toContain("FACT_COVERAGE_INCOMPLETE");
   });
+
+  it("treats user-provided evidence as proven without source references", async () => {
+    const repository = new MemoryProjectRepository("user-evidence");
+    const characterArtifact = artifact("character-ue", "character:demo", "character", "Demo", character());
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      artifacts: [characterArtifact],
+      facts: [
+        { id: "fact-user", statement: "Yukino 是我的原創角色", status: "accepted" as const, confidence: 1, source_ids: [], evidence: ["user provided"], created_at: now, updated_at: now, created_by: "curator" },
+        { id: "fact-regular", statement: "Yukino is direct", status: "accepted" as const, confidence: 0.7, source_ids: [], evidence: ["plain quote"], created_at: now, updated_at: now, created_by: "curator" },
+      ],
+      reviews: [{ id: "review-ue", artifact_id: characterArtifact.id, artifact_revision: characterArtifact.revision, reviewer: "critic", status: "passed" as const, issue_ids: [], created_at: now }],
+      operations: [operation("op-ue")],
+    }));
+    const result = validateWorkflow(await repository.read(), "publish");
+    const provenance = result.diagnostics.find((item) => item.code === "FACT_PROVENANCE_MISSING");
+    expect(provenance).toBeDefined();
+    expect(provenance!.fact_ids).toEqual(["fact-regular"]);
+  });
+
+  it("treats rejected research candidates as resolved", async () => {
+    const repository = new MemoryProjectRepository("rejected-research");
+    const research = artifact("research-r", "source_research:one", "source_research", "one", { candidates: [{ title: "Rejected page", url: "https://rejected.example/page", official: true }], allowed_domains: ["rejected.example"] });
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      artifacts: [research],
+      candidates: [{ id: "candidate-rejected", title: "Rejected page", url: "https://rejected.example/page", official: true, status: "rejected" as const }],
+      operations: [operation("op-r")],
+    }));
+    const result = validateWorkflow(await repository.read(), "publish");
+    expect(result.diagnostics.map((item) => item.code)).toEqual(expect.not.arrayContaining(["SOURCE_RESEARCH_NOT_INGESTED", "SOURCE_RESEARCH_OFFICIAL_REQUIRED"]));
+  });
+
+  it("still requires approved research candidates to be ingested", async () => {
+    const repository = new MemoryProjectRepository("pending-research");
+    const research = artifact("research-p", "source_research:one", "source_research", "one", { candidates: [{ title: "Pending page", url: "https://pending.example/page" }], allowed_domains: [] });
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      artifacts: [research],
+      candidates: [{ id: "candidate-approved", title: "Pending page", url: "https://pending.example/page", status: "approved" as const }],
+      operations: [operation("op-p")],
+    }));
+    const result = validateWorkflow(await repository.read(), "publish");
+    expect(result.diagnostics.map((item) => item.code)).toContain("SOURCE_RESEARCH_NOT_INGESTED");
+  });
 });

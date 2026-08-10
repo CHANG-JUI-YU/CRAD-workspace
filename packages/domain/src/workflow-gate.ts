@@ -99,7 +99,9 @@ function reportSourceResearch(state: ProjectState, artifacts: ArtifactRecord[], 
     const sourceCandidateIds = new Set(state.sources.map((source) => source.candidate_id));
     const unresolved = candidates.filter((candidate) => {
       const match = state.candidates.find((item) => (typeof candidate.url === "string" && item.url === candidate.url) || (typeof candidate.title === "string" && item.title === candidate.title));
-      return match === undefined || !sourceCandidateIds.has(match.id);
+      if (match === undefined) return true;
+      if (match.status === "rejected") return false;
+      return !sourceCandidateIds.has(match.id);
     });
     if (unresolved.length > 0) {
       add(diagnostics, {
@@ -112,7 +114,8 @@ function reportSourceResearch(state: ProjectState, artifacts: ArtifactRecord[], 
     const official = candidates.filter(candidateLooksOfficial);
     const officialIngested = official.some((candidate) => {
       const match = state.candidates.find((item) => (typeof candidate.url === "string" && item.url === candidate.url) || (typeof candidate.title === "string" && item.title === candidate.title));
-      return match !== undefined && sourceCandidateIds.has(match.id);
+      if (match === undefined || match.status === "rejected") return false;
+      return sourceCandidateIds.has(match.id);
     });
     if (official.length > 0 && !officialIngested) {
       add(diagnostics, { code: "SOURCE_RESEARCH_OFFICIAL_REQUIRED", message: "At least one official source-research candidate must be ingested before publishing.", severity: "error", artifact_ids: [artifact.id] });
@@ -279,7 +282,10 @@ function reportFacts(state: ProjectState, diagnostics: WorkflowDiagnostic[]): vo
     });
   }
   const unproven = accepted.filter((fact) => {
-    if (fact.source_ids.length === 0 && !fact.evidence.some(userProvidedEvidence)) return true;
+    if (fact.source_ids.length === 0) {
+      if (fact.evidence.some(userProvidedEvidence)) return false;
+      return true;
+    }
     const references = fact.evidence_refs ?? [];
     if (references.length === 0) return true;
     return references.some((reference) => {
