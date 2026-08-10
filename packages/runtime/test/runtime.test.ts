@@ -155,7 +155,10 @@ describe("natural language runtime boundary", () => {
     const paused = await runtime.answerInterview("no", { actor: "user", attachments: [] });
     expect(paused.status).toBe("needs_input");
     expect((await repository.read()).blueprint_prechecks[0]?.status).toBe("needs_input");
-    expect((await runtime.answerInterview("confirm the missing core", { actor: "user", attachments: [] })).status).toBe("completed");
+    for (let index = 0; index < 4; index += 1) {
+      const step = await runtime.answerInterview("確認", { actor: "user", attachments: [] });
+      expect(step.status).toBe(index === 3 ? "completed" : "needs_input");
+    }
   });
 
   it("keeps legacy completed intake safe when collaboration and direction provenance are absent", async () => {
@@ -250,7 +253,9 @@ describe("natural language runtime boundary", () => {
       blueprint_prechecks: [pending],
       operations: [{ id: "interview-pending", kind: "interview", request: "project interview", status: "needs_input", created_at: timestamp, updated_at: timestamp, progress: [] }],
     }));
-    const result = await new WorkspaceRuntime(repository, { interviewRequired: true }).answerInterview("use the explicit core", { actor: "user", attachments: [] });
+    const first = await new WorkspaceRuntime(repository, { interviewRequired: true }).answerInterview("use the explicit core", { actor: "user", attachments: [] });
+    expect(first.status).toBe("needs_input");
+    const result = await new WorkspaceRuntime(repository, { interviewRequired: true }).answerInterview("確認", { actor: "user", attachments: [] });
     expect(result.status).toBe("completed");
     expect((await repository.read()).blueprint_prechecks[0]?.status).toBe("recorded");
   });
@@ -365,6 +370,8 @@ describe("natural language runtime boundary", () => {
     expect(proposed.status).toBe("needs_input");
     expect((await repository.read()).publishes).toHaveLength(1);
     expect((await repository.read()).blueprint_prechecks.at(-1)?.status).toBe("needs_input");
+    const firstConfirm = await runtime.request("確認", { actor: "user", attachments: [] });
+    expect(firstConfirm.status).toBe("needs_input");
     const confirmed = await runtime.request("確認", { actor: "user", attachments: [] });
     expect(confirmed.status).toBe("completed");
     const state = await repository.read();
@@ -374,10 +381,12 @@ describe("natural language runtime boundary", () => {
     expect(state.artifacts.at(-1)?.based_on).toBe(originalBlueprint.revision);
     const secondProposed = await runtime.request("更新 Blueprint 方向：保留柔和基調但更明確", { actor: "user", attachments: [] });
     expect(secondProposed.status).toBe("needs_input");
+    expect((await runtime.request("好", { actor: "user", attachments: [] })).status).toBe("needs_input");
     expect((await runtime.request("好", { actor: "user", attachments: [] })).status).toBe("completed");
     const revisedState = await repository.read();
     const fallbackProposed = await runtime.request("change Blueprint direction", { actor: "user", attachments: [] });
     expect(fallbackProposed.status).toBe("needs_input");
+    expect((await runtime.request("confirm", { actor: "user", attachments: [] })).status).toBe("needs_input");
     expect((await runtime.request("confirm", { actor: "user", attachments: [] })).status).toBe("completed");
     const fallbackState = await repository.read();
     expect(JSON.parse(fallbackState.artifacts.at(-1)!.content)).toMatchObject({ blueprint_direction: { selected: "change Blueprint direction" } });
@@ -422,6 +431,7 @@ describe("natural language runtime boundary", () => {
     }));
     const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
     await expect(runtime.request("修改甲的 Blueprint 方向：甲的新方向", { actor: "user", attachments: [] })).resolves.toMatchObject({ status: "needs_input" });
+    await expect(runtime.request("確認", { actor: "user", attachments: [] })).resolves.toMatchObject({ status: "needs_input" });
     await expect(runtime.request("確認", { actor: "user", attachments: [] })).resolves.toMatchObject({ status: "completed" });
     const state = await repository.read();
     const revised = JSON.parse(state.artifacts.at(-1)!.content) as { characters: Array<{ id: string; direction?: { selected?: string } }> };
@@ -663,10 +673,116 @@ describe("natural language runtime boundary", () => {
         { id: "audit-2", operation_id: "first", event: "interview.answer.recorded", actor: "user", occurred_at: timestamp, project_revision: 2, details: {} },
       ],
     }));
-    const result = await new WorkspaceRuntime(repository, { interviewRequired: true }).answerInterview("use the explicit core", { actor: "user", attachments: [] });
+    const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
+    const first = await runtime.answerInterview("use the explicit core", { actor: "user", attachments: [] });
+    expect(first.status).toBe("needs_input");
+    const result = await runtime.answerInterview("確認", { actor: "user", attachments: [] });
     expect(result.status).toBe("completed");
     const state = await repository.read();
     expect(state.audit.length).toBeGreaterThan(2);
     expect(state.audit.map((event) => event.id)).toEqual(expect.arrayContaining(["audit-1", "audit-2"]));
+  });
+
+  it("supplements a pending precheck item and recomputes the candidate Blueprint revision", async () => {
+    const repository = new MemoryProjectRepository("supplement-confirm");
+    const base = createProjectState("supplement-confirm");
+    const timestamp = new Date().toISOString();
+    const pending: BlueprintPrecheckRecord = {
+      id: "precheck-supplement",
+      schema_version: 1,
+      project_id: "supplement-confirm",
+      operation_id: "interview-supplement",
+      collaboration_mode: "assisted",
+      candidate_blueprint: { project_id: "supplement-confirm", characters: [{ id: "character-1", label: "角色", ordinal: 1 }], intake_values: {} },
+      candidate_blueprint_revision: contentHash("candidate"),
+      checks: [{ subject_id: "character-1", dimension: "character_core", uncertainty: "high", impact: "high", basis: "no core recorded", action: "user_confirmed", user_answer: "pending confirmation", intake_key: "concept:character-1" }],
+      status: "needs_input",
+      created_at: timestamp,
+      created_by: "director",
+    };
+    await repository.commit(0, () => ({
+      ...base,
+      project_status: "interviewing",
+      interview: { schema_version: 1, status: "complete", flow: "character", answers: [], values: {} },
+      blueprint_prechecks: [pending],
+      operations: [{ id: "interview-supplement", kind: "interview", request: "project interview", status: "needs_input", created_at: timestamp, updated_at: timestamp, progress: [] }],
+    }));
+    const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
+    const first = await runtime.answerInterview("確認", { actor: "user", attachments: [] });
+    expect(first.status).toBe("needs_input");
+    const result = await runtime.answerInterview("補充：角色核心是穩重而可靠", { actor: "user", attachments: [] });
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    const recorded = state.blueprint_prechecks[0]!;
+    expect(recorded.status).toBe("recorded");
+    expect(recorded.candidate_blueprint_revision).not.toBe(contentHash("candidate"));
+    const intake = (recorded.candidate_blueprint as { intake_values?: Record<string, unknown> }).intake_values;
+    expect(intake?.["concept:character-1"]).toBe("補充：角色核心是穩重而可靠");
+    expect(recorded.checks[0]?.user_answer).toBe("補充：角色核心是穩重而可靠");
+    expect(state.artifacts).toHaveLength(1);
+  });
+
+  it("merges a character expansion interview into the existing Blueprint roster", async () => {
+    const repository = new MemoryProjectRepository("expansion-merge");
+    const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
+    const firstPass = [
+      "角色設定",
+      "單角色卡",
+      "完全原創",
+      "雪乃",
+      "palette",
+      "雪乃的角色概念",
+      "雪乃的背景",
+      "雪乃的性格",
+      "我直接命名",
+      "測試專案",
+      "不需要",
+      "冷靜而可靠",
+      "自由創作",
+      "不需要",
+    ];
+    for (const answer of firstPass) {
+      const step = await runtime.answerInterview(answer, { actor: "user", attachments: [] });
+      if (step.status === "completed") break;
+    }
+    let state = await repository.read();
+    expect(state.artifacts.filter((item) => item.kind === "blueprint")).toHaveLength(1);
+    const interview = state.interview;
+    await repository.commit(state.revision, (current) => ({
+      ...current,
+      interview: { ...interview, status: "idle", flow: "new_project", answers: [], values: {}, current: undefined, characters: undefined, active_character_id: undefined },
+    }));
+    const restarted = await runtime.startInterview("重新開始訪談", { actor: "user", attachments: [] });
+    expect(restarted.status).toBe("needs_input");
+    const expansionPass = [
+      "擴充既有角色卡",
+      "小町",
+      "小町的角色概念",
+      "小町的背景",
+      "小町的性格",
+      "zhuji",
+      "關係已整理",
+      "擴充後專案",
+      "不需要",
+      "維持原有方向",
+      "自由創作",
+      "不需要",
+    ];
+    for (const answer of expansionPass) {
+      const step = await runtime.answerInterview(answer, { actor: "user", attachments: [] });
+      if (step.status === "completed") break;
+    }
+    state = await repository.read();
+    const blueprints = state.artifacts.filter((item) => item.kind === "blueprint");
+    expect(blueprints).toHaveLength(2);
+    const merged = JSON.parse(blueprints[blueprints.length - 1]!.content) as {
+      characters?: Array<{ id?: unknown; display_name?: unknown; mode?: unknown }>;
+      primary_character_id?: unknown;
+    };
+    expect(merged.characters?.map((character) => character.id)).toEqual(["character-1", "character-2"]);
+    expect(merged.characters?.[0]?.display_name).toBe("雪乃");
+    expect(merged.characters?.[1]?.display_name).toBe("小町");
+    expect(merged.characters?.[1]?.mode).toBe("zhuji");
+    expect(merged.primary_character_id).toBe("character-1");
   });
 });

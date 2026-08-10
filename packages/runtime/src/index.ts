@@ -7,6 +7,7 @@ import {
   contentHash,
   createQualityPolicySnapshot,
   validateFactReferences,
+  FORMAL_NAME_QUESTION_PREFIX,
   internalId,
   InMemoryAttachmentStore,
   InterviewError,
@@ -19,12 +20,15 @@ import {
   zhujiProposalValueSchema,
   sourceContextFromRecord,
   workflow_answer_interview,
+  type BlueprintPrecheckDimension,
   type OperationRecord,
   type ArtifactRecord,
   type AdaptationDecision,
   type AttachmentStore,
   type AuthoringKnowledgeContext,
   type FactReviewContext,
+  type InterviewFlow,
+  type InterviewQuestion,
   type OperationCommand,
   type ProjectState,
   type ProjectRepository,
@@ -253,6 +257,86 @@ function createBlueprintArtifact(state: ProjectState, precheck: BlueprintPrechec
   };
 }
 
+function mergeExpansionIntoBlueprint(state: ProjectState, expansionPrecheck: BlueprintPrecheckRecord, operationId: string, actor: string): { artifact: ArtifactRecord | undefined; precheck: BlueprintPrecheckRecord } {
+  const previousBlueprint = latestBlueprintSnapshot(state);
+  const previousPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
+  if (previousBlueprint === undefined || previousPrecheck === undefined) {
+    // No existing Blueprint to merge into; fall back to a fresh project Blueprint.
+    return { artifact: createBlueprintArtifact(state, expansionPrecheck, operationId, actor), precheck: expansionPrecheck };
+  }
+  const expansion = objectValue(expansionPrecheck.candidate_blueprint) ?? {};
+  const expansionCharacters = Array.isArray(expansion.characters) ? expansion.characters as Array<Record<string, unknown>> : [];
+  const existingCharacters = Array.isArray(previousBlueprint.characters) ? previousBlueprint.characters as Array<Record<string, unknown>> : [];
+  const existingOrdinals = existingCharacters.map((candidate) => typeof candidate.ordinal === "number" ? candidate.ordinal as number : 0);
+  const newSubject = expansionCharacters[0];
+  if (newSubject === undefined) {
+    return { artifact: createBlueprintArtifact(state, expansionPrecheck, operationId, actor), precheck: expansionPrecheck };
+  }
+  const maxOrdinal = existingOrdinals.length === 0 ? 0 : Math.max(...existingOrdinals);
+  const mergedCharacters = [
+    ...existingCharacters,
+    {
+      id: `character-${maxOrdinal + 1}`,
+      label: typeof newSubject.label === "string" ? newSubject.label : "新角色",
+      ordinal: maxOrdinal + 1,
+      display_name: typeof newSubject.display_name === "string" ? newSubject.display_name : (typeof newSubject.label === "string" ? newSubject.label : "新角色"),
+      ...(typeof newSubject.mode === "string" ? { mode: newSubject.mode } : {}),
+      ...(objectValue(newSubject.direction) === undefined ? {} : { direction: newSubject.direction }),
+    },
+  ];
+  const existingIntake = objectValue(previousBlueprint.intake_values);
+  const expansionIntake = objectValue(expansion.intake_values);
+  const mergedCandidate: Record<string, unknown> = {
+    ...previousBlueprint,
+    characters: mergedCharacters,
+    primary_character_id: typeof previousBlueprint.primary_character_id === "string" ? previousBlueprint.primary_character_id : mergedCharacters[0]?.id,
+    intake_values: { ...(existingIntake ?? {}), ...(expansionIntake ?? {}) },
+  };
+  const mergedRevision = contentHash(canonicalJson(mergedCandidate));
+  const mergedPrecheck: BlueprintPrecheckRecord = {
+    id: internalId("blueprint_precheck"),
+    schema_version: 1,
+    project_id: state.project_id,
+    operation_id: operationId,
+    collaboration_mode: expansionPrecheck.collaboration_mode,
+    candidate_blueprint: mergedCandidate,
+    candidate_blueprint_revision: mergedRevision,
+    checks: [
+      ...previousPrecheck.checks,
+      ...expansionPrecheck.checks,
+    ],
+    status: "recorded",
+    created_at: now(),
+    created_by: actor,
+  };
+  const content = blueprintContent(mergedPrecheck);
+  const hash = contentHash(content);
+  const key = blueprintKey(state.project_id);
+  const previousArtifact = [...state.artifacts].reverse().find((artifact) => artifact.key === key);
+  if (previousArtifact?.content_hash === hash) return { artifact: undefined, precheck: mergedPrecheck };
+  return {
+    artifact: {
+      id: internalId("artifact"),
+      key,
+      kind: "blueprint",
+      name: "project-blueprint",
+      content,
+      media_type: "application/json",
+      content_hash: hash,
+      revision: hash,
+      status: "draft",
+      created_at: now(),
+      updated_at: now(),
+      created_by: actor,
+      operation_id: operationId,
+      ...(previousArtifact === undefined ? {} : { based_on: previousArtifact.revision }),
+      blueprint_precheck_id: mergedPrecheck.id,
+      blueprint_precheck_revision: mergedPrecheck.candidate_blueprint_revision,
+    },
+    precheck: mergedPrecheck,
+  };
+}
+
 function interviewCharacterSubjects(interview: InterviewState): InterviewCharacterSubject[] {
   if (interview.flow === "world" && !/建立含世界的角色卡|character\s*card\s*with\s*world/iu.test(interview.values.world_kind ?? "")) return [];
   return interview.characters !== undefined && interview.characters.length > 0
@@ -339,6 +423,7 @@ function buildBlueprintPrecheck(projectId: string, operationId: string, intervie
     id: subject.id,
     label: subject.label,
     ordinal: subject.ordinal,
+    display_name: nonEmptyInterviewValue(values, [`${FORMAL_NAME_QUESTION_PREFIX}:${subject.id}`, ...(interview.flow === "character_expansion" ? ["expansion_name"] : [])]) ?? subject.label,
     ...(authoringModeForSubject(interview, subject) === undefined ? {} : { mode: authoringModeForSubject(interview, subject) }),
     direction: directionForSubject(interview, subject, intakeRevision),
   }));
@@ -357,15 +442,16 @@ function buildBlueprintPrecheck(projectId: string, operationId: string, intervie
     ...(subjects.length === 1 && firstDirection !== undefined ? { blueprint_direction: firstDirection } : {}),
     intake_values: values,
   };
+  const perCharacterCore = subjects.length > 1;
   const dimensions: Array<{
     dimension: BlueprintPrecheckCheck["dimension"];
     valueKeys: string[];
     impact: BlueprintPrecheckCheck["impact"];
     scope: "character" | "project";
   }> = [
-    { dimension: "character_core", valueKeys: ["concept", "expansion_concept"], impact: "high", scope: "character" },
-    { dimension: "background", valueKeys: ["background", "expansion_background"], impact: "high", scope: "character" },
-    { dimension: "personality", valueKeys: ["personality", "expansion_personality"], impact: "high", scope: "character" },
+    { dimension: "character_core", valueKeys: perCharacterCore ? [`concept:${subjects[0]!.id}`] : ["concept", "expansion_concept"], impact: "high", scope: "character" },
+    { dimension: "background", valueKeys: perCharacterCore ? [`background:${subjects[0]!.id}`] : ["background", "expansion_background"], impact: "high", scope: "character" },
+    { dimension: "personality", valueKeys: perCharacterCore ? [`personality:${subjects[0]!.id}`] : ["personality", "expansion_personality"], impact: "high", scope: "character" },
     { dimension: "relationships_boundaries", valueKeys: ["relationships", "relationship_enable", "expansion_relationships"], impact: "low", scope: "project" },
     { dimension: "world_dependencies", valueKeys: ["world_concept", "world_enabled", "world_kind", "world_timing"], impact: "low", scope: "project" },
     { dimension: "cross_module_impact", valueKeys: ["authoring_mode", "expansion_mode", "card_shape"], impact: "high", scope: "character" },
@@ -376,9 +462,12 @@ function buildBlueprintPrecheck(projectId: string, operationId: string, intervie
     const subjectsForDimension = scope === "character" ? subjects : [{ id: projectId, label: "project", ordinal: 0 }];
     for (const subject of subjectsForDimension) {
       const perCharacterMode = dimension === "cross_module_impact" && /每名角色分別指定/iu.test(String(values.authoring_mode ?? ""));
+      const perCharacterCoreKey = perCharacterCore && (dimension === "character_core" || dimension === "background" || dimension === "personality");
       const explicitKeys = perCharacterMode
         ? [...valueKeys.filter((key) => key !== "authoring_mode"), `authoring_mode:${subject.id}`]
-        : valueKeys;
+        : perCharacterCoreKey
+          ? [`${dimension}:${subject.id}`]
+          : valueKeys;
       const explicit = nonEmptyInterviewValue(values, explicitKeys);
       if (explicit !== undefined) {
         checks.push({
@@ -406,7 +495,7 @@ function buildBlueprintPrecheck(projectId: string, operationId: string, intervie
           ? `No explicit interview answer for ${dimension} (${subject.label}); confirmation is required.`
           : `No explicit interview answer for ${dimension} (${subject.label}); a safe default may be extended.`,
         ...(needsExplicitConfirmation
-          ? { action: "user_confirmed" as const, user_answer: "pending confirmation" }
+          ? { action: "user_confirmed" as const, user_answer: "pending confirmation", ...(explicitKeys[0] === undefined ? {} : { intake_key: explicitKeys[0] }) }
           : { action: "safe_extension" as const }),
       });
     }
@@ -426,7 +515,6 @@ function buildBlueprintPrecheck(projectId: string, operationId: string, intervie
     created_by: actor,
   };
 }
-
 function responseFromOperation(operation: OperationRecord): RequestResult {
   const completed = operation.progress.filter((item) => item.status === "completed").map((item) => item.item_id);
   const blocked = operation.progress.filter((item) => item.status !== "completed").map((item) => item.item_id);
@@ -438,6 +526,57 @@ function responseFromOperation(operation: OperationRecord): RequestResult {
     blocked,
     ...(operation.question === undefined ? {} : { question: operation.question }),
   };
+}
+
+const PRECHECK_CONFIRM_PREFIX = "precheck_confirm";
+
+function parsePrecheckConfirmQuestionId(questionId: string): { subjectId: string; dimension: string } | undefined {
+  const prefix = `${PRECHECK_CONFIRM_PREFIX}:`;
+  if (!questionId.startsWith(prefix)) return undefined;
+  const rest = questionId.slice(prefix.length);
+  const colon = rest.indexOf(":");
+  if (colon === -1) return undefined;
+  return { subjectId: rest.slice(0, colon), dimension: rest.slice(colon + 1) };
+}
+
+function precheckConfirmQuestion(check: BlueprintPrecheckCheck, subjectLabel: string): InterviewQuestion {
+  return {
+    id: `${PRECHECK_CONFIRM_PREFIX}:${check.subject_id}:${check.dimension}`,
+    text: `請確認或補充「${check.dimension}」（${subjectLabel}）：${check.basis}。可直接回答「確認」沿用建議，或直接提供你的設定。`,
+    kind: "confirmation",
+  };
+}
+
+function precheckSubjectLabel(precheck: BlueprintPrecheckRecord, check: BlueprintPrecheckCheck): string {
+  const characters = Array.isArray(precheck.candidate_blueprint.characters)
+    ? (precheck.candidate_blueprint.characters as Array<{ id?: unknown; label?: unknown; display_name?: unknown }>)
+    : [];
+  const character = characters.find((item) => item.id === check.subject_id);
+  if (character !== undefined) return typeof character.display_name === "string" ? character.display_name : typeof character.label === "string" ? character.label : check.subject_id;
+  return check.subject_id === precheck.project_id ? "專案" : check.subject_id;
+}
+
+function intakeKeyForConfirmation(precheck: BlueprintPrecheckRecord, check: BlueprintPrecheckCheck): string {
+  if (check.intake_key !== undefined) return check.intake_key;
+  const characters = Array.isArray(precheck.candidate_blueprint.characters)
+    ? precheck.candidate_blueprint.characters as Array<{ id?: unknown }>
+    : [];
+  const single = characters.length === 1;
+  switch (check.dimension) {
+    case "character_core": return single ? "concept" : `concept:${check.subject_id}`;
+    case "background": return single ? "background" : `background:${check.subject_id}`;
+    case "personality": return single ? "personality" : `personality:${check.subject_id}`;
+    case "relationships_boundaries": return "relationships";
+    case "world_dependencies": return "world_concept";
+    case "cross_module_impact": return "authoring_mode";
+    default: return check.dimension;
+  }
+}
+
+function isBarePrecheckConfirmation(answer: string): boolean {
+  const trimmed = answer.trim();
+  if (trimmed.length === 0) return false;
+  return /^(確認|是|對|好|可以|沒問題|就用|這樣就好|不用|沒有|暫用)/iu.test(trimmed) || trimmed.length <= 4;
 }
 
 export class WorkspaceRuntime {
@@ -559,32 +698,86 @@ export class WorkspaceRuntime {
     if (operation === undefined) throw new CoreError("INTERVIEW_OPERATION_NOT_FOUND", "找不到目前的訪談操作", true);
     const pendingPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "needs_input");
     if (state.interview.status === "complete" && pendingPrecheck !== undefined) {
+      const parsed = state.interview.current === undefined ? undefined : parsePrecheckConfirmQuestionId(state.interview.current.id);
+      const pendingChecks = pendingPrecheck.checks.filter((check) => check.action === "user_confirmed");
+      if (pendingChecks.length === 0) throw new CoreError("INTERVIEW_PRECHECK_INVALID", "Blueprint precheck 沒有需要確認的項目", true);
+      if (parsed === undefined) {
+        const first = pendingChecks[0]!;
+        const question = precheckConfirmQuestion(first, precheckSubjectLabel(pendingPrecheck, first));
+        const committed = await this.repository.commit(state.revision, (current) => ({
+          ...current,
+          interview: { ...current.interview, current: question },
+        }));
+        return {
+          operation_id: operation.id,
+          status: "needs_input",
+          summary: "訪談已收集完成，請逐項確認 blueprint precheck。",
+          completed: [],
+          blocked: [],
+          question: question.text,
+          interview_question: question,
+          project_id: committed.project_id,
+          flow: state.interview.flow,
+        };
+      }
       const confirmation = answer.trim();
       if (confirmation.length === 0) throw new CoreError("INTERVIEW_ANSWER_EMPTY", "interview answer 不可為空", true);
-      const confirmedPrecheck: BlueprintPrecheckRecord = {
+      const checkIndex = pendingChecks.findIndex((check) => check.subject_id === parsed.subjectId && check.dimension === parsed.dimension);
+      if (checkIndex === -1) throw new CoreError("INTERVIEW_PRECHECK_STALE", "確認問題已過期，請重新確認", true);
+      const currentCheck = pendingChecks[checkIndex]!;
+      let updatedPrecheck: BlueprintPrecheckRecord = {
         ...pendingPrecheck,
-        status: "recorded",
-        checks: pendingPrecheck.checks.map((check) => check.action === "user_confirmed"
-          ? { ...check, user_answer: confirmation }
-          : check),
+        checks: pendingPrecheck.checks.map((check) => check === currentCheck ? { ...check, user_answer: confirmation } : check),
       };
-      const blueprintArtifact = createBlueprintArtifact(state, confirmedPrecheck, operation.id, context.actor);
+      if (!isBarePrecheckConfirmation(confirmation)) {
+        const intakeKey = intakeKeyForConfirmation(pendingPrecheck, currentCheck);
+        const intake = {
+          ...(typeof pendingPrecheck.candidate_blueprint.intake_values === "object" && pendingPrecheck.candidate_blueprint.intake_values !== null
+            ? pendingPrecheck.candidate_blueprint.intake_values as Record<string, unknown>
+            : {}),
+          [intakeKey]: confirmation,
+        };
+        updatedPrecheck = {
+          ...updatedPrecheck,
+          candidate_blueprint: { ...pendingPrecheck.candidate_blueprint, intake_values: intake },
+          candidate_blueprint_revision: contentHash(canonicalJson({ ...pendingPrecheck.candidate_blueprint, intake_values: intake })),
+        };
+      }
+      const nextCheck = pendingChecks[checkIndex + 1];
+      const nextQuestion = nextCheck === undefined ? undefined : precheckConfirmQuestion(nextCheck, precheckSubjectLabel(updatedPrecheck, nextCheck));
+      const allDone = nextCheck === undefined;
+      const confirmedPrecheck: BlueprintPrecheckRecord = { ...updatedPrecheck, status: allDone ? "recorded" : "needs_input" };
+      const mergedExpansion = allDone && state.interview.flow === "character_expansion"
+        ? mergeExpansionIntoBlueprint(state, confirmedPrecheck, operation.id, context.actor)
+        : undefined;
+      const recordedPrecheck = mergedExpansion?.precheck ?? confirmedPrecheck;
+      const blueprintArtifact = allDone
+        ? (mergedExpansion?.artifact ?? createBlueprintArtifact(state, confirmedPrecheck, operation.id, context.actor))
+        : undefined;
       const finalized = await this.repository.commit(state.revision, (current) => ({
         ...current,
-        project_status: "ready",
-        blueprint_prechecks: current.blueprint_prechecks.map((item) => item.id === pendingPrecheck.id ? confirmedPrecheck : item),
+        project_status: allDone ? "ready" : "interviewing",
+        blueprint_prechecks: mergedExpansion === undefined
+          ? current.blueprint_prechecks.map((item) => item.id === pendingPrecheck.id ? confirmedPrecheck : item)
+          : current.blueprint_prechecks.map((item) => item.id === pendingPrecheck.id ? recordedPrecheck : item),
         artifacts: blueprintArtifact === undefined ? current.artifacts : [...current.artifacts, blueprintArtifact],
+        interview: nextQuestion === undefined
+          ? (() => { const { current: _current, ...rest } = current.interview; return rest; })()
+          : { ...current.interview, current: nextQuestion },
         operations: current.operations.map((item) => item.id === operation!.id
           ? {
             ...item,
-            status: "completed" as const,
-            result_summary: "Blueprint precheck confirmed; Blueprint saved.",
+            status: allDone ? "completed" as const : "needs_input" as const,
+            result_summary: allDone ? "Blueprint precheck confirmed; Blueprint saved." : "請繼續確認 precheck 項目。",
             updated_at: now(),
-            progress: [
-              ...item.progress,
-              { item_id: confirmedPrecheck.id, status: "completed" as const, message: "Blueprint precheck confirmed." },
-              ...(blueprintArtifact === undefined ? [] : [{ item_id: blueprintArtifact.id, status: "completed" as const, message: "Blueprint revision saved." }]),
-            ],
+            ...(nextQuestion === undefined ? {} : { question: nextQuestion.text }),
+            progress: blueprintArtifact === undefined
+              ? item.progress
+              : [
+                ...item.progress,
+                { item_id: confirmedPrecheck.id, status: "completed" as const, message: "Blueprint precheck confirmed." },
+                { item_id: blueprintArtifact.id, status: "completed" as const, message: "Blueprint revision saved." },
+              ],
           }
           : item),
         audit: [
@@ -605,17 +798,27 @@ export class WorkspaceRuntime {
             actor: context.actor,
             occurred_at: now(),
             project_revision: current.revision + 1,
-            details: { precheck_id: pendingPrecheck.id, answer: confirmation, blueprint_artifact_id: blueprintArtifact?.id },
+            details: {
+              precheck_id: pendingPrecheck.id,
+              subject_id: parsed.subjectId,
+              dimension: parsed.dimension,
+              answer: confirmation,
+              blueprint_artifact_id: blueprintArtifact?.id,
+              confirmation_index: checkIndex + 1,
+              confirmation_total: pendingChecks.length,
+            },
           },
         ],
       }));
       return {
         operation_id: operation.id,
-        status: "completed",
-        summary: blueprintArtifact === undefined ? "Blueprint precheck confirmed." : "Blueprint precheck confirmed; Blueprint saved.",
-        completed: [pendingPrecheck.id, ...(blueprintArtifact === undefined ? [] : [blueprintArtifact.id])],
+        status: allDone ? "completed" : "needs_input",
+        summary: allDone ? (blueprintArtifact === undefined ? "Blueprint precheck confirmed." : "Blueprint precheck confirmed; Blueprint saved.") : "請繼續確認 precheck 項目。",
+        completed: allDone ? [pendingPrecheck.id, ...(blueprintArtifact === undefined ? [] : [blueprintArtifact.id])] : [],
         blocked: [],
+        ...(nextQuestion === undefined ? {} : { question: nextQuestion.text, interview_question: nextQuestion }),
         project_id: finalized.project_id,
+        flow: state.interview.flow,
       };
     }
     let interview: InterviewState;
@@ -630,8 +833,18 @@ export class WorkspaceRuntime {
     const precheck = interviewComplete ? buildBlueprintPrecheck(state.project_id, operation.id, interview, context.actor) : undefined;
     const workflowComplete = interviewComplete && precheck?.status !== "needs_input";
     const complete = workflowComplete;
+    const firstConfirmQuestion = precheck !== undefined && precheck.status === "needs_input"
+      ? (() => {
+        const pending = precheck.checks.find((check) => check.action === "user_confirmed");
+        return pending === undefined ? undefined : precheckConfirmQuestion(pending, precheckSubjectLabel(precheck, pending));
+      })()
+      : undefined;
+    const mergedExpansion = workflowComplete && precheck !== undefined && interview.flow === "character_expansion"
+      ? mergeExpansionIntoBlueprint(state, precheck, operation.id, context.actor)
+      : undefined;
+    const recordedPrecheck = mergedExpansion?.precheck ?? precheck;
     const blueprintArtifact = workflowComplete && precheck !== undefined
-      ? createBlueprintArtifact(state, precheck, operation.id, context.actor)
+      ? (mergedExpansion?.artifact ?? createBlueprintArtifact(state, precheck, operation.id, context.actor))
       : undefined;
     const precheckAudit = precheck === undefined ? [] : [{
       id: internalId("audit"),
@@ -640,18 +853,23 @@ export class WorkspaceRuntime {
       actor: context.actor,
       occurred_at: now(),
       project_revision: state.revision + 1,
-      details: { precheck_id: precheck.id, candidate_blueprint_revision: precheck.candidate_blueprint_revision, collaboration_mode: precheck.collaboration_mode, status: precheck.status },
+      details: { precheck_id: recordedPrecheck?.id, candidate_blueprint_revision: recordedPrecheck?.candidate_blueprint_revision, collaboration_mode: recordedPrecheck?.collaboration_mode, status: recordedPrecheck?.status },
     }];
     const updated = await this.repository.commit(state.revision, (current) => ({
       ...current,
       ...(projectName === undefined ? {} : { project_name: projectName }),
       project_status: workflowComplete ? "ready" : "interviewing",
-      interview,
+      interview: firstConfirmQuestion === undefined ? interview : { ...interview, current: firstConfirmQuestion },
       ...(precheck === undefined ? {} : {
-        blueprint_prechecks: [
-          ...current.blueprint_prechecks.map((item) => item.status === "recorded" ? { ...item, status: "superseded" as const } : item),
-          precheck,
-        ],
+        blueprint_prechecks: mergedExpansion === undefined
+          ? [
+            ...current.blueprint_prechecks.map((item) => item.status === "recorded" ? { ...item, status: "superseded" as const } : item),
+            precheck,
+          ]
+          : [
+            ...current.blueprint_prechecks.map((item) => item.id === precheck.id || item.status === "recorded" ? { ...item, status: item.id === precheck.id ? item.status : "superseded" as const } : item),
+            mergedExpansion.precheck,
+          ],
       }),
       artifacts: blueprintArtifact === undefined ? current.artifacts : [...current.artifacts, blueprintArtifact],
       operations: current.operations.map((item) => {
@@ -672,7 +890,7 @@ export class WorkspaceRuntime {
           actor: context.actor,
           occurred_at: now(),
           project_revision: current.revision + 1,
-          details: { artifact_id: blueprintArtifact.id, precheck_id: precheck?.id, revision: blueprintArtifact.revision, based_on: blueprintArtifact.based_on },
+          details: { artifact_id: blueprintArtifact.id, precheck_id: recordedPrecheck?.id, revision: blueprintArtifact.revision, based_on: blueprintArtifact.based_on },
         }]),
         {
           id: internalId("audit"),
@@ -685,15 +903,17 @@ export class WorkspaceRuntime {
         },
       ],
     }));
+    const effectiveInterview: InterviewState = firstConfirmQuestion === undefined ? interview : { ...interview, current: firstConfirmQuestion };
     return {
       operation_id: operation.id,
       status: workflowComplete ? "completed" : "needs_input",
       summary: complete ? "專案訪談完成，已保存所有 intake_answers。" : "回答已保存，請繼續目前的訪談。",
       completed: workflowComplete ? ["interview", ...(precheck === undefined ? [] : [precheck.id]), ...(blueprintArtifact === undefined ? [] : [blueprintArtifact.id])] : [],
       blocked: [],
-      ...(interview.current === undefined ? {} : { question: interview.current.text, interview_question: interview.current }),
+      ...(effectiveInterview.current === undefined ? {} : { question: effectiveInterview.current.text, interview_question: effectiveInterview.current }),
       project_id: updated.project_id,
       ...(projectName === undefined ? {} : { project_name: projectName }),
+      flow: interview.flow,
     };
   }
 
@@ -1612,7 +1832,8 @@ export class WorkspaceRuntime {
     const existing = await this.repository.read();
     const pendingBlueprintPrecheck = [...existing.blueprint_prechecks].reverse().find((item) => item.status === "needs_input");
     if (this.interviewRequired && pendingBlueprintPrecheck !== undefined) {
-      if (existing.interview.status === "complete" && isBlueprintConfirmation(trimmed)) {
+      const midConfirmation = existing.interview.current !== undefined && parsePrecheckConfirmQuestionId(existing.interview.current.id) !== undefined;
+      if (existing.interview.status === "complete" && (isBlueprintConfirmation(trimmed) || midConfirmation)) {
         return this.answerInterview(trimmed, context);
       }
       throw new CoreError("BLUEPRINT_PRECHECK_REQUIRED", "Blueprint precheck needs a short confirmation before the next workflow step.", true);

@@ -1,4 +1,4 @@
-import { access, readdir } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { CoreError, FileProjectRepository, type ProjectState, type RequestResult, type WorkspaceContext } from "@st-workspace/core";
 import type { WorkspaceRuntime } from "./index.js";
@@ -179,7 +179,59 @@ export class WorkspaceProjectManager {
 
   async answerInterview(answer: string, context: WorkspaceContext): Promise<RequestResult> {
     await this.ensureRuntime();
-    return this.finalizeIfNamed(await this.runtimeValue.answerInterview(answer, context));
+    const result = await this.runtimeValue.answerInterview(answer, context);
+    if (result.status !== "completed" || result.flow === undefined) return this.finalizeIfNamed(result);
+    const placeholderState = await this.repositoryValue.read();
+    const values = placeholderState.interview.values;
+    if (result.flow === "continue") {
+      const target = values.continue_project;
+      if (typeof target === "string" && target.trim().length > 0) return this.relocateResultToProject(result, target.trim());
+    }
+    if (result.flow === "legacy_review") {
+      const importPath = values.import_path;
+      if (typeof importPath === "string" && importPath.trim().length > 0) return this.importLegacyCard(importPath.trim(), result, context);
+    }
+    if (result.flow === "world") {
+      const worldKind = values.world_kind;
+      if (typeof worldKind === "string" && worldKind.replace(/\s+/gu, "").includes("既有專案")) {
+        const target = values.world_project;
+        if (typeof target === "string" && target.trim().length > 0) return this.relocateResultToProject(result, target.trim());
+      }
+    }
+    return this.finalizeIfNamed(result);
+  }
+
+  private async relocateResultToProject(result: RequestResult, target: string): Promise<RequestResult> {
+    const selected = await this.select(target);
+    return {
+      ...result,
+      project_id: selected.project_id,
+      ...(selected.project_name === undefined ? {} : { project_name: selected.project_name }),
+      project_path: selected.path,
+    };
+  }
+
+  private async importLegacyCard(filePath: string, result: RequestResult, context: WorkspaceContext): Promise<RequestResult> {
+    let content: Uint8Array;
+    try {
+      content = await readFile(filePath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "EISDIR") throw new CoreError("LEGACY_CARD_NOT_FOUND", `找不到舊卡檔案「${filePath}」，請確認路徑後重新開始「舊卡審核」。`, true);
+      throw new CoreError("LEGACY_CARD_UNREADABLE", `無法讀取舊卡檔案「${filePath}」：${(error as Error).message}`, true);
+    }
+    const lower = filePath.toLowerCase();
+    const mediaType = lower.endsWith(".png") ? "image/png" : lower.endsWith(".yaml") || lower.endsWith(".yml") ? "text/yaml" : "application/json";
+    const importResult = await this.runtimeValue.request(`匯入舊卡 ${path.basename(filePath)}`, {
+      ...context,
+      attachments: [{ name: path.basename(filePath), content, media_type: mediaType }],
+    });
+    return this.finalizeIfNamed({
+      ...result,
+      ...importResult,
+      summary: `${result.summary} ${importResult.summary}`.trim(),
+      completed: [...(result.completed ?? []), ...(importResult.completed ?? [])],
+    });
   }
 
   async interviewContext(): Promise<ReturnType<WorkspaceRuntime["interviewContext"]>> {

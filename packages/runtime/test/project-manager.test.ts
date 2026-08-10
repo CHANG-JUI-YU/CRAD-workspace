@@ -105,4 +105,92 @@ describe("workspace project manager", () => {
     const result = await projects.request("new project", { actor: "user", attachments: [] });
     expect(result.project_id).toBe("project-002");
   });
+
+  it("switches to the selected project when a continue interview completes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-continue-"));
+    roots.push(root);
+    const previous = new FileProjectRepository(root, "project-001", { layout: "project", materialize: true });
+    const previousState = await previous.read();
+    await previous.commit(previousState.revision, (state) => ({
+      ...state,
+      project_name: "目標專案",
+      project_slug: "目標專案",
+      project_status: "ready",
+    }));
+
+    const projects = manager(root);
+    expect((await projects.interviewContext()).project_id).toBe("project-002");
+    const answers = ["繼續專案", "目標專案", "繼續的專案", "不需要", "自由創作", "不需要"];
+    let result;
+    for (const answer of answers) {
+      result = await projects.answerInterview(answer, { actor: "user", attachments: [] });
+    }
+    expect(result?.status).toBe("completed");
+    expect(result?.project_id).toBe("project-001");
+    expect((await projects.status()).project_id).toBe("project-001");
+  });
+
+  it("imports a legacy card when a legacy review interview completes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-legacy-"));
+    roots.push(root);
+    const cardPath = path.join(root, "legacy-card.json");
+    await writeFile(cardPath, JSON.stringify({ name: "Legacy", description: "A complete legacy card" }), "utf8");
+    const projects = manager(root);
+    const answers = ["舊卡審核", cardPath, "審核專案", "不需要", "自由創作", "不需要"];
+    let result;
+    for (const answer of answers) {
+      result = await projects.answerInterview(answer, { actor: "user", attachments: [] });
+    }
+    expect(result?.status).toBe("completed");
+    expect(result?.project_id).toBe("審核專案");
+    expect(result?.summary).toContain("匯入");
+    expect((result?.completed ?? []).length).toBeGreaterThan(0);
+    expect((await projects.status()).project_id).toBe("審核專案");
+
+    const missing = manager(await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-legacy-missing-")));
+    roots.push((missing as unknown as { root: string }).root);
+    const missingAnswers = ["舊卡審核", path.join(root, "nope.json"), "審核專案", "不需要", "自由創作", "不需要"];
+    for (const answer of missingAnswers) {
+      try {
+        await missing.answerInterview(answer, { actor: "user", attachments: [] });
+      } catch (error) {
+        expect((error as { code?: string }).code).toBe("LEGACY_CARD_NOT_FOUND");
+        return;
+      }
+    }
+    throw new Error("expected LEGACY_CARD_NOT_FOUND");
+  });
+
+  it("switches to an existing project when a world interview targets it", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-world-"));
+    roots.push(root);
+    const previous = new FileProjectRepository(root, "project-001", { layout: "project", materialize: true });
+    const previousState = await previous.read();
+    await previous.commit(previousState.revision, (state) => ({
+      ...state,
+      project_name: "世界專案",
+      project_slug: "世界專案",
+      project_status: "ready",
+    }));
+
+    const projects = manager(root);
+    expect((await projects.interviewContext()).project_id).toBe("project-002");
+    let result = await projects.answerInterview("世界設定", { actor: "user", attachments: [] });
+    const worldKind = (await projects.interviewContext()).question?.options?.find((option) => option.includes("既有專案"));
+    expect(worldKind).toBeDefined();
+    result = await projects.answerInterview(worldKind!, { actor: "user", attachments: [] });
+    const answers = ["世界專案", "一個蒸汽龐克都市", undefined, "世界書專案", "自由創作", "不需要"];
+    for (let index = 0; index < answers.length; index += 1) {
+      let answer = answers[index];
+      if (answer === undefined) {
+        const ctx = await projects.interviewContext();
+        answer = ctx.question?.options?.[0];
+        expect(answer).toBeDefined();
+      }
+      result = await projects.answerInterview(answer!, { actor: "user", attachments: [] });
+    }
+    expect(result?.status).toBe("completed");
+    expect(result?.project_id).toBe("project-001");
+    expect((await projects.status()).project_id).toBe("project-001");
+  });
 });

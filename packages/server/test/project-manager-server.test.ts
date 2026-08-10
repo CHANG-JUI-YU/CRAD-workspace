@@ -34,6 +34,7 @@ describe("project manager HTTP and MCP boundary", () => {
         "角色設定",
         "單角色卡",
         "完全原創",
+        "雪乃",
         "palette",
         "一個冷靜觀察、重視界線且具辨識度的角色概念",
         "在普通家庭成長，後來學會獨立生活與承擔責任",

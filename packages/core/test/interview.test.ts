@@ -70,6 +70,7 @@ describe("project interview engine", () => {
     state = answer(state, "角色設定");
     state = answer(state, "單角色卡");
     state = answer(state, "完全原創");
+    state = answer(state, "雪乃");
     state = answer(state, "zhuji");
     expect(state.current?.id).toBe("concept");
     expect(state.current?.kind).toBe("free_text");
@@ -98,6 +99,7 @@ describe("project interview engine", () => {
       "角色設定",
       "單角色卡",
       "完全原創",
+      "雪乃",
       "palette",
       "核心是冷靜而直接的觀察者",
       "在嚴格家庭中成長並學會自立",
@@ -119,7 +121,7 @@ describe("project interview engine", () => {
     state = answer(state, "沒有，開始建立");
     expect(state.status).toBe("complete");
     expect(state.confirmed_no_additional_settings).toBe(true);
-    expect(state.answers).toHaveLength(16);
+    expect(state.answers).toHaveLength(17);
   });
 
   it("accepts the displayed positive and negative final confirmation choices", () => {
@@ -128,6 +130,7 @@ describe("project interview engine", () => {
       "角色設定",
       "單人角色卡",
       "完全原創",
+      "雪乃",
       "palette",
       "核心是冷靜而直接的觀察者",
       "在嚴格家庭中成長並學會自立",
@@ -152,7 +155,7 @@ describe("project interview engine", () => {
 
   it("asks the relationships activation questions for a multi-character card", () => {
     let state = beginInterview(createInterviewState());
-    for (const value of ["角色設定", "多角色卡", "完全原創", "冷靜姐姐、熱情妹妹", "palette", "兩名角色有互補的衝突關係", "背景清楚", "性格有差異"]) state = answer(state, value);
+    for (const value of ["角色設定", "多角色卡", "完全原創", "冷靜姐姐、熱情妹妹", "姐姐", "妹妹", "palette", "姐姐概念", "姐姐背景", "姐姐性格", "妹妹概念", "妹妹背景", "妹妹性格"]) state = answer(state, value);
     expect(state.current?.id).toBe("relationships");
     expect(state.characters?.map((character) => character.label)).toEqual(["冷靜姐姐", "熱情妹妹"]);
     state = answer(state, "互相競爭但有共同目標");
@@ -164,14 +167,14 @@ describe("project interview engine", () => {
 
   it("assigns authoring mode one character at a time when a multi-character card requests it", () => {
     let state = beginInterview(createInterviewState());
-    for (const value of ["角色設定", "多角色卡", "完全原創", "甲、乙", "每名角色分別指定"]) state = answer(state, value);
+    for (const value of ["角色設定", "多角色卡", "完全原創", "甲、乙", "甲", "乙", "每名角色分別指定"]) state = answer(state, value);
     expect(state.current?.id).toBe("authoring_mode:character-1");
     expect(state.current?.subject_label).toBe("甲");
     state = answer(state, "zhuji");
     expect(state.current?.id).toBe("authoring_mode:character-2");
     expect(state.current?.subject_label).toBe("乙");
     state = answer(state, "palette");
-    expect(state.current?.id).toBe("concept");
+    expect(state.current?.id).toBe("concept:character-1");
     expect(state.values["authoring_mode"]).toBe("每名角色分別指定");
     expect(state.values["authoring_mode:character-1"]).toBe("zhuji");
     expect(state.values["authoring_mode:character-2"]).toBe("palette");
@@ -179,7 +182,7 @@ describe("project interview engine", () => {
 
   it("requires valid existing participants for a relationship subset", () => {
     let state = beginInterview(createInterviewState());
-    for (const value of ["角色設定", "多角色卡", "完全原創", "甲、乙、丙", "palette", "共同概念", "共同背景", "不同性格", "關係已整理", "啟用", "指定 participant subset"]) state = answer(state, value);
+    for (const value of ["角色設定", "多角色卡", "完全原創", "甲、乙、丙", "甲", "乙", "丙", "palette", "概念甲", "背景甲", "性格甲", "概念乙", "背景乙", "性格乙", "概念丙", "背景丙", "性格丙", "關係已整理", "啟用", "指定 participant subset"]) state = answer(state, value);
     expect(state.current?.id).toBe("relationship_participants");
     expect(() => answer(state, "甲")).toThrowError(expect.objectContaining({ code: "INTERVIEW_PARTICIPANTS_INVALID" }));
     expect(state.current?.id).toBe("relationship_participants");
@@ -197,7 +200,7 @@ describe("project interview engine", () => {
 
   it("does not interpret a natural-language refusal as enabling world settings", () => {
     let state = beginInterview(createInterviewState());
-    for (const value of ["角色設定", "單人角色卡", "完全原創", "palette", "角色概念", "角色背景", "角色性格", "我直接命名", "專案名稱", "不需要世界設定"]) state = answer(state, value);
+    for (const value of ["角色設定", "單人角色卡", "完全原創", "雪乃", "palette", "角色概念", "角色背景", "角色性格", "我直接命名", "專案名稱", "不需要世界設定"]) state = answer(state, value);
     expect(state.current?.id).toBe(BLUEPRINT_DIRECTION_QUESTION_ID);
     expect(state.values.world_enabled).toBe("不需要世界設定");
   });
@@ -209,13 +212,13 @@ describe("project interview engine", () => {
     state = answer(state, "單人角色卡");
     expect(state.current?.id).toBe("character_origin");
     state = answer(state, "完全原創");
-    expect(state.current?.id).toBe("authoring_mode");
+    expect(state.current?.id).toBe("formal_name:character-1");
     expect(state.flow).toBe("world");
   });
 
   it("asks and stores Blueprint direction independently for each character", () => {
     let state = beginInterview(createInterviewState());
-    for (const value of ["角色設定", "多角色卡", "完全原創", "甲、乙", "palette", "共同概念", "共同背景", "不同性格", "關係已整理", "不啟用", "我直接命名", "雙人專案", "不需要"]) state = answer(state, value);
+    for (const value of ["角色設定", "多角色卡", "完全原創", "甲、乙", "甲", "乙", "palette", "概念甲", "背景甲", "性格甲", "概念乙", "背景乙", "性格乙", "關係已整理", "不啟用", "我直接命名", "雙人專案", "不需要"]) state = answer(state, value);
     expect(state.current?.id).toBe("blueprint_direction:character-1");
     expect(state.current?.subject_label).toBe("甲");
     state = answer(state, "再給幾個");
@@ -257,6 +260,7 @@ describe("project interview engine", () => {
       "某動漫角色與作品",
       "動漫",
       "官方角色頁、角色別名",
+      "雪乃",
       "palette",
       "我心中更克制、溫柔且重視界線的版本",
       "沿用原作背景但調整成適合本專案的生活脈絡",
@@ -281,10 +285,15 @@ describe("project interview engine", () => {
       "動漫",
       "官方角色頁、作品名稱",
       "甲、乙",
+      "甲",
+      "乙",
       "palette",
-      "共同改編概念",
-      "共同背景脈絡",
-      "甲冷靜、乙熱烈",
+      "概念甲",
+      "背景甲",
+      "性格甲",
+      "概念乙",
+      "背景乙",
+      "性格乙",
       "關係已整理",
       "不啟用",
       "我直接命名",
@@ -302,12 +311,12 @@ describe("project interview engine", () => {
 
   it("walks Blueprint direction and character expansion branches", () => {
     let zhuji = beginInterview(createInterviewState());
-    for (const value of ["角色設定", "單角色卡", "完全原創", "zhuji", "冷靜而有辨識度的角色概念", "在普通家庭成長並學會獨立生活", "克制直接且重視誠實與界線", "我直接命名", "珠璣專案", "不需要", "冷靜觀察、只對信任的人展現柔軟", "自由創作", "沒有"]) zhuji = answer(zhuji, value);
+    for (const value of ["角色設定", "單角色卡", "完全原創", "雪乃", "zhuji", "冷靜而有辨識度的角色概念", "在普通家庭成長並學會獨立生活", "克制直接且重視誠實與界線", "我直接命名", "珠璣專案", "不需要", "冷靜觀察、只對信任的人展現柔軟", "自由創作", "沒有"]) zhuji = answer(zhuji, value);
     expect(zhuji.status).toBe("complete");
     expect(zhuji.answers.some((item) => item.question_id === BLUEPRINT_DIRECTION_QUESTION_ID)).toBe(true);
 
     let expansion = beginInterview(createInterviewState());
-    for (const value of ["擴充既有角色", "新增角色概念", "新增角色背景", "新增角色性格", "palette", "與既有 roster 的互信和衝突界線", "既有專案", "不需要", "新增角色先觀望、再以可靠行動建立信任", "自由創作", "沒有"]) expansion = answer(expansion, value);
+    for (const value of ["擴充既有角色", "新角色", "新增角色概念", "新增角色背景", "新增角色性格", "palette", "與既有 roster 的互信和衝突界線", "既有專案", "不需要", "新增角色先觀望、再以可靠行動建立信任", "自由創作", "沒有"]) expansion = answer(expansion, value);
     expect(expansion.status).toBe("complete");
     expect(expansion.flow).toBe("character_expansion");
   });
@@ -334,7 +343,7 @@ describe("project interview engine", () => {
 
   it("allows relationships to be declined and requires a second confirmation after supplements", () => {
     let state = beginInterview(createInterviewState());
-    for (const value of ["角色設定", "多角色卡", "完全原創", "姐姐、妹妹", "palette", "兩名角色的核心概念與互補特徵", "共同成長背景與重要事件", "一方冷靜一方熱烈但都尊重界線", "角色關係已整理", "不啟用", "我直接命名", "雙人專案", "不需要", "姐姐方向：冷靜而可靠", "妹妹方向：熱烈而有界線", "自由創作"]) state = answer(state, value);
+    for (const value of ["角色設定", "多角色卡", "完全原創", "姐姐、妹妹", "姐姐", "妹妹", "palette", "概念姐", "背景姐", "性格姐", "概念妹", "背景妹", "性格妹", "角色關係已整理", "不啟用", "我直接命名", "雙人專案", "不需要", "姐姐方向：冷靜而可靠", "妹妹方向：熱烈而有界線", "自由創作"]) state = answer(state, value);
     expect(state.current?.id).toBe("additional_settings");
     state = answer(state, "補充一段共同目標與不可違反的界線");
     expect(state.current?.id).toBe("supplement");

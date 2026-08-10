@@ -3,7 +3,7 @@ import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import { createInterviewState, type InterviewState } from "./interview.js";
+import { createInterviewState, type InterviewFlow, type InterviewState } from "./interview.js";
 import type { AdaptationDecision } from "./authoring-context.js";
 
 export type OperationStatus =
@@ -140,6 +140,8 @@ export interface BlueprintPrecheckCheck {
   basis: string;
   action: BlueprintPrecheckAction;
   user_answer?: string;
+  /** Intake values key this check asks the user to confirm or supplement (BUG-12 per-item confirmation). */
+  intake_key?: string;
 }
 
 export interface BlueprintPrecheckRecord {
@@ -697,6 +699,7 @@ const blueprintPrecheckCheckSchema = z.object({
   basis: z.string().min(1),
   action: z.enum(["preserve_explicit", "safe_extension", "user_confirmed"]),
   user_answer: z.string().min(1).optional(),
+  intake_key: z.string().min(1).optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.action === "user_confirmed" && value.user_answer === undefined) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "user_confirmed checks require user_answer" });
@@ -895,6 +898,8 @@ export interface RequestResult {
   project_name?: string;
   project_path?: string;
   interview_question?: InterviewState["current"];
+  /** The interview flow that produced this result (BUG-13 flow dispatch). */
+  flow?: InterviewFlow;
 }
 
 export class CoreError extends Error {
@@ -2598,6 +2603,7 @@ export {
   normalizeInterviewStateForDisplay,
   BLUEPRINT_DIRECTION_QUESTION_ID,
   CHARACTER_ROSTER_QUESTION_ID,
+  FORMAL_NAME_QUESTION_PREFIX,
   parseCharacterRoster,
   parseRelationshipParticipants,
   ZHUJI_SELF_INTRODUCTION_FIELDS,
