@@ -111,7 +111,7 @@ export interface PluginHelperScript {
   content: string;
   info: string;
   button: { enabled: boolean; buttons: Array<{ name: string; visible: boolean }> };
-  data: Record<string, never>;
+  data: Record<string, unknown>;
 }
 
 export interface PluginContribution {

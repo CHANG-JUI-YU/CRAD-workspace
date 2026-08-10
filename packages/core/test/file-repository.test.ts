@@ -81,6 +81,38 @@ describe("file project repository", () => {
     expect(await readdir(path.join(root, "demo", ".workspace", "legacy-layout"))).toEqual(migrations);
   });
 
+  it("keeps the latest published exports when migrating a legacy layout", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-legacy-keep-"));
+    temporaryRoots.push(root);
+    const legacy = new FileProjectRepository(root, "demo");
+    const blueprint = artifact("blueprint", "legacy", JSON.stringify({ kind: "blueprint", concept: "legacy concept" }));
+    const timestamp = new Date().toISOString();
+    await legacy.commit(0, (state) => ({
+      ...state,
+      project_name: "Legacy",
+      project_status: "published",
+      artifacts: [blueprint],
+      publishes: [{ id: "publish-1", operation_id: "op-publish", artifact_ids: ["artifact-1"], content: "published content", content_hash: contentHash("published content"), export_json_path: "exports/Legacy-珠璣角色卡.json", export_png_path: "exports/Legacy-珠璣角色卡.png", created_at: timestamp }],
+    }));
+    await mkdir(path.join(root, "demo", "proposals"), { recursive: true });
+    await mkdir(path.join(root, "demo", "exports"), { recursive: true });
+    await writeFile(path.join(root, "demo", "proposals", "draft.yaml"), "draft: true", "utf8");
+    await writeFile(path.join(root, "demo", "exports", "Legacy-珠璣角色卡.json"), "latest export", "utf8");
+    await writeFile(path.join(root, "demo", "exports", "old.json"), "old export", "utf8");
+
+    const migrated = new FileProjectRepository(root, "demo", { layout: "project", materialize: true });
+    const state = await migrated.read();
+    expect(state.publishes).toHaveLength(1);
+    await expect(readFile(path.join(root, "demo", "exports", "Legacy-珠璣角色卡.json"), "utf8")).resolves.toContain("published content");
+    await expect(readFile(path.join(root, "demo", "exports", "old.json"), "utf8")).rejects.toThrow();
+    const migrations = await readdir(path.join(root, "demo", ".workspace", "legacy-layout"));
+    expect(migrations).toHaveLength(1);
+    const archived = await readdir(path.join(root, "demo", ".workspace", "legacy-layout", migrations[0]!));
+    expect(archived).toEqual(expect.arrayContaining(["state.json", "proposals", "exports", "migration.json"]));
+    const archivedExports = await readdir(path.join(root, "demo", ".workspace", "legacy-layout", migrations[0]!, "exports"));
+    expect(archivedExports).toEqual(["old.json"]);
+  });
+
   it("reconciles an existing state-only project without changing its revision", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-reconcile-"));
     temporaryRoots.push(root);

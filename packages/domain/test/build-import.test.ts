@@ -460,4 +460,69 @@ describe("build, publish and import", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("imports a YAML card and converts it into the internal Character schema", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-yaml", "import")] }));
+    const yaml = "name: Yukino\ndescription: A calm and direct character\npersonality: calm, direct\n";
+    const result = await new ImportService(repository).run("op-yaml", "import card", "importer", [{ name: "card.yaml", content: new TextEncoder().encode(yaml), media_type: "text/yaml" }]);
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    expect(state.imports[0]?.original_name).toBe("card.yaml");
+    expect(state.imports[0]?.report.join(" ")).toContain("yaml");
+    const parsed = JSON.parse(state.artifacts[0]!.content) as { kind: string; document: { display_name: string; sections: Array<{ title: string }> } };
+    expect(parsed.kind).toBe("character");
+    expect(parsed.document.display_name).toBe("Yukino");
+    expect(parsed.document.sections.map((section) => section.title)).toContain("Personality");
+  });
+
+  it("derives the artifact name from the nested CCv3 data.name field", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-nested-name", "import")] }));
+    const result = await new ImportService(repository).run("op-nested-name", "import card", "importer", [{ name: "nested.json", content: new TextEncoder().encode(JSON.stringify({ data: { name: "Inner Name", description: "Nested card" }, description: "Outer card" })) }]);
+    expect(result.status).toBe("completed");
+    expect((await repository.read()).artifacts[0]?.name).toBe("Inner Name");
+  });
+
+  it("decodes PNG cards through the injected adapter and preserves the original binary", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-png", "import")] }));
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
+    const service = new ImportService(repository, {
+      pngDecoder: async () => ({ authority: "ccv3" as const, card: { name: "PngCard", description: "From png", personality: "quiet" } }),
+    });
+    const result = await service.run("op-png", "import card", "importer", [{ name: "card.png", content: pngBytes, media_type: "image/png" }]);
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    expect(state.imports[0]?.report.join(" ")).toContain("png-ccv3");
+    expect(state.imports[0]?.original_binary).toBeDefined();
+    expect(state.artifacts[0]?.name).toBe("PngCard");
+  });
+
+  it("records a failed record when a PNG card cannot be decoded", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-png-fail", "import")] }));
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
+    const service = new ImportService(repository, { pngDecoder: async () => { throw new Error("broken card"); } });
+    const result = await service.run("op-png-fail", "import card", "importer", [{ name: "card.png", content: pngBytes, media_type: "image/png" }]);
+    expect(result.status).toBe("needs_input");
+    expect((await repository.read()).imports[0]?.status).toBe("failed");
+  });
+
+  it("imports the valid attachments and records failures for the rest", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-multi", "import")] }));
+    const service = new ImportService(repository);
+    const result = await service.run("op-multi", "import card", "importer", [
+      { name: "good.json", content: new TextEncoder().encode(JSON.stringify({ name: "Good", description: "A good card" })) },
+      { name: "bad.json", content: new TextEncoder().encode("not json at all") },
+    ]);
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    expect(state.imports).toHaveLength(2);
+    expect(state.imports.find((item) => item.original_name === "good.json")?.status).toBe("imported");
+    expect(state.imports.find((item) => item.original_name === "bad.json")?.status).toBe("failed");
+    expect(state.artifacts).toHaveLength(1);
+    expect(state.artifacts[0]?.name).toBe("Good");
+  });
 });

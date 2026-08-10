@@ -375,6 +375,8 @@ export interface ImportRecord {
   original_name: string;
   original_hash: string;
   original_content: string;
+  original_binary?: string;
+  attachments?: Array<{ name: string; media_type: string; original_hash: string }>;
   converted_hash?: string;
   report: string[];
   status: "dry_run" | "imported" | "failed";
@@ -745,6 +747,12 @@ const importSchema = z.object({
   original_name: z.string().min(1),
   original_hash: z.string().regex(/^[a-f0-9]{64}$/u),
   original_content: z.string().min(1),
+  original_binary: z.string().min(1).optional(),
+  attachments: z.array(z.object({
+    name: z.string().min(1),
+    media_type: z.string().min(1),
+    original_hash: z.string().regex(/^[a-f0-9]{64}$/u),
+  })).optional(),
   converted_hash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   report: z.array(z.string()),
   status: z.enum(["dry_run", "imported", "failed"]),
@@ -1371,7 +1379,24 @@ export class FileProjectRepository implements ProjectRepository {
     // files are untouched and the caller receives the original error.
     await this.writeTransactional(migratedState);
     await mkdir(backupDirectory, { recursive: true });
+    const exportsDirectory = path.join(this.projectDirectory, "exports");
+    const latest = migratedState.publishes.at(-1);
+    const keep = new Set<string>();
+    if (latest !== undefined) {
+      keep.add(path.basename(latest.export_json_path ?? publishedCardExportPath(migratedState.project_name, migratedState.project_id, migratedState.artifacts)));
+      if (latest.png_base64 !== undefined) keep.add(path.basename(latest.export_png_path ?? publishedCardPngExportPath(migratedState.project_name, migratedState.project_id, migratedState.artifacts)));
+    }
     for (const entry of present) {
+      if (entry === exportsDirectory) {
+        const files = await readdir(entry, { withFileTypes: true });
+        for (const file of files) {
+          if (keep.has(file.name)) continue;
+          const target = path.join(backupDirectory, "exports", file.name);
+          await mkdir(path.dirname(target), { recursive: true });
+          await renameWithRetry(path.join(entry, file.name), target);
+        }
+        continue;
+      }
       const target = path.join(backupDirectory, path.basename(entry));
       await renameWithRetry(entry, target);
     }

@@ -1,3 +1,4 @@
+import { readCardFromPng } from "@st-workspace/adapters-png";
 import {
   buildZhujiTemplateContext,
   buildTemplateContext,
@@ -623,7 +624,7 @@ export class WorkspaceRuntime {
     this.authoring = new AuthoringService(repository);
     this.review = new ReviewService(repository);
     this.build = new BuildService(repository);
-    this.importer = new ImportService(repository);
+    this.importer = new ImportService(repository, { pngDecoder: async (input) => readCardFromPng(input) });
     this.searcher = options.searcher;
     this.fetcher = options.fetcher;
     this.interviewRequired = options.interviewRequired ?? false;

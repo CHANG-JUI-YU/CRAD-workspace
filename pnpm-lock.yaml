@@ -110,6 +110,9 @@ importers:
       '@st-workspace/adapters':
         specifier: workspace:*
         version: link:../adapters
+      '@st-workspace/adapters-png':
+        specifier: workspace:*
+        version: link:../adapters-png
       '@st-workspace/core':
         specifier: workspace:*
         version: link:../core

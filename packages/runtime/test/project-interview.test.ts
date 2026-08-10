@@ -296,7 +296,8 @@ describe("project interview runtime", () => {
     await mkdir(path.join(root, "broken", ".workspace"), { recursive: true });
     await writeFile(path.join(root, "broken", ".workspace", "state.json"), "not-json", "utf8");
     await mkdir(path.join(root, "project-002"), { recursive: true });
-    expect((await manager.listProjects()).map((item) => item.project_id)).toEqual(["project-001"]);
+    expect((await manager.listProjects()).map((item) => item.project_id)).toEqual(["broken", "project-001"]);
+    expect((await manager.listProjects()).find((item) => item.project_id === "broken")?.status).toBe("uninitialized");
 
     await manager.startNewProject();
     expect(manager.repository.projectId).toBe("project-003");

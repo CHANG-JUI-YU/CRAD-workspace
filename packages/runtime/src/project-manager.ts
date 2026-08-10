@@ -96,13 +96,15 @@ export class WorkspaceProjectManager {
       if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
       const stateFile = path.join(this.options.root, entry.name, ".workspace", "state.json");
       const legacyStateFile = path.join(this.options.root, entry.name, "state.json");
-      if (!(await exists(stateFile)) && !(await exists(legacyStateFile))) continue;
+      const primary = (await exists(stateFile)) ? stateFile : (await exists(legacyStateFile)) ? legacyStateFile : undefined;
+      if (primary === undefined) continue;
       try {
-        const repository = new FileProjectRepository(this.options.root, entry.name, { layout: "project", materialize: true });
-        const state = await repository.read();
-        summaries.push({ project_id: state.project_id, ...(state.project_name === undefined ? {} : { project_name: state.project_name }), status: state.project_status, path: repository.projectDirectory });
+        const raw = await readFile(primary, "utf8");
+        const state = JSON.parse(raw) as ProjectState;
+        summaries.push({ project_id: state.project_id, ...(state.project_name === undefined ? {} : { project_name: state.project_name }), status: state.project_status, path: path.join(this.options.root, entry.name) });
       } catch {
-        // An incomplete directory is not presented as a selectable project.
+        // A damaged state file is still surfaced so the folder is not silently hidden.
+        summaries.push({ project_id: entry.name, status: "uninitialized", path: path.join(this.options.root, entry.name) });
       }
     }
     return summaries.sort((left, right) => left.path.localeCompare(right.path));
@@ -115,7 +117,7 @@ export class WorkspaceProjectManager {
     const summaries = await this.listProjects();
     const selected = summaries.find((item) => item.project_id === requested || item.project_name === requested || path.basename(item.path) === requested);
     if (selected === undefined) throw new CoreError("PROJECT_NOT_FOUND", `找不到專案「${requested}」 (project was not found)`, true);
-    this.repositoryValue = new FileProjectRepository(this.options.root, selected.project_id, { layout: "project", materialize: true });
+    this.repositoryValue = new FileProjectRepository(this.options.root, path.basename(selected.path), { layout: "project", materialize: true });
     this.runtimeValue = this.options.createRuntime(this.repositoryValue);
     this.placeholderReuseAllowed = false;
     this.sessionPrepared = true;
@@ -150,6 +152,7 @@ export class WorkspaceProjectManager {
       target = `${base}-${suffix}`;
       suffix += 1;
     }
+    if (target !== this.repositoryValue.projectId) await this.repositoryValue.relocate(target);
     const updated = await this.repositoryValue.commit(state.revision, (current) => ({
       ...current,
       project_id: target,
@@ -157,7 +160,6 @@ export class WorkspaceProjectManager {
       project_slug: target,
       project_status: "ready",
     }));
-    if (target !== this.repositoryValue.projectId) await this.repositoryValue.relocate(target);
     return {
       ...result,
       project_id: updated.project_id,

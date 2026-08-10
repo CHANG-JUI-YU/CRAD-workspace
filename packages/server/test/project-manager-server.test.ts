@@ -8,7 +8,17 @@ import { startWorkspaceServer } from "../src/index.js";
 const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  for (const root of roots.splice(0)) {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        await rm(root, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        if (attempt === 9) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+  }
 });
 
 describe("project manager HTTP and MCP boundary", () => {

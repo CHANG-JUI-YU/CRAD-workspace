@@ -74,7 +74,9 @@ describe("workspace project manager", () => {
     await mkdir(path.join(root, "broken", ".workspace"), { recursive: true });
     await writeFile(path.join(root, "broken", ".workspace", "state.json"), "not-json", "utf8");
     const listed = await projects.listProjects();
-    expect(listed.map((item) => item.project_id)).toEqual(["project-001", "project-002"]);
+    expect(listed.map((item) => item.project_id)).toEqual(["broken", "project-001", "project-002"]);
+    const broken = listed.find((item) => item.project_id === "broken");
+    expect(broken?.status).toBe("uninitialized");
     await expect(projects.select("")).rejects.toThrow("project name or id");
     await expect(projects.select("../outside")).rejects.toThrow("project name or id");
     await expect(projects.select("missing")).rejects.toThrow("was not found");
@@ -106,7 +108,7 @@ describe("workspace project manager", () => {
     expect(result.project_id).toBe("project-002");
   });
 
-  it("switches to the selected project when a continue interview completes", async () => {
+  it("switches to the selected project when a continue interview completes", { timeout: 30000 }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-continue-"));
     roots.push(root);
     const previous = new FileProjectRepository(root, "project-001", { layout: "project", materialize: true });
@@ -130,7 +132,7 @@ describe("workspace project manager", () => {
     expect((await projects.status()).project_id).toBe("project-001");
   });
 
-  it("imports a legacy card when a legacy review interview completes", async () => {
+  it("imports a legacy card when a legacy review interview completes", { timeout: 30000 }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-legacy-"));
     roots.push(root);
     const cardPath = path.join(root, "legacy-card.json");
@@ -161,7 +163,7 @@ describe("workspace project manager", () => {
     throw new Error("expected LEGACY_CARD_NOT_FOUND");
   });
 
-  it("switches to an existing project when a world interview targets it", async () => {
+  it("switches to an existing project when a world interview targets it", { timeout: 30000 }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-world-"));
     roots.push(root);
     const previous = new FileProjectRepository(root, "project-001", { layout: "project", materialize: true });

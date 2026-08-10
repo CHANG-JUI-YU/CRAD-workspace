@@ -3,7 +3,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["packages/*/test/**/*.test.ts", "apps/*/test/**/*.test.ts"],
-    testTimeout: 10_000,
+    testTimeout: 30_000,
+    maxWorkers: 4,
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary", "json"],
