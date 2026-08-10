@@ -243,7 +243,9 @@ export class ReviewService {
       }));
       return { issue_ids: [], status: "needs_input", summary: "目前沒有可審查的 artifact。" };
     }
-    if (target.created_by === actor) {
+    const creatingOperation = initial.operations.find((item) => item.id === target.operation_id);
+    const sameOperator = creatingOperation?.actor !== undefined && creatingOperation.actor === auditActor;
+    if (target.created_by === actor || sameOperator) {
       await this.repository.commit(initial.revision, (current) => ({
         ...current,
         operations: current.operations.map((item) => item.id === operationId

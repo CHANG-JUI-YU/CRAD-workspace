@@ -386,6 +386,21 @@ export interface OperationProgress {
   artifact_id?: string;
 }
 
+/** Reference to an attachment persisted outside the project state. */
+export interface OperationAttachmentRef {
+  id: string;
+  name: string;
+  media_type?: string;
+}
+
+/** Versioned typed command persisted with the operation so crash recovery can replay the original payload. */
+export interface OperationCommand {
+  version: 1;
+  type: "template_proposal" | "zhuji_proposal" | "import" | "source_resume" | "source_search" | "source_select" | "issue_update" | "request";
+  payload?: unknown;
+  attachment_refs?: OperationAttachmentRef[];
+}
+
 export interface OperationRecord {
   id: string;
   kind: "source" | "knowledge" | "authoring" | "review" | "build" | "import" | "interview" | "status" | "unknown";
@@ -397,6 +412,13 @@ export interface OperationRecord {
   progress: OperationProgress[];
   question?: string;
   result_summary?: string;
+  command?: OperationCommand;
+  idempotency_key?: string;
+  lease_owner?: string;
+  lease_token?: string;
+  lease_expires_at?: string;
+  attempt?: number;
+  last_error?: string;
 }
 
 export interface AuditEvent {
@@ -744,6 +766,22 @@ const operationSchema = z.object({
   progress: z.array(operationProgressSchema),
   question: z.string().optional(),
   result_summary: z.string().optional(),
+  command: z.object({
+    version: z.literal(1),
+    type: z.enum(["template_proposal", "zhuji_proposal", "import", "source_resume", "source_search", "source_select", "issue_update", "request"]),
+    payload: z.unknown().optional(),
+    attachment_refs: z.array(z.object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      media_type: z.string().optional(),
+    }).strict()).optional(),
+  }).strict().optional(),
+  idempotency_key: z.string().optional(),
+  lease_owner: z.string().min(1).optional(),
+  lease_token: z.string().min(1).optional(),
+  lease_expires_at: z.string().datetime({ offset: true }).optional(),
+  attempt: z.number().int().nonnegative().optional(),
+  last_error: z.string().optional(),
 }).strict();
 
 const auditEventSchema = z.object({
@@ -964,6 +1002,7 @@ function validateState(state: ProjectState): ProjectState {
 }
 
 export interface ProjectRepository {
+  readonly projectId?: string;
   read(): Promise<ProjectState>;
   transaction<T>(expectedRevision: number, work: RepositoryTransactionWork<T>): Promise<RepositoryTransactionCommit<T>>;
   commit(expectedRevision: number, mutate: (state: ProjectState) => ProjectState, writeSet?: RepositoryWriteSet): Promise<ProjectState>;
@@ -2449,6 +2488,74 @@ function isPublicArtifactKind(kind: ArtifactKind): boolean {
     || kind === "wardrobe"
     || kind === "plugin"
     || kind === "unknown";
+}
+
+/** Durable storage for operation attachments referenced by OperationCommand.attachment_refs. */
+export interface AttachmentStore {
+  save(operationId: string, attachments: readonly SourceAttachment[]): Promise<OperationAttachmentRef[]>;
+  load(operationId: string, refs: readonly OperationAttachmentRef[]): Promise<SourceAttachment[]>;
+}
+
+export class InMemoryAttachmentStore implements AttachmentStore {
+  private readonly store = new Map<string, Array<{ ref: OperationAttachmentRef; content: Uint8Array }>>();
+
+  async save(operationId: string, attachments: readonly SourceAttachment[]): Promise<OperationAttachmentRef[]> {
+    const refs = attachments.map((attachment) => ({
+      id: internalId("attachment"),
+      name: attachment.name,
+      ...(attachment.media_type === undefined ? {} : { media_type: attachment.media_type }),
+    }));
+    this.store.set(operationId, attachments.map((attachment, index) => ({ ref: refs[index]!, content: attachment.content })));
+    return refs;
+  }
+
+  async load(operationId: string, refs: readonly OperationAttachmentRef[]): Promise<SourceAttachment[]> {
+    const entries = this.store.get(operationId) ?? [];
+    return refs.map((ref) => {
+      const entry = entries.find((candidate) => candidate.ref.id === ref.id);
+      if (entry === undefined) throw new CoreError("ATTACHMENT_NOT_FOUND", `Attachment ${ref.id} of operation ${operationId} is not available in this runtime.`, false);
+      return { name: entry.ref.name, content: entry.content, ...(entry.ref.media_type === undefined ? {} : { media_type: entry.ref.media_type }) };
+    });
+  }
+}
+
+/** File-backed attachment store under `<projectRoot>/<projectId>/.workspace/attachments/<operationId>`. */
+export class FileAttachmentStore implements AttachmentStore {
+  constructor(
+    private readonly projectRoot: string,
+    private readonly projectId: string,
+  ) {}
+
+  private directoryFor(operationId: string): string {
+    return path.join(this.projectRoot, this.projectId, ".workspace", "attachments", operationId);
+  }
+
+  async save(operationId: string, attachments: readonly SourceAttachment[]): Promise<OperationAttachmentRef[]> {
+    const directory = this.directoryFor(operationId);
+    const refs: OperationAttachmentRef[] = [];
+    await mkdir(directory, { recursive: true });
+    for (const attachment of attachments) {
+      const id = internalId("attachment");
+      await writeFile(path.join(directory, id), attachment.content);
+      refs.push({ id, name: attachment.name, ...(attachment.media_type === undefined ? {} : { media_type: attachment.media_type }) });
+    }
+    return refs;
+  }
+
+  async load(operationId: string, refs: readonly OperationAttachmentRef[]): Promise<SourceAttachment[]> {
+    const directory = this.directoryFor(operationId);
+    return Promise.all(refs.map(async (ref) => {
+      try {
+        const content = await readFile(path.join(directory, ref.id));
+        return { name: ref.name, content, ...(ref.media_type === undefined ? {} : { media_type: ref.media_type }) };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new CoreError("ATTACHMENT_NOT_FOUND", `Attachment ${ref.id} of operation ${operationId} is missing from the attachment store.`, false);
+        }
+        throw error;
+      }
+    }));
+  }
 }
 
 export function publishedCardExportPath(projectName: string | undefined, projectId: string, artifacts: readonly Pick<ArtifactRecord, "kind">[]): string {

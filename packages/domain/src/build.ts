@@ -12,6 +12,7 @@ import {
   type RepositoryWriteSet,
 } from "@st-workspace/core";
 import { availableCardModes, compileProject, type CardModeSelection } from "@st-workspace/compiler";
+import { buildRequiredArtifactManifest } from "./required-artifacts.js";
 import { validateWorkflow } from "./workflow-gate.js";
 
 export interface BuildExecutionResult {
@@ -71,15 +72,20 @@ export class BuildService {
       return { status: "needs_input", summary: "目前沒有可建置的 artifact。" };
     }
     const availableModes = availableCardModes(initial.artifacts);
-    const modeSelection = availableModes.zhuji && availableModes.palette
-      ? options.mode_selection
-      : availableModes.zhuji
-        ? "zhuji"
-        : availableModes.palette
-          ? "palette"
-          : undefined;
+    const manifest = buildRequiredArtifactManifest(initial);
+    const manifestMode = manifest === undefined || manifest.export_modes === "both" ? undefined : manifest.export_modes;
+    const modeUsable = (selection: CardModeSelection): boolean => {
+      if (manifestMode !== undefined) {
+        if (selection === "both" || selection !== manifestMode) return false;
+        return availableModes[manifestMode];
+      }
+      return availableModes[selection === "both" ? "zhuji" : selection];
+    };
+    const modeSelection = options.mode_selection ?? (manifestMode !== undefined && availableModes[manifestMode] ? manifestMode : undefined);
     if (availableModes.zhuji && availableModes.palette && modeSelection === undefined) {
-      const question = "本次打包同時有珠璣與調色盤模組，請選擇：珠璣、調色盤，或兩者。";
+      const question = manifestMode === undefined
+        ? "本次打包同時有珠璣與調色盤模組，請選擇：珠璣、調色盤，或兩者。"
+        : `Blueprint 選定 ${manifestMode === "zhuji" ? "珠璣" : "調色盤"}，但目前沒有可用的${manifestMode === "zhuji" ? "珠璣" : "調色盤"}模組。`;
       await this.repository.commit(initial.revision, (current) => ({
         ...current,
         operations: current.operations.map((item) => item.id === operationId
@@ -92,12 +98,12 @@ export class BuildService {
           actor,
           occurred_at: now(),
           project_revision: current.revision + 1,
-          details: { available_modes: ["zhuji", "palette"] },
+          details: { available_modes: ["zhuji", "palette"], ...(manifestMode === undefined ? {} : { manifest_mode: manifestMode }) },
         }],
       }));
       return { status: "needs_input", summary: question };
     }
-    if (modeSelection !== undefined && !availableModes[modeSelection === "both" ? "zhuji" : modeSelection]) {
+    if (modeSelection !== undefined && !modeUsable(modeSelection)) {
       const question = `本次打包可用模式為${availableModes.zhuji ? "珠璣" : ""}${availableModes.zhuji && availableModes.palette ? "、" : ""}${availableModes.palette ? "調色盤" : ""}，請重新選擇。`;
       await this.repository.commit(initial.revision, (current) => ({
         ...current,

@@ -17,6 +17,18 @@ export { ImportService, type ImportExecutionResult } from "./import.js";
 export { KnowledgeService, type FactReviewExecutionResult, type FactReviewRunExecutionResult, type KnowledgeExecutionResult } from "./knowledge.js";
 export { ReviewService, type IssueUpdateAction, type IssueUpdateInput, type IssueUpdateResult, type ReviewExecutionResult } from "./review.js";
 export { validateWorkflow, type WorkflowDiagnostic, type WorkflowGatePhase, type WorkflowGateResult } from "./workflow-gate.js";
+export {
+  PALETTE_REQUIRED_MODULES,
+  ZHUJI_REQUIRED_MODULES,
+  buildRequiredArtifactManifest,
+  manifestBindingHash,
+  type CardMode,
+  type ManifestCardModeSelection,
+  type ManifestCharacterRequirement,
+  type ManifestDiagnostic,
+  type ManifestFeatureRequirement,
+  type RequiredArtifactManifest,
+} from "./required-artifacts.js";
 
 export interface FetchResult {
   content: Uint8Array;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MemoryProjectRepository, contentHash, createProjectState, qualityProfileForLevel, type ArtifactRecord, type IssueSeverity, type OperationRecord } from "@st-workspace/core";
+import { MemoryProjectRepository, contentHash, createProjectState, qualityProfileForLevel, type ArtifactRecord, type BlueprintPrecheckRecord, type IssueSeverity, type OperationRecord } from "@st-workspace/core";
 import { AuthoringService, validateWorkflow } from "../src/index.js";
 
 const now = new Date().toISOString();
@@ -237,5 +237,81 @@ describe("workflow gates and editable publish", () => {
     const result = validateWorkflow(await repository.read(), "publish");
     expect(result.ok).toBe(false);
     expect(result.diagnostics.map((item) => item.code)).toEqual(expect.arrayContaining(["INTERVIEW_REQUIRED", "SOURCE_RESEARCH_OFFICIAL_REQUIRED", "ARTIFACT_REVIEW_REQUIRED"]));
+  });
+
+  it("gates publish on the Blueprint-selected mode, world and relationships", async () => {
+    const repository = new MemoryProjectRepository("manifest-gate");
+    const precheck: BlueprintPrecheckRecord = {
+      id: "precheck-manifest",
+      schema_version: 1,
+      project_id: "manifest-gate",
+      operation_id: "interview-manifest",
+      collaboration_mode: "assisted",
+      candidate_blueprint: {
+        flow: "source_adaptation",
+        collaboration_mode: "assisted",
+        characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "zhuji" }],
+        world: { enabled: true, authoring_timing: "before_character" },
+        relationships: { enabled: true },
+      },
+      candidate_blueprint_revision: contentHash("manifest-candidate"),
+      checks: [{ subject_id: "manifest-gate", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }],
+      status: "recorded",
+      created_at: now,
+      created_by: "director",
+    };
+    const target = artifact("character-1", "character:demo", "character", "demo", character("demo"));
+    const zhuji = artifact("zhuji-1", "zhuji:demo/appearance", "zhuji", "demo/appearance", { kind: "zhuji", character_id: "demo", module: { schema_version: 1, mode: "zhuji", module: "appearance", title: "Appearance", content: "Tall." } });
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete" },
+      blueprint_prechecks: [precheck],
+      artifacts: [target, zhuji],
+      reviews: [{ id: "review-character", artifact_id: target.id, artifact_revision: target.revision, reviewer: "critic", status: "passed", issue_ids: [], created_at: now }],
+      operations: [operation("op-publish")],
+    }));
+    const result = validateWorkflow(await repository.read(), "publish");
+    expect(result.ok).toBe(false);
+    const codes = result.diagnostics.map((item) => item.code);
+    expect(codes).toContain("REQUIRED_WORLD_ARTIFACT_MISSING");
+    expect(codes).toContain("REQUIRED_RELATIONSHIPS_ARTIFACT_MISSING");
+    expect(codes).toContain("MODE_MODULES_INCOMPLETE");
+  });
+
+  it("does not block publish on artifacts outside the Blueprint-selected mode", async () => {
+    const repository = new MemoryProjectRepository("manifest-scope");
+    const precheck: BlueprintPrecheckRecord = {
+      id: "precheck-scope",
+      schema_version: 1,
+      project_id: "manifest-scope",
+      operation_id: "interview-scope",
+      collaboration_mode: "assisted",
+      candidate_blueprint: {
+        flow: "source_adaptation",
+        collaboration_mode: "assisted",
+        characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "zhuji" }],
+      },
+      candidate_blueprint_revision: contentHash("scope-candidate"),
+      checks: [{ subject_id: "manifest-scope", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }],
+      status: "recorded",
+      created_at: now,
+      created_by: "director",
+    };
+    const target = artifact("character-scope", "character:demo", "character", "demo", character("demo"));
+    const moduleNames = ["appearance", "inner_nature", "extension", "trait_refinement", "trait_dialogue", "scene_dialogue", "self_introduction"];
+    const modules = moduleNames.map((module, index) => artifact(`zhuji-scope-${index}`, `zhuji:demo/${module}`, "zhuji", `demo/${module}`, { kind: "zhuji", character_id: "demo", module: { schema_version: 1, mode: "zhuji", module, title: module, content: "Complete module content." } }));
+    const greeting = artifact("greeting-scope", "greeting:demo", "greeting", "demo", { document: { greetings: [{ character_ids: ["demo"], text: "Hello." }] } });
+    const outOfScope = artifact("palette-out", "palette:demo/basic_information", "palette", "demo/basic_information", { kind: "palette", character_id: "demo", module: { schema_version: 1, mode: "palette", module: "basic_information", title: "Basic", content: "Unreviewed." } });
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete" },
+      blueprint_prechecks: [precheck],
+      artifacts: [target, ...modules, greeting, outOfScope],
+      reviews: [target, ...modules, greeting].map((item, index) => ({ id: `review-scope-${index}`, artifact_id: item.id, artifact_revision: item.revision, reviewer: "critic", status: "passed", issue_ids: [], created_at: now })),
+      operations: [operation("op-publish")],
+    }));
+    expect(validateWorkflow(await repository.read(), "publish")).toMatchObject({ ok: true, diagnostics: [] });
   });
 });

@@ -2,7 +2,7 @@ import { copyFile, constants, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { HttpSourceFetcher, inspectLegacyProject } from "@st-workspace/adapters";
 import { compileWorkspaceBundle } from "@st-workspace/compiler";
-import { FileProjectRepository } from "@st-workspace/core";
+import { FileAttachmentStore, FileProjectRepository } from "@st-workspace/core";
 import { AgentAdapter, WorkspaceProjectManager, WorkspaceRuntime } from "@st-workspace/runtime";
 import { startWorkspaceServer } from "@st-workspace/server";
 
@@ -32,9 +32,9 @@ if (command === "agents") {
   const requestedProject = process.env.ST_WORKSPACE_PROJECT;
   const selectedProject = typeof requestedProject === "string" && requestedProject.trim().length > 0 ? requestedProject.trim() : undefined;
   const manager = selectedProject === undefined
-    ? new WorkspaceProjectManager({ root, createRuntime: (repository) => new WorkspaceRuntime(repository, { interviewRequired: true }) })
+    ? new WorkspaceProjectManager({ root, createRuntime: (repository) => new WorkspaceRuntime(repository, { interviewRequired: true, attachmentStore: new FileAttachmentStore(root, repository.projectId) }) })
     : undefined;
-  const runtime = manager?.runtime ?? new WorkspaceRuntime(new FileProjectRepository(root, selectedProject ?? "default", { layout: "project", materialize: true }));
+  const runtime = manager?.runtime ?? new WorkspaceRuntime(new FileProjectRepository(root, selectedProject ?? "default", { layout: "project", materialize: true }), { attachmentStore: new FileAttachmentStore(root, selectedProject ?? "default") });
   const agentAdapter = new AgentAdapter(runtime);
   console.log(JSON.stringify({ default_agent: "director", agents: agentAdapter.list() }, null, 2));
 } else {
@@ -73,9 +73,9 @@ const attachments = attachmentPath === undefined ? [] : [{ name: attachmentPath.
 const requestedProject = process.env.ST_WORKSPACE_PROJECT;
 const selectedProject = typeof requestedProject === "string" && requestedProject.trim().length > 0 ? requestedProject.trim() : undefined;
 const manager = selectedProject === undefined
-  ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true }) })
+  ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true, attachmentStore: new FileAttachmentStore(projectRoot, repository.projectId) }) })
   : undefined;
-const runtime = manager?.runtime ?? new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject ?? "default", { layout: "project", materialize: true }), { fetcher: fetcher.fetch });
+const runtime = manager?.runtime ?? new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject ?? "default", { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject ?? "default") });
 const agentAdapter = new AgentAdapter(runtime);
 const result = command === "status"
   ? manager === undefined ? await runtime.status() : await manager.status()

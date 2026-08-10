@@ -1,4 +1,5 @@
 import { parseWardrobeMarkdown, type ArtifactRecord, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
+import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "./required-artifacts.js";
 
 export type WorkflowGatePhase = "draft" | "publish";
 
@@ -136,7 +137,14 @@ function referenceSet(artifacts: ArtifactRecord[]): Set<string> {
   return ids;
 }
 
-function reportMissingReferences(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[]): void {
+function inScopeArtifacts(artifacts: ArtifactRecord[], manifest: RequiredArtifactManifest | undefined): ArtifactRecord[] {
+  if (manifest === undefined) return artifacts;
+  const scoped = new Set(manifest.in_scope_artifact_ids);
+  return artifacts.filter((artifact) => scoped.has(artifact.id));
+}
+
+function reportMissingReferences(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], manifest?: RequiredArtifactManifest): void {
+  artifacts = inScopeArtifacts(artifacts, manifest);
   const characters = referenceSet(artifacts);
   const worldIds = new Set<string>();
   for (const artifact of artifacts.filter((item) => item.kind === "world_lore")) {
@@ -204,8 +212,8 @@ function reportMissingReferences(state: ProjectState, artifacts: ArtifactRecord[
   }
 }
 
-function reportReviews(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[]): void {
-  const reviewable = artifacts.filter((artifact) => contentKinds.has(artifact.kind));
+function reportReviews(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], manifest?: RequiredArtifactManifest): void {
+  const reviewable = inScopeArtifacts(artifacts, manifest).filter((artifact) => contentKinds.has(artifact.kind));
   for (const artifact of reviewable) {
     const reviewed = state.reviews.some((review) => review.artifact_id === artifact.id && review.artifact_revision === artifact.revision);
     if (!reviewed) {
@@ -227,8 +235,8 @@ function currentEffectiveSeverity(state: ProjectState, issue: ProjectState["issu
   return severityRank(target) < severityRank(baseline) ? target : baseline;
 }
 
-function reportBlockingIssues(state: ProjectState, content: ArtifactRecord[], diagnostics: WorkflowDiagnostic[]): void {
-  const artifactIds = new Set(content.map((artifact) => artifact.id));
+function reportBlockingIssues(state: ProjectState, content: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], manifest?: RequiredArtifactManifest): void {
+  const artifactIds = new Set(inScopeArtifacts(content, manifest).map((artifact) => artifact.id));
   const blockingIssues = state.issues.filter((issue) => issue.status === "open" && artifactIds.has(issue.artifact_id) && severityRank(currentEffectiveSeverity(state, issue)) >= blockingRank(state.quality_profile.blocking_severity));
   if (blockingIssues.length > 0) {
     add(diagnostics, {
@@ -240,8 +248,8 @@ function reportBlockingIssues(state: ProjectState, content: ArtifactRecord[], di
   }
 }
 
-function reportWardrobe(artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[]): void {
-  for (const artifact of artifacts.filter((item) => item.kind === "wardrobe")) {
+function reportWardrobe(artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], manifest?: RequiredArtifactManifest): void {
+  for (const artifact of inScopeArtifacts(artifacts, manifest).filter((item) => item.kind === "wardrobe")) {
     const parsed = parseWardrobeMarkdown(artifact.content);
     for (const error of parsed.errors) {
       add(diagnostics, {
@@ -481,21 +489,28 @@ export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase):
   if (phase === "draft") return { ok: diagnostics.length === 0, diagnostics };
   const artifacts = latestArtifacts(state);
   const content = artifacts.filter((artifact) => contentKinds.has(artifact.kind));
+  const manifest = buildRequiredArtifactManifest(state);
   if (managed) {
     if (state.project_status === "interviewing" || state.interview.status === "active") {
       add(diagnostics, { code: "INTERVIEW_REQUIRED", message: "The project interview must be complete before publishing.", severity: "error" });
     }
     if (content.length === 0) add(diagnostics, { code: "PUBLISH_NO_CONTENT", message: "Publish requires at least one character, world, greeting, relationship, module, or plugin artifact.", severity: "error" });
-    if (state.interview.flow === "world" && !artifacts.some((artifact) => artifact.kind === "world_lore")) {
+    if (manifest === undefined && state.interview.flow === "world" && !artifacts.some((artifact) => artifact.kind === "world_lore")) {
       add(diagnostics, { code: "REQUIRED_WORLD_ARTIFACT_MISSING", message: "The world interview path requires at least one world-lore artifact before publishing.", severity: "error" });
     }
-    reportReviews(state, artifacts, diagnostics);
+    if (manifest !== undefined) {
+      for (const item of manifest.diagnostics) {
+        if (item.severity !== "error") continue;
+        add(diagnostics, { code: item.code, message: item.message, severity: item.severity });
+      }
+    }
+    reportReviews(state, artifacts, diagnostics, manifest);
   }
-  reportWardrobe(artifacts, diagnostics);
+  reportWardrobe(artifacts, diagnostics, manifest);
   reportSourceResearch(state, artifacts, diagnostics);
-  reportMissingReferences(state, artifacts, diagnostics);
+  reportMissingReferences(state, artifacts, diagnostics, manifest);
   reportFacts(state, diagnostics);
   reportDerivedLinks(state, artifacts, diagnostics);
-  reportBlockingIssues(state, content, diagnostics);
+  reportBlockingIssues(state, content, diagnostics, manifest);
   return { ok: diagnostics.length === 0, diagnostics };
 }

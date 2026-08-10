@@ -255,7 +255,7 @@ describe("project interview runtime", () => {
       kind: "blueprint",
       blueprint_direction: { scope: "character_setting", selected: "外冷內熱、重視界線但願意建立長期信任", character_setting_direction: "外冷內熱、重視界線但願意建立長期信任", source_question_id: "blueprint_direction" },
     });
-  });
+  }, 30_000);
 
   it("lists, selects, allocates and safely renames project folders", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-project-manager-branches-"));

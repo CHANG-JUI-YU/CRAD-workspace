@@ -1,4 +1,4 @@
-import { internalId, type RequestResult, type WorkspaceContext } from "@st-workspace/core";
+import { CoreError, internalId, type RequestResult, type WorkspaceContext } from "@st-workspace/core";
 import type { WorkspaceRuntime } from "./index.js";
 
 export interface WorkspaceWorkerOptions {
@@ -61,6 +61,7 @@ export class WorkspaceWorker {
   private readonly attempts = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | undefined;
   private pumping = false;
+  private currentPump: Promise<void> | undefined;
   private activeOperationId: string | undefined;
   private lastError: string | undefined;
 
@@ -84,9 +85,11 @@ export class WorkspaceWorker {
     void this.pump();
   }
 
-  stop(): void {
+  /** Stop polling and wait until any in-flight pump has settled. */
+  async stop(): Promise<void> {
     if (this.timer !== undefined) clearInterval(this.timer);
     this.timer = undefined;
+    await this.currentPump;
   }
 
   status(): WorkspaceWorkerStatus {
@@ -105,6 +108,7 @@ export class WorkspaceWorker {
       this.jobs.push({ id: jobId, request: input.request, context: input.context, ...(input.agent === undefined ? {} : { agent: input.agent }), attempts: 0, resolve, reject });
     });
     this.results.set(jobId, result);
+    void result.then(() => this.results.delete(jobId), () => this.results.delete(jobId));
     void result.catch(() => undefined);
     this.onEvent({ type: "job.queued", job_id: jobId });
     if (this.timer === undefined) this.start();
@@ -122,23 +126,36 @@ export class WorkspaceWorker {
   private async pump(): Promise<void> {
     if (this.pumping || this.timer === undefined) return;
     this.pumping = true;
-    try {
-      const job = this.jobs.shift();
-      if (job !== undefined) {
-        await this.runJob(job);
-        return;
+    const run = (async () => {
+      try {
+        await this.pumpImpl();
+      } catch (error) {
+        this.lastError = errorMessage(error);
+        this.onEvent({ type: "worker.error", error: this.lastError });
       }
-      const recoverable = await (await this.runtimeProvider()).recoverableOperations();
-      for (const operation of recoverable) {
-        if (this.activeOperationId !== undefined) break;
-        await this.runOperation(operation.id, operation.actor ?? this.actor);
-      }
-    } catch (error) {
-      this.lastError = errorMessage(error);
-      this.onEvent({ type: "worker.error", error: this.lastError });
-    } finally {
+    })().finally(() => {
       this.pumping = false;
+      this.currentPump = undefined;
+    });
+    this.currentPump = run;
+    await run;
+  }
+
+  private async pumpImpl(): Promise<void> {
+    const job = this.jobs.shift();
+    if (job !== undefined) {
+      await this.runJob(job);
+      return;
     }
+    const recoverable = await (await this.runtimeProvider()).recoverableOperations();
+    for (const operation of recoverable) {
+      if (this.activeOperationId !== undefined) break;
+      await this.runOperation(operation.id, operation.actor ?? this.actor);
+    }
+  }
+
+  private recoverableError(error: unknown): boolean {
+    return !(error instanceof CoreError && error.recoverable === false);
   }
 
   private async runJob(job: WorkerJob): Promise<void> {
@@ -147,9 +164,10 @@ export class WorkspaceWorker {
       try {
         const result = await (await this.runtimeProvider()).request(job.request, job.context, job.agent === undefined ? {} : { agent: job.agent });
         job.resolve(result);
+        this.lastError = undefined;
         return;
       } catch (error) {
-        if (job.attempts > this.maxRetries) {
+        if (!this.recoverableError(error) || job.attempts > this.maxRetries) {
           job.reject(error);
           this.lastError = errorMessage(error);
           this.onEvent({ type: "operation.failed", operation_id: job.id, error: this.lastError });
@@ -162,21 +180,28 @@ export class WorkspaceWorker {
   }
 
   private async runOperation(operationId: string, actor: string): Promise<void> {
-    const attempt = (this.attempts.get(operationId) ?? 0) + 1;
+    const runtime = await this.runtimeProvider();
+    const claimed = await runtime.claimOperation(operationId, actor);
+    if (claimed === undefined) return;
+    const token = claimed.lease_token ?? "";
+    const attempt = claimed.attempt ?? 1;
     this.attempts.set(operationId, attempt);
     this.activeOperationId = operationId;
     this.onEvent({ type: "operation.started", operation_id: operationId, attempt });
     try {
-      const result = await (await this.runtimeProvider()).recoverOperation(operationId, { actor, attachments: [] });
+      const result = await runtime.recoverOperation(operationId, { actor, attachments: [] });
+      await runtime.releaseOperationLease(operationId, actor, token);
       this.attempts.delete(operationId);
+      this.lastError = undefined;
       this.onEvent({ type: "operation.completed", operation_id: operationId, result });
     } catch (error) {
       const message = errorMessage(error);
-      if (attempt <= this.maxRetries) {
+      await runtime.releaseOperationLease(operationId, actor, token);
+      if (this.recoverableError(error) && attempt <= this.maxRetries) {
         this.onEvent({ type: "operation.retry", operation_id: operationId, attempt, error: message });
         await delay(this.retryDelayMs * attempt);
       } else {
-        await (await this.runtimeProvider()).failOperation(operationId, error, actor);
+        await runtime.failOperation(operationId, error, actor);
         this.attempts.delete(operationId);
         this.lastError = message;
         this.onEvent({ type: "operation.failed", operation_id: operationId, error: message });

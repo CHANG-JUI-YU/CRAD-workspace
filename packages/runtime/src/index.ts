@@ -8,6 +8,7 @@ import {
   createQualityPolicySnapshot,
   validateFactReferences,
   internalId,
+  InMemoryAttachmentStore,
   InterviewError,
   normalizeInterviewStateForDisplay,
   parseRelationshipParticipants,
@@ -21,11 +22,14 @@ import {
   type OperationRecord,
   type ArtifactRecord,
   type AdaptationDecision,
+  type AttachmentStore,
   type AuthoringKnowledgeContext,
   type FactReviewContext,
+  type OperationCommand,
   type ProjectState,
   type ProjectRepository,
   type RequestResult,
+  type SourceAttachment,
   type BlueprintPrecheckCheck,
   type BlueprintPrecheckRecord,
   type InterviewState,
@@ -47,6 +51,8 @@ import {
   KnowledgeService,
   ReviewService,
   SourceService,
+  PALETTE_REQUIRED_MODULES,
+  ZHUJI_REQUIRED_MODULES,
   type IssueUpdateInput,
   type SourceSelectionDecision,
   type SourceFetcher,
@@ -58,6 +64,16 @@ function now(): string {
 }
 
 type BuildModeSelection = "zhuji" | "palette" | "both";
+
+const OPERATION_LEASE_MS = 60_000;
+
+/** Remove lease fields from a record so they are absent (not `undefined`) in persisted state. */
+function stripLease<TOperation extends { lease_owner?: string; lease_token?: string; lease_expires_at?: string }>(
+  operation: TOperation,
+): Omit<TOperation, "lease_owner" | "lease_token" | "lease_expires_at"> {
+  const { lease_owner: _owner, lease_token: _token, lease_expires_at: _expires, ...rest } = operation;
+  return rest;
+}
 
 function parseBuildModeSelection(value: string): BuildModeSelection | undefined {
   const normalized = value.trim().toLocaleLowerCase();
@@ -88,22 +104,9 @@ function isBlueprintConfirmation(value: string): boolean {
   return /^(?:確認|確定|接受|同意|可以|好|yes|y|ok|okay|confirm|accept)(?:[\s,，。.!！]|$)/iu.test(value.trim());
 }
 
-const ZHUJI_MODULE_ORDER: readonly ZhujiModuleKind[] = [
-  "appearance",
-  "inner_nature",
-  "extension",
-  "trait_refinement",
-  "trait_dialogue",
-  "scene_dialogue",
-  "self_introduction",
-];
+const ZHUJI_MODULE_ORDER: readonly string[] = ZHUJI_REQUIRED_MODULES;
 
-const PALETTE_MODULE_ORDER = [
-  "basic_information",
-  "personality_palette",
-  "tri_faceted",
-  "secondary_interpretation",
-] as const;
+const PALETTE_MODULE_ORDER: readonly string[] = PALETTE_REQUIRED_MODULES;
 
 function hasUsableArtifact(_artifact: ProjectState["artifacts"][number]): boolean {
   // v3 currently models artifact liveness through revision replacement rather
@@ -142,6 +145,7 @@ function blueprintContent(precheck: BlueprintPrecheckRecord): string {
     characters: candidate.characters,
     relationships: candidate.relationships,
     blueprint_direction: candidate.blueprint_direction,
+    primary_character_id: candidate.primary_character_id,
     intake_values: candidate.intake_values,
     provenance: {
       blueprint_precheck_id: precheck.id,
@@ -346,6 +350,7 @@ function buildBlueprintPrecheck(projectId: string, operationId: string, intervie
     collaboration_mode: mode,
     ...(worldConfig(interview) === undefined ? {} : { world: worldConfig(interview) }),
     characters,
+    ...(characters[0] === undefined ? {} : { primary_character_id: characters[0].id }),
     ...(relationshipConfig(interview, subjects) === undefined ? {} : { relationships: relationshipConfig(interview, subjects) }),
     ...(interview.flow === "source_adaptation" ? { source_adaptation: sourceAdaptationIntentFromValues(values) } : {}),
     // Keep the legacy mirror for old creators and readers when there is one subject.
@@ -445,9 +450,10 @@ export class WorkspaceRuntime {
   private readonly searcher: ((request: string) => Promise<Array<{ title: string; url: string; snippet?: string; content?: string; media_type?: string }>>) | undefined;
   private readonly fetcher: SourceFetcher | undefined;
   private readonly interviewRequired: boolean;
+  private readonly attachmentStore: AttachmentStore;
   private readonly agents = new AgentRouter();
 
-  constructor(private readonly repository: ProjectRepository, options: { searcher?: (request: string) => Promise<Array<{ title: string; url: string; snippet?: string; content?: string; media_type?: string; domain?: string; official?: boolean }>>; fetcher?: SourceFetcher; interviewRequired?: boolean } = {}) {
+  constructor(private readonly repository: ProjectRepository, options: { searcher?: (request: string) => Promise<Array<{ title: string; url: string; snippet?: string; content?: string; media_type?: string; domain?: string; official?: boolean }>>; fetcher?: SourceFetcher; interviewRequired?: boolean; attachmentStore?: AttachmentStore } = {}) {
     this.sources = new SourceService(repository);
     this.knowledge = new KnowledgeService(repository);
     this.authoring = new AuthoringService(repository);
@@ -457,6 +463,7 @@ export class WorkspaceRuntime {
     this.searcher = options.searcher;
     this.fetcher = options.fetcher;
     this.interviewRequired = options.interviewRequired ?? false;
+    this.attachmentStore = options.attachmentStore ?? new InMemoryAttachmentStore();
   }
 
   async interviewContext(): Promise<{
@@ -581,6 +588,7 @@ export class WorkspaceRuntime {
           }
           : item),
         audit: [
+          ...current.audit,
           ...(blueprintArtifact === undefined ? [] : [{
             id: internalId("audit"),
             operation_id: operation!.id,
@@ -696,6 +704,61 @@ export class WorkspaceRuntime {
   }
 
   /**
+   * Atomically claim a persisted operation with an ownership lease. Only one
+   * caller (synchronous request or worker) may hold an unexpired lease at a
+   * time; a stale lease can be reclaimed after expiry.
+   */
+  async claimOperation(operationId: string, owner: string, leaseMs: number = OPERATION_LEASE_MS): Promise<OperationRecord | undefined> {
+    const state = await this.repository.read();
+    const operation = state.operations.find((item) => item.id === operationId);
+    if (operation === undefined || !["created", "resolving", "running"].includes(operation.status)) return undefined;
+    if (operation.lease_owner !== undefined && operation.lease_expires_at !== undefined && Date.parse(operation.lease_expires_at) > Date.now()) return undefined;
+    const token = internalId("lease");
+    const leaseExpires = new Date(Date.now() + leaseMs).toISOString();
+    const claimed = await this.repository.commit(state.revision, (current) => {
+      const latest = current.operations.find((item) => item.id === operationId);
+      if (latest === undefined || !["created", "resolving", "running"].includes(latest.status)) return current;
+      if (latest.lease_owner !== undefined && latest.lease_expires_at !== undefined && Date.parse(latest.lease_expires_at) > Date.now()) return current;
+      return {
+        ...current,
+        operations: current.operations.map((item) => item.id === operationId
+          ? { ...item, lease_owner: owner, lease_token: token, lease_expires_at: leaseExpires, attempt: (item.attempt ?? 0) + 1, updated_at: now() }
+          : item),
+      };
+    });
+    const latest = claimed.operations.find((item) => item.id === operationId);
+    return latest !== undefined && latest.lease_token === token ? latest : undefined;
+  }
+
+  /** Extend a lease held by the owner. Returns false when ownership was lost. */
+  async renewOperationLease(operationId: string, owner: string, token: string, leaseMs: number = OPERATION_LEASE_MS): Promise<boolean> {
+    const state = await this.repository.read();
+    const operation = state.operations.find((item) => item.id === operationId);
+    if (operation === undefined || operation.lease_owner !== owner || operation.lease_token !== token) return false;
+    const leaseExpires = new Date(Date.now() + leaseMs).toISOString();
+    await this.repository.commit(state.revision, (current) => ({
+      ...current,
+      operations: current.operations.map((item) => item.id === operationId
+        ? { ...item, lease_expires_at: leaseExpires, updated_at: now() }
+        : item),
+    }));
+    return true;
+  }
+
+  /** Clear the lease when the holder still owns it; silently ignores others. */
+  async releaseOperationLease(operationId: string, owner: string, token: string): Promise<void> {
+    const state = await this.repository.read();
+    const operation = state.operations.find((item) => item.id === operationId);
+    if (operation === undefined || operation.lease_owner !== owner || operation.lease_token !== token) return;
+    await this.repository.commit(state.revision, (current) => ({
+      ...current,
+      operations: current.operations.map((item) => item.id === operationId
+        ? { ...stripLease(item), updated_at: now() }
+        : item),
+    }));
+  }
+
+  /**
    * Continue one persisted operation without creating a duplicate operation.
    * Operations that asked a user a question are intentionally excluded from this path.
    */
@@ -714,7 +777,7 @@ export class WorkspaceRuntime {
         : item),
     }));
     const resolution = this.agents.resolve(operation.request, options.agent);
-    return this.executeExistingOperation(operation, effectiveContext, resolution.agent_id);
+    return this.replayOperation(operation, effectiveContext, resolution.agent_id);
   }
 
   /** Mark an operation failed after the worker exhausted its retry budget. */
@@ -739,28 +802,259 @@ export class WorkspaceRuntime {
   }
 
   /* c8 ignore start -- recovery delegates to the same domain services covered by the runtime and worker tests. */
-  private async executeExistingOperation(operation: OperationRecord, context: WorkspaceContext, agent?: string): Promise<RequestResult> {
-    const kind = operation.kind;
-    if (kind === "source") {
-      const executionContext = this.fetcher === undefined ? context : { ...context, fetcher: this.fetcher };
-      const result = context.attachments.length > 0 || /https?:\/\//iu.test(operation.request)
-        ? await this.sources.resume(operation.id, operation.request, executionContext)
-        : await this.sources.execute(operation.id, executionContext);
-      return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.completed, blocked: result.blocked, ...(agent === undefined ? {} : { agent_id: agent }) };
+  private hasAuditMarker(operationId: string, event: string, state: ProjectState): boolean {
+    return state.audit.some((item) => item.operation_id === operationId && item.event === event);
+  }
+
+  private async markedStep<T>(operationId: string, event: string, run: () => Promise<T>): Promise<T | undefined> {
+    const state = await this.repository.read();
+    if (this.hasAuditMarker(operationId, event, state)) return undefined;
+    return run();
+  }
+
+  private async markNeedsInput(operation: OperationRecord, question: string): Promise<RequestResult> {
+    const state = await this.repository.read();
+    await this.repository.commit(state.revision, (current) => ({
+      ...current,
+      operations: current.operations.map((item) => item.id === operation.id
+        ? { ...item, status: "needs_input" as const, question, updated_at: now() }
+        : item),
+    }));
+    return { operation_id: operation.id, status: "needs_input", summary: question, completed: [], blocked: [], question };
+  }
+
+  private async loadOperationAttachments(operation: OperationRecord, command: OperationCommand | undefined): Promise<SourceAttachment[] | undefined> {
+    const refs = command?.attachment_refs ?? [];
+    if (refs.length === 0) return [];
+    try {
+      return await this.attachmentStore.load(operation.id, refs);
+    } catch (error) {
+      if (error instanceof CoreError && error.code === "ATTACHMENT_NOT_FOUND") return undefined;
+      throw error;
     }
+  }
+
+  private async completeReplayedOperation(operation: OperationRecord): Promise<OperationRecord> {
+    const state = await this.repository.read();
+    const latest = state.operations.find((item) => item.id === operation.id);
+    if (latest !== undefined && latest.status === "running") {
+      await this.repository.commit(state.revision, (current) => ({
+        ...current,
+        operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "completed" as const, updated_at: now() } : item),
+      }));
+      return { ...latest, status: "completed", updated_at: now() };
+    }
+    return latest ?? operation;
+  }
+
+  private async replayOperation(operation: OperationRecord, context: WorkspaceContext, agent?: string): Promise<RequestResult> {
+    const command = operation.command;
+    if (command?.type === "template_proposal") return this.replayTemplateProposal(operation, command.payload as TemplateProposalValue, context.actor, agent);
+    if (command?.type === "zhuji_proposal") return this.replayZhujiProposal(operation, command.payload as ZhujiProposalValue, context.actor, agent);
+    if (command?.type === "source_select") return this.replaySourceSelection(operation, command, agent);
+    if (command?.type === "source_search") return this.replaySourceSearch(operation, context, agent);
+    if (command?.type === "issue_update") return this.replayIssueUpdate(operation, command, agent);
+    if (command?.type === "import" || operation.kind === "import") return this.replayImport(operation, command, context, agent);
+    if (command?.type === "source_resume" || operation.kind === "source") return this.replaySource(operation, context, agent);
+    return this.replayRequest(operation, context, agent);
+  }
+
+  private async replayTemplateProposal(operation: OperationRecord, proposal: TemplateProposalValue, actor: string, agent?: string): Promise<RequestResult> {
+    const resolution = this.agents.resolve(`create ${proposal.kind}`, agent ?? defaultAgentForTemplate(proposal));
+    const proposalAgent = resolution.agent_id;
+    const candidateResult = proposal.kind === "source_research" && proposal.candidates.length > 0
+      ? await this.markedStep(operation.id, "source.candidates_registered", () => this.sources.registerCandidates(operation.id, proposal.candidates.map((candidate) => ({
+        title: candidate.title,
+        ...(candidate.url === undefined ? {} : { url: candidate.url }),
+        ...(candidate.domain === undefined ? {} : { domain: candidate.domain }),
+        ...(candidate.official === undefined ? {} : { official: candidate.official }),
+        ...(candidate.snippet === undefined ? {} : { snippet: candidate.snippet }),
+        ...(candidate.content === undefined ? {} : { content: candidate.content }),
+      })), actor))
+      : undefined;
+    let domainSummary: string | undefined;
+    let domainCompleted: string[] = [];
+    if (proposal.kind === "fact_curation") {
+      const applied = await this.markedStep(operation.id, "fact.curation.applied", () => this.knowledge.applyCuration(operation.id, proposal.claims, proposalAgent, actor));
+      if (applied !== undefined) {
+        domainSummary = applied.summary;
+        domainCompleted = applied.facts;
+      }
+    } else if (proposal.kind === "fact_review") {
+      const run = await this.markedStep(operation.id, "fact.review.run.created", () => this.knowledge.beginFactReviewRun(operation.id, proposalAgent, undefined, actor));
+      const runId = run?.id ?? (await this.repository.read()).fact_review_runs.filter((item) => item.status !== "superseded").at(-1)?.id;
+      let applied;
+      if (runId !== undefined) {
+        try {
+          applied = await this.markedStep(operation.id, "fact.review.batch.applied", async () => {
+            const reviewProjection = (await this.knowledge.factReviewContext()).projection_revision;
+            return this.knowledge.applyReviewBatch(operation.id, proposal.decisions, actor, proposalAgent, runId, reviewProjection);
+          });
+        } catch (error) {
+          if (!(error instanceof CoreError && error.code === "FACT_CANDIDATE_NOT_ACTIVE")) throw error;
+        }
+      }
+      if (applied !== undefined) {
+        domainSummary = applied.summary;
+        domainCompleted = applied.fact_ids;
+      }
+      const result = await this.markedStep(operation.id, "template.created", () => this.authoring.createTemplate(operation.id, proposal, proposalAgent, actor));
+      if (result === undefined) return responseFromOperation(await this.completeReplayedOperation(operation));
+      const finalOperation = (await this.repository.read()).operations.find((item) => item.id === operation.id);
+      const needsInput = finalOperation?.status === "needs_input";
+      return {
+        operation_id: operation.id,
+        status: needsInput ? "needs_input" : result.status,
+        summary: [domainSummary, result.summary].filter((item): item is string => item !== undefined).join(" "),
+        completed: [...domainCompleted, ...(result.artifact_ids ?? (result.artifact_id === undefined ? [] : [result.artifact_id]))],
+        blocked: needsInput ? domainCompleted : [],
+        agent_id: proposalAgent,
+        agent_role: resolution.agent_role,
+      };
+    } else if (proposal.kind === "review") {
+      const applied = await this.markedStep(operation.id, "review.proposal.applied", () => this.review.applyProposal(operation.id, proposal, proposalAgent, actor));
+      if (applied !== undefined) {
+        domainSummary = applied.summary;
+        domainCompleted = [...(applied.review_id === undefined ? [] : [applied.review_id]), ...applied.issue_ids];
+      }
+    }
+    const created = await this.markedStep(operation.id, "template.created", () => this.authoring.createTemplate(operation.id, proposal, proposalAgent, actor));
+    if (created === undefined) return responseFromOperation(await this.completeReplayedOperation(operation));
+    return {
+      operation_id: operation.id,
+      status: created.status,
+      summary: [domainSummary, created.summary].filter((item): item is string => item !== undefined).join(" "),
+      completed: [...(candidateResult?.completed ?? []), ...domainCompleted, ...(created.artifact_ids ?? (created.artifact_id === undefined ? [] : [created.artifact_id]))],
+      blocked: [],
+      agent_id: proposalAgent,
+      agent_role: resolution.agent_role,
+    };
+  }
+
+  private async replayZhujiProposal(operation: OperationRecord, proposal: ZhujiProposalValue, actor: string, agent?: string): Promise<RequestResult> {
+    const resolution = this.agents.resolve(`建立珠璣 ${proposal.character_id} ${proposal.module.module}`, agent ?? "zhuji-creator");
+    const created = await this.markedStep(operation.id, "zhuji.created", () => this.authoring.createZhuji(operation.id, proposal, resolution.agent_id, actor));
+    if (created === undefined) {
+      const state = await this.repository.read();
+      const artifact = state.artifacts.find((item) => item.operation_id === operation.id && item.kind === "zhuji");
+      await this.completeReplayedOperation(operation);
+      return {
+        operation_id: operation.id,
+        status: "completed",
+        summary: "珠璣已還原（先前已套用）。",
+        completed: artifact === undefined ? [] : [artifact.id],
+        blocked: [],
+        agent_id: resolution.agent_id,
+        agent_role: resolution.agent_role,
+      };
+    }
+    return {
+      operation_id: operation.id,
+      status: created.status,
+      summary: created.summary,
+      completed: created.artifact_id === undefined ? [] : [created.artifact_id],
+      blocked: [],
+      agent_id: resolution.agent_id,
+      agent_role: resolution.agent_role,
+    };
+  }
+
+  private async replaySourceSearch(operation: OperationRecord, context: WorkspaceContext, agent?: string): Promise<RequestResult> {
+    const state = await this.repository.read();
+    if (this.hasAuditMarker(operation.id, "source.candidates_registered", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
+    const results = this.searcher === undefined ? [] : await this.searcher(operation.request);
+    const searched = await this.sources.registerCandidates(operation.id, results, context.actor);
+    return { operation_id: operation.id, status: searched.status, summary: searched.summary, completed: searched.completed, blocked: searched.blocked, ...(agent === undefined ? {} : { agent_id: agent }) };
+  }
+
+  private async replaySource(operation: OperationRecord, context: WorkspaceContext, agent?: string): Promise<RequestResult> {
+    const refs = operation.command?.attachment_refs ?? [];
+    let attachments: SourceAttachment[];
+    if (refs.length === 0) {
+      attachments = context.attachments;
+    } else {
+      const stored = await this.loadOperationAttachments(operation, operation.command);
+      if (stored === undefined) return this.markNeedsInput(operation, "無法還原來源操作所需的附件，請重新上傳來源檔案。");
+      attachments = stored;
+    }
+    const state = await this.repository.read();
+    if (this.hasAuditMarker(operation.id, "source.ingested", state) || this.hasAuditMarker(operation.id, "source.blocked", state)) {
+      return responseFromOperation(await this.completeReplayedOperation(operation));
+    }
+    const executionContext = this.fetcher === undefined ? context : { ...context, fetcher: this.fetcher };
+    const resume = attachments.length > 0 || /https?:\/\//iu.test(operation.request);
+    const result = resume
+      ? await this.sources.resume(operation.id, operation.request, { ...executionContext, attachments })
+      : await this.sources.execute(operation.id, executionContext);
+    return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.completed, blocked: result.blocked, ...(agent === undefined ? {} : { agent_id: agent }) };
+  }
+
+  private async replaySourceSelection(operation: OperationRecord, command: OperationCommand, agent?: string): Promise<RequestResult> {
+    const state = await this.repository.read();
+    if (this.hasAuditMarker(operation.id, "source.selection.updated", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
+    const decisions = command.payload as SourceSelectionDecision[] | undefined;
+    if (decisions === undefined || decisions.length === 0) {
+      return this.markNeedsInput(operation, "無法還原來源選擇操作，請重新提交候選來源選擇。");
+    }
+    const result = await this.sources.selectCandidates(operation.id, decisions, operation.actor ?? "worker");
+    return { operation_id: operation.id, status: result.status, summary: result.summary, completed: [...result.approved, ...result.rejected], blocked: [], ...(agent === undefined ? {} : { agent_id: agent }) };
+  }
+
+  private async replayIssueUpdate(operation: OperationRecord, command: OperationCommand, agent?: string): Promise<RequestResult> {
+    const state = await this.repository.read();
+    if (this.hasAuditMarker(operation.id, "review.issue.updated", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
+    const input = command.payload as IssueUpdateInput | undefined;
+    if (input === undefined || typeof input !== "object" || typeof (input as IssueUpdateInput).action !== "string" || typeof (input as IssueUpdateInput).issue_id !== "string") {
+      return this.markNeedsInput(operation, "無法還原 issue 更新操作，請重新提交。");
+    }
+    const result = await this.review.updateIssue(operation.id, input, agent ?? "director", operation.actor ?? "worker");
+    return { operation_id: operation.id, status: result.status, summary: result.summary, completed: [result.issue_id], blocked: [], agent_id: agent ?? "director" };
+  }
+
+  private async replayImport(operation: OperationRecord, command: OperationCommand | undefined, context: WorkspaceContext, agent?: string): Promise<RequestResult> {
+    const refs = command?.attachment_refs ?? [];
+    let attachments: SourceAttachment[];
+    if (refs.length === 0) {
+      attachments = context.attachments;
+    } else {
+      const stored = await this.loadOperationAttachments(operation, command);
+      if (stored === undefined) return this.markNeedsInput(operation, "無法還原匯入操作所需的附件，請重新上傳要匯入的檔案。");
+      attachments = stored;
+    }
+    const state = await this.repository.read();
+    if (this.hasAuditMarker(operation.id, "import.committed", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
+    const result = await this.importer.run(operation.id, operation.request, context.actor, attachments);
+    const latest = await this.repository.read();
+    const finalOperation = latest.operations.find((item) => item.id === operation.id);
+    return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.artifact_id === undefined ? (result.import_id === undefined ? [] : [result.import_id]) : [result.artifact_id], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
+  }
+
+  private async replayRequest(operation: OperationRecord, context: WorkspaceContext, agent?: string): Promise<RequestResult> {
+    const kind = operation.kind;
     if (kind === "knowledge") {
+      const state = await this.repository.read();
+      if (this.hasAuditMarker(operation.id, "knowledge.refreshed", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
       const result = await this.knowledge.refresh(operation.id, operation.request, context.actor);
       const latest = await this.repository.read();
       const finalOperation = latest.operations.find((item) => item.id === operation.id);
       return { operation_id: operation.id, status: result.status, summary: result.summary, completed: [...result.chunks, ...result.facts], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
     }
     if (kind === "authoring") {
+      const state = await this.repository.read();
+      if (this.hasAuditMarker(operation.id, "artifact.created", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
       const result = await this.authoring.create(operation.id, operation.request, context.actor);
       const latest = await this.repository.read();
       const finalOperation = latest.operations.find((item) => item.id === operation.id);
       return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.artifact_id === undefined ? [] : [result.artifact_id], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
     }
     if (kind === "review") {
+      if (/^issue /iu.test(operation.request)) {
+        const state = await this.repository.read();
+        if (this.hasAuditMarker(operation.id, "review.issue.updated", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
+        return this.markNeedsInput(operation, "issue 更新無法自動還原，請重新提交。");
+      }
+      const state = await this.repository.read();
+      if (this.hasAuditMarker(operation.id, "artifact.reviewed", state) || this.hasAuditMarker(operation.id, "review.reevaluated", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
       const result = /re-?evaluate|quality profile/iu.test(operation.request)
         ? await this.review.reevaluate(operation.id, context.actor)
         : await this.review.review(operation.id, operation.request, context.actor);
@@ -769,16 +1063,12 @@ export class WorkspaceRuntime {
       return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.review_id === undefined ? [] : [result.review_id], blocked: result.status === "blocked" ? [operation.id] : [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
     }
     if (kind === "build") {
+      const state = await this.repository.read();
+      if (this.hasAuditMarker(operation.id, "publish.committed", state) || this.hasAuditMarker(operation.id, "build.previewed", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
       const result = await this.build.run(operation.id, operation.request, context.actor);
       const latest = await this.repository.read();
       const finalOperation = latest.operations.find((item) => item.id === operation.id);
       return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.build_id === undefined ? [] : [result.build_id], blocked: result.status === "blocked" ? [operation.id] : [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
-    }
-    if (kind === "import") {
-      const result = await this.importer.run(operation.id, operation.request, context.actor, context.attachments);
-      const latest = await this.repository.read();
-      const finalOperation = latest.operations.find((item) => item.id === operation.id);
-      return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.artifact_id === undefined ? (result.import_id === undefined ? [] : [result.import_id]) : [result.artifact_id], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
     }
     const latest = await this.repository.read();
     await this.repository.commit(latest.revision, (current) => ({
@@ -856,6 +1146,10 @@ export class WorkspaceRuntime {
       created_at: now(),
       updated_at: now(),
       progress: [],
+      command: { version: 1, type: "source_select", payload: { decisions } },
+      lease_owner: context.actor,
+      lease_token: internalId("lease"),
+      lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
     };
     await this.repository.commit(initial.revision, (current) => ({
       ...current,
@@ -949,6 +1243,10 @@ export class WorkspaceRuntime {
       created_at: now(),
       updated_at: now(),
       progress: [],
+      command: { version: 1, type: "template_proposal", payload: parsed.data },
+      lease_owner: context.actor,
+      lease_token: internalId("lease"),
+      lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
     };
     await this.repository.commit(initial.revision, (current) => ({
       ...current,
@@ -1045,6 +1343,10 @@ export class WorkspaceRuntime {
       created_at: now(),
       updated_at: now(),
       progress: [],
+      command: { version: 1, type: "zhuji_proposal", payload: parsed.data },
+      lease_owner: context.actor,
+      lease_token: internalId("lease"),
+      lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
     };
     await this.repository.commit(initial.revision, (current) => ({
       ...current,
@@ -1124,6 +1426,10 @@ export class WorkspaceRuntime {
       created_at: now(),
       updated_at: now(),
       progress: [],
+      command: { version: 1, type: "issue_update", payload: input },
+      lease_owner: context.actor,
+      lease_token: internalId("lease"),
+      lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
     };
     const created = await this.repository.commit(initial.revision, (current) => ({
       ...current,
@@ -1352,8 +1658,11 @@ export class WorkspaceRuntime {
     }
     const state = existing;
     if (kind === "authoring") this.ensureSourceAdaptationFactsReady(state);
+    const isSourceSearch = kind === "source" && /搜尋|找來源|research|search/iu.test(trimmed) && !/加入|匯入|保存|批准/iu.test(trimmed);
+    const operationId = internalId("operation");
+    const attachmentRefs = context.attachments.length > 0 ? await this.attachmentStore.save(operationId, context.attachments) : [];
     const operation: OperationRecord = {
-      id: internalId("operation"),
+      id: operationId,
       kind,
       request: trimmed,
       actor: context.actor,
@@ -1361,6 +1670,14 @@ export class WorkspaceRuntime {
       created_at: now(),
       updated_at: now(),
       progress: [],
+      command: {
+        version: 1,
+        type: kind === "import" ? "import" : kind === "source" ? (isSourceSearch ? "source_search" : "source_resume") : "request",
+        ...(attachmentRefs.length === 0 ? {} : { attachment_refs: attachmentRefs }),
+      },
+      lease_owner: context.actor,
+      lease_token: internalId("lease"),
+      lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
     };
     const created = await this.repository.commit(state.revision, (current) => ({
       ...current,
@@ -1380,7 +1697,7 @@ export class WorkspaceRuntime {
         ...current,
         operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "running", updated_at: now() } : item),
       }));
-      if (/搜尋|找來源|research|search/iu.test(trimmed) && !/加入|匯入|保存|批准/iu.test(trimmed)) {
+      if (isSourceSearch) {
         const results = context.research_results ?? (this.searcher === undefined ? [] : await this.searcher(trimmed));
         const searched = await this.sources.registerCandidates(operation.id, results, context.actor);
         return { operation_id: operation.id, status: searched.status, summary: searched.summary, completed: searched.completed, blocked: searched.blocked };

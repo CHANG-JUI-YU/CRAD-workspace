@@ -171,4 +171,62 @@ describe("background workspace worker", () => {
       worker.stop();
     }
   });
+
+  it("claims the lease so a second worker never double-executes", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-lease", "Create character: Lease. Personality: calm and clear.")] }));
+    const runtime = new WorkspaceRuntime(repository);
+    const recover = vi.spyOn(runtime, "recoverOperation").mockImplementation(async (operationId) => {
+      await repository.commit((await repository.read()).revision, (state) => ({
+        ...state,
+        operations: state.operations.map((item) => item.id === operationId ? { ...item, status: "completed", updated_at: new Date().toISOString() } : item),
+      }));
+      return { operation_id: operationId, status: "completed", summary: "done", completed: [], blocked: [] };
+    });
+    const first = new WorkspaceWorker(runtime, { pollIntervalMs: 5, retryDelayMs: 1 });
+    const second = new WorkspaceWorker(runtime, { pollIntervalMs: 5, retryDelayMs: 1 });
+    first.start();
+    second.start();
+    try {
+      await waitFor(async () => (await repository.read()).operations[0]?.status === "completed");
+      expect(recover).toHaveBeenCalledTimes(1);
+    } finally {
+      first.stop();
+      second.stop();
+    }
+  });
+
+  it("refuses to claim an operation held by another live lease", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    const now = new Date().toISOString();
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const leased: OperationRecord = { ...operation("op-held", "Create character: Held. Personality: calm."), lease_owner: "owner-a", lease_token: "token-a", lease_expires_at: future };
+    await repository.commit(0, (state) => ({ ...state, operations: [leased] }));
+    const runtime = new WorkspaceRuntime(repository);
+    expect(await runtime.claimOperation("op-held", "owner-b")).toBeUndefined();
+    expect(await runtime.renewOperationLease("op-held", "owner-b", "token-a")).toBe(false);
+    expect(await runtime.renewOperationLease("op-held", "owner-a", "token-a")).toBe(true);
+    await runtime.releaseOperationLease("op-held", "owner-a", "token-a");
+    expect((await repository.read()).operations[0]?.lease_owner).toBeUndefined();
+    const claimed = await runtime.claimOperation("op-held", "owner-b");
+    expect(claimed?.lease_owner).toBe("owner-b");
+    expect(claimed?.attempt).toBe(1);
+  });
+
+  it("hands a stale lease to a new owner after expiry", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    const now = new Date().toISOString();
+    const stale = new Date(Date.now() - 5_000).toISOString();
+    const expired: OperationRecord = { ...operation("op-stale", "Create character: Stale. Personality: calm."), lease_owner: "dead-worker", lease_token: "stale-token", lease_expires_at: stale };
+    await repository.commit(0, (state) => ({ ...state, operations: [expired] }));
+    const runtime = new WorkspaceRuntime(repository);
+    const claimed = await runtime.claimOperation("op-stale", "worker-2");
+    expect(claimed?.lease_owner).toBe("worker-2");
+    expect(await runtime.recoverOperation("op-stale", { actor: "worker-2", attachments: [] })).toMatchObject({ status: "completed" });
+    await runtime.releaseOperationLease("op-stale", "worker-2", claimed?.lease_token ?? "");
+    const finalOperation = (await repository.read()).operations[0];
+    expect(finalOperation?.status).toBe("completed");
+    expect(finalOperation?.lease_owner).toBeUndefined();
+    expect(finalOperation?.lease_token).toBeUndefined();
+  });
 });

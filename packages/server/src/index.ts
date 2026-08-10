@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { TextDecoder } from "node:util";
 import { HttpSourceFetcher } from "@st-workspace/adapters";
-import { FileProjectRepository, templateProposalJsonSchema, type AdaptationDecision, type RequestResult, type SourceAttachment, zhujiProposalJsonSchema } from "@st-workspace/core";
+import { FileAttachmentStore, FileProjectRepository, templateProposalJsonSchema, type AdaptationDecision, type RequestResult, type SourceAttachment, zhujiProposalJsonSchema } from "@st-workspace/core";
 import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
 
 export interface WorkspaceServerOptions {
@@ -625,12 +625,12 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
   const requestedProject = options.projectId ?? (options.projectRoot === undefined ? process.env.ST_WORKSPACE_PROJECT : undefined);
   const selectedProject = typeof requestedProject === "string" && requestedProject.trim().length > 0 ? requestedProject.trim() : undefined;
   const manager = selectedProject === undefined
-    ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true }) })
+    ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true, attachmentStore: new FileAttachmentStore(projectRoot, repository.projectId) }) })
     : undefined;
   if (manager !== undefined) await manager.ensureRuntime();
   const serverOptions: WorkspaceServerOptions = manager !== undefined
     ? { projectManager: manager, actor: options.actor ?? "server" }
-    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch }), actor: options.actor ?? "server" };
+    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server" };
   const server = createWorkspaceServer(serverOptions);
   await new Promise<void>((resolve) => server.listen(options.port ?? Number(process.env.ST_WORKSPACE_PORT ?? 8787), options.host ?? "127.0.0.1", resolve));
   return server;

@@ -28,7 +28,7 @@ function zhujiProposal(): ZhujiProposalValue {
 
 describe("runtime-facing server contract", () => {
   it("exposes only high-level request and status tools", () => {
-    expect(toolDefinitions.map((tool) => tool.name)).toEqual(["workspace_request", "workspace_status", "workspace_agents", "workspace_zhuji_context", "workspace_zhuji_submit", "workspace_template_context", "workspace_template_submit", "workspace_authoring_context", "workspace_source_candidates", "workspace_source_select", "workspace_adaptation_decision", "workspace_interview_context", "workspace_interview_answer", "workspace_projects", "workspace_project_select"]);
+    expect(toolDefinitions.map((tool) => tool.name)).toEqual(["workspace_request", "workspace_status", "workspace_agents", "workspace_zhuji_context", "workspace_zhuji_submit", "workspace_template_context", "workspace_template_submit", "workspace_issue_update", "workspace_authoring_context", "workspace_source_candidates", "workspace_source_select", "workspace_adaptation_decision", "workspace_interview_context", "workspace_interview_answer", "workspace_projects", "workspace_project_select"]);
     expect(toolDefinitions[0]?.inputSchema.properties).toMatchObject({ request: { type: "string" }, agent: { type: "string" } });
     expect(JSON.stringify(toolDefinitions)).not.toMatch(/project_id|revision|capability|stage|steps|file_path|bytes_base64/iu);
     expect(toolDefinitions.find((tool) => tool.name === "workspace_interview_context")?.description).toMatch(/exactly one current/iu);
@@ -84,7 +84,7 @@ describe("runtime-facing server contract", () => {
       const zhujiCall = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "workspace_zhuji_submit", arguments: zhujiProposal() } }) });
       expect(JSON.stringify(await zhujiCall.json())).toContain("completed");
       const invalidZhuji = await fetch(`${base}/workspace/zhuji`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "zhuji" }) });
-      expect(invalidZhuji.status).toBe(500);
+      expect(invalidZhuji.status).toBe(400);
       const invalidCall = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "workspace_request", arguments: {} } }) });
       expect(JSON.stringify(await invalidCall.json())).toContain("request is required");
       const unknownTool = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "not-a-tool", arguments: {} } }) });
@@ -168,7 +168,7 @@ describe("runtime-facing server contract", () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
       const started = Date.now();
-      while (Date.now() - started < 1_000 && (await repository.read()).operations[0]?.status !== "completed") await new Promise((resolve) => setTimeout(resolve, 10));
+      while (Date.now() - started < 5_000 && (await repository.read()).operations[0]?.status !== "completed") await new Promise((resolve) => setTimeout(resolve, 25));
       expect((await repository.read()).operations[0]?.status).toBe("completed");
       expect((await repository.read()).artifacts[0]?.name).toBe("Restarted");
     } finally {

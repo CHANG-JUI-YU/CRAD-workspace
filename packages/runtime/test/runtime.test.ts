@@ -587,4 +587,86 @@ describe("natural language runtime boundary", () => {
     expect((await runtime.zhujiContext()).context.existing).toHaveLength(1);
     await expect(runtime.submitZhujiProposal({ kind: "zhuji", character_id: "yukino", module: { module: "bad" } }, { actor: "zhuji-creator", attachments: [] })).rejects.toMatchObject({ code: "ZHUJI_SCHEMA_INVALID" });
   });
+
+  it("replays a persisted typed template proposal without duplicating the domain result", async () => {
+    const repository = new MemoryProjectRepository("replay-template");
+    const runtime = new WorkspaceRuntime(repository);
+    const palette = {
+      kind: "palette" as const,
+      character_id: "demo",
+      module: { schema_version: 1 as const, mode: "palette" as const, module: "basic_information" as const, title: "Basic information", content: "A calm character." },
+    };
+    const submitted = await runtime.submitTemplateProposal(palette, { actor: "palette-creator", attachments: [] });
+    expect(submitted.status).toBe("completed");
+    expect((await repository.read()).artifacts).toHaveLength(1);
+    const operationId = submitted.operation_id;
+    const state = await repository.read();
+    expect(state.operations[0]?.command).toMatchObject({ version: 1, type: "template_proposal" });
+    await repository.commit(state.revision, (current) => ({
+      ...current,
+      operations: current.operations.map((item) => item.id === operationId ? { ...item, status: "running", updated_at: new Date().toISOString() } : item),
+    }));
+    const recovered = await runtime.recoverOperation(operationId, { actor: "palette-creator", attachments: [] }, { agent: "palette-creator" });
+    expect(recovered.status).toBe("completed");
+    expect((await repository.read()).artifacts).toHaveLength(1);
+    expect((await repository.read()).operations.find((item) => item.id === operationId)?.status).toBe("completed");
+  });
+
+  it("replays an import operation from its persisted attachment references", async () => {
+    const repository = new MemoryProjectRepository("replay-import");
+    const runtime = new WorkspaceRuntime(repository);
+    const content = JSON.stringify({ name: "Replayed", description: "A complete card" });
+    const first = await runtime.request("Import character card", {
+      actor: "importer",
+      attachments: [{ name: "card.json", content: new TextEncoder().encode(content), media_type: "application/json" }],
+    });
+    expect(first.status).toBe("completed");
+    const operationId = first.operation_id;
+    let state = await repository.read();
+    expect(state.operations[0]?.command?.attachment_refs).toHaveLength(1);
+    await repository.commit(state.revision, (current) => ({
+      ...current,
+      operations: current.operations.map((item) => item.id === operationId ? { ...item, status: "running", updated_at: new Date().toISOString() } : item),
+    }));
+    const recovered = await runtime.recoverOperation(operationId, { actor: "importer", attachments: [] });
+    expect(recovered.status).toBe("completed");
+    state = await repository.read();
+    expect(state.imports.filter((item) => item.operation_id === operationId)).toHaveLength(1);
+    expect(state.operations.find((item) => item.id === operationId)?.status).toBe("completed");
+  });
+
+  it("appends audit events when confirming an assisted precheck instead of replacing history", async () => {
+    const repository = new MemoryProjectRepository("audit-append");
+    const base = createProjectState("audit-append");
+    const timestamp = new Date().toISOString();
+    const pending: BlueprintPrecheckRecord = {
+      id: "precheck-pending-audit",
+      schema_version: 1,
+      project_id: "audit-append",
+      operation_id: "interview-pending-audit",
+      collaboration_mode: "assisted",
+      candidate_blueprint: { project_id: "audit-append" },
+      candidate_blueprint_revision: contentHash("candidate"),
+      checks: [{ subject_id: "audit-append", dimension: "character_core", uncertainty: "high", impact: "high", basis: "needs confirmation", action: "user_confirmed", user_answer: "pending confirmation" }],
+      status: "needs_input",
+      created_at: timestamp,
+      created_by: "director",
+    };
+    await repository.commit(0, () => ({
+      ...base,
+      project_status: "interviewing",
+      interview: { schema_version: 1, status: "complete", flow: "character", answers: [], values: {} },
+      blueprint_prechecks: [pending],
+      operations: [{ id: "interview-pending-audit", kind: "interview", request: "project interview", status: "needs_input", created_at: timestamp, updated_at: timestamp, progress: [] }],
+      audit: [
+        { id: "audit-1", operation_id: "first", event: "interview.started", actor: "user", occurred_at: timestamp, project_revision: 1, details: {} },
+        { id: "audit-2", operation_id: "first", event: "interview.answer.recorded", actor: "user", occurred_at: timestamp, project_revision: 2, details: {} },
+      ],
+    }));
+    const result = await new WorkspaceRuntime(repository, { interviewRequired: true }).answerInterview("use the explicit core", { actor: "user", attachments: [] });
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    expect(state.audit.length).toBeGreaterThan(2);
+    expect(state.audit.map((event) => event.id)).toEqual(expect.arrayContaining(["audit-1", "audit-2"]));
+  });
 });
