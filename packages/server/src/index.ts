@@ -3,6 +3,7 @@ import { TextDecoder } from "node:util";
 import { HttpSourceFetcher } from "@st-workspace/adapters";
 import { FileAttachmentStore, FileProjectRepository, templateProposalJsonSchema, type AdaptationDecision, type RequestResult, type SourceAttachment, zhujiProposalJsonSchema } from "@st-workspace/core";
 import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
+import { dashboard } from "./dashboard.js";
 
 export interface WorkspaceServerOptions {
   runtime?: WorkspaceRuntime;
@@ -222,10 +223,6 @@ function attachmentsFrom(value: unknown): SourceAttachment[] {
     if (typeof candidate.name !== "string" || typeof candidate.content_base64 !== "string") return [];
     return [{ name: candidate.name, content: new Uint8Array(Buffer.from(candidate.content_base64, "base64")), ...(typeof candidate.media_type === "string" ? { media_type: candidate.media_type } : {}) }];
   });
-}
-
-function dashboard(): string {
-  return `<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><title>ST Workspace</title><style>body{font-family:system-ui;max-width:980px;margin:40px auto;padding:0 20px;color:#202124}.layout{display:grid;grid-template-columns:280px 1fr;gap:24px}.panel{border:1px solid #ddd;border-radius:10px;padding:16px;background:#fff}body{background:#fafafa}textarea{width:100%;min-height:90px;box-sizing:border-box}button,select{margin-top:8px;padding:8px 12px}button{cursor:pointer}.agent{padding:8px 0;border-bottom:1px solid #eee}.agent:last-child{border-bottom:0}.agent small{display:block;color:#666;margin-top:3px}pre{background:#f5f5f5;padding:16px;white-space:pre-wrap;min-height:120px}.badge{display:inline-block;font-size:12px;background:#e8f0fe;color:#174ea6;border-radius:999px;padding:2px 7px;margin-left:4px}</style><h1>ST Workspace</h1><p>以自然語言操作；左側可檢視並指定 Agent，未指定時由 Director 自動路由。</p><div class="layout"><aside class="panel"><h2>Agents</h2><label for="agent">執行 Agent</label><select id="agent"><option value="">Director（自動路由）</option></select><div id="agentList">載入中…</div></aside><main class="panel"><textarea id="request" placeholder="例如：建立珠璣角色 Yukino，或預覽目前卡片"></textarea><br><button onclick="run()">執行</button> <button onclick="status()">狀態</button><pre id="out">尚未執行</pre></main></div><script>const out=document.querySelector('#out');const selector=document.querySelector('#agent');const list=document.querySelector('#agentList');async function json(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});return await r.json()}async function loadAgents(){const data=await json('/workspace/agents');for(const agent of data.agents){const option=document.createElement('option');option.value=agent.id;option.textContent=agent.id;selector.appendChild(option);const row=document.createElement('div');row.className='agent';row.innerHTML='<strong>'+agent.id+'</strong>'+(agent.id===data.default_agent?'<span class="badge">default</span>':'')+'<small>'+agent.role+' · '+agent.intents.join(', ')+'</small>';list.appendChild(row)}}async function run(){const body={request:document.querySelector('#request').value};if(selector.value)body.agent=selector.value;out.textContent=JSON.stringify(await json('/workspace/request',body),null,2)}async function status(){out.textContent=JSON.stringify(await json('/workspace/status'),null,2)}loadAgents();</script>`;
 }
 
 function requestValue(value: unknown): string | undefined {
