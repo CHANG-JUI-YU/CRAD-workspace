@@ -162,7 +162,7 @@ export class AgentRegistry {
                 : "character-critic";
       return agent.id === expected;
     }
-    if (kind === "fact_review") return /^fact-reviewer-[123]$/u.test(agent.id);
+    if (kind === "fact_review") return /^fact-reviewer-[123]$/u.test(agent.id) || agent.id === "director";
     const expected: Readonly<Record<string, string>> = {
       character: "director",
       zhuji: "zhuji-creator",

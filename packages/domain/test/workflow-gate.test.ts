@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MemoryProjectRepository, contentHash, createProjectState, qualityProfileForLevel, type ArtifactRecord, type BlueprintPrecheckRecord, type IssueSeverity, type OperationRecord } from "@st-workspace/core";
+import { MemoryProjectRepository, contentHash, createProjectState, qualityProfileForLevel, type ArtifactRecord, type BlueprintPrecheckRecord, type FactRecord, type IssueSeverity, type OperationRecord } from "@st-workspace/core";
 import { AuthoringService, validateWorkflow } from "../src/index.js";
 
 const now = new Date().toISOString();
@@ -313,5 +313,102 @@ describe("workflow gates and editable publish", () => {
       operations: [operation("op-publish")],
     }));
     expect(validateWorkflow(await repository.read(), "publish")).toMatchObject({ ok: true, diagnostics: [] });
+  });
+
+  it("flags accepted facts that contradict each other on the same subject and predicate", async () => {
+    const repository = new MemoryProjectRepository("contradiction");
+    const officialContent = "Yukino has_trait direct. Yukino has_trait calm.";
+    const sourceId = "source-contradiction";
+    const chunkId = "chunk-contradiction";
+    const fact = (id: string, occurrenceId: string, value: string, decisionId: string): FactRecord => ({
+      id,
+      candidate_occurrence_id: occurrenceId,
+      fact_revision: 2,
+      review_run_id: "run-contradiction",
+      decision_id: decisionId,
+      statement: `Yukino has_trait ${value}.`,
+      subject: "Yukino",
+      predicate: "has_trait",
+      value,
+      classification: "trait",
+      coverage: ["identity", "personality"],
+      status: "accepted",
+      confidence: 1,
+      source_ids: [sourceId],
+      evidence: [officialContent],
+      evidence_refs: [{ source_id: sourceId, source_revision_id: contentHash(officialContent), chunk_id: chunkId, chunk_hash: contentHash(officialContent), quote: `Yukino has_trait ${value}.` }],
+      created_at: now,
+      updated_at: now,
+      created_by: "curator",
+    });
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "source_adaptation" },
+      sources: [{ id: sourceId, candidate_id: "candidate-contradiction", title: "Official page", canonical_text: officialContent, original_hash: contentHash(officialContent), revision: contentHash(officialContent), media_type: "text/plain", created_at: now }],
+      knowledge_chunks: [{ id: chunkId, source_id: sourceId, ordinal: 0, text: officialContent, hash: contentHash(officialContent), created_at: now }],
+      facts: [fact("fact-direct", "occ-direct", "direct", "decision-direct"), fact("fact-calm", "occ-calm", "calm", "decision-calm")],
+      fact_review_runs: [{ schema_version: 1, id: "run-contradiction", candidate_set_revision: contentHash("candidate-set"), candidate_occurrence_ids: ["occ-direct", "occ-calm"], source_revisions: [{ source_id: sourceId, revision: contentHash(officialContent) }], policy_revision: contentHash("fact-review-strict-v1"), status: "completed", created_by: "fact-reviewer-1", created_at: now, completed_at: now }],
+      fact_review_decisions: ["direct", "calm"].map((value, index) => ({ schema_version: 1, id: `decision-${value}`, operation_id: "op-review", review_run_id: "run-contradiction", candidate_occurrence_id: `occ-${value}`, fact_id: `fact-${value}`, reviewer_identity: `fact-reviewer-${index + 1}`, decision: "accepted" as const, reason: "Exact quote.", evidence: [{ source_id: sourceId, source_revision_id: contentHash(officialContent), chunk_id: chunkId, chunk_hash: contentHash(officialContent), quote: `Yukino has_trait ${value}.` }], candidate_revision: contentHash(`candidate-${value}`), expected_projection_revision: contentHash(`projection-${value}`), resulting_fact_revision: 2, created_at: now })),
+      operations: [operation("op-publish")],
+    }));
+    const result = validateWorkflow(await repository.read(), "publish");
+    expect(result.ok).toBe(false);
+    const contradiction = result.diagnostics.find((item) => item.code === "FACT_REVIEW_CONTRADICTION");
+    expect(contradiction).toMatchObject({ severity: "error", fact_ids: ["fact-direct", "fact-calm"] });
+  });
+
+  it("matches the source-adaptation coverage register through per-character subject aliases", async () => {
+    const repository = new MemoryProjectRepository("coverage-alias");
+    const officialContent = "Yukino has_trait direct.";
+    const sourceId = "source-alias";
+    const chunkId = "chunk-alias";
+    const blueprint = artifact("blueprint-alias", "blueprint:alias", "blueprint", "Alias", { kind: "blueprint", flow: "source_adaptation", characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "zhuji" }], source_adaptation: { subject_name: "Yukino", subjects: [{ character_id: "demo", subject_name: "Yukino" }] } }, "director", "interview");
+    const characterArtifact = artifact("character-alias", "character:demo", "character", "Demo", { kind: "character", document: { schema_version: 1, id: "demo", display_name: "Demo", aliases: [], summary: "A student.", relationships: [], sections: [], fact_refs: [], provenance: [], extensions: {} } }, "director", "interview");
+    const baseFacts: FactRecord[] = [{
+      id: "fact-alias",
+      candidate_occurrence_id: "occ-alias",
+      fact_revision: 2,
+      review_run_id: "run-alias",
+      decision_id: "decision-alias",
+      statement: "Yukino has_trait direct.",
+      subject: "Yukino",
+      predicate: "has_trait",
+      value: "direct",
+      classification: "trait",
+      coverage: ["identity", "personality", "speech", "habits", "background", "relationships", "appearance"],
+      status: "accepted",
+      confidence: 1,
+      source_ids: [sourceId],
+      evidence: [officialContent],
+      evidence_refs: [{ source_id: sourceId, source_revision_id: contentHash(officialContent), chunk_id: chunkId, chunk_hash: contentHash(officialContent), quote: officialContent }],
+      created_at: now,
+      updated_at: now,
+      created_by: "curator",
+    }];
+    const run = { schema_version: 1, id: "run-alias", candidate_set_revision: contentHash("candidate-set"), candidate_occurrence_ids: ["occ-alias"], source_revisions: [{ source_id: sourceId, revision: contentHash(officialContent) }], policy_revision: contentHash("fact-review-strict-v1"), status: "completed" as const, created_by: "fact-reviewer-1", created_at: now, completed_at: now };
+    const decision = { schema_version: 1, id: "decision-alias", operation_id: "op-review", review_run_id: "run-alias", candidate_occurrence_id: "occ-alias", fact_id: "fact-alias", reviewer_identity: "fact-reviewer-1", decision: "accepted" as const, reason: "Exact quote.", evidence: [{ source_id: sourceId, source_revision_id: contentHash(officialContent), chunk_id: chunkId, chunk_hash: contentHash(officialContent), quote: officialContent }], candidate_revision: contentHash("candidate"), expected_projection_revision: contentHash("projection"), resulting_fact_revision: 2, created_at: now };
+    const sources = [{ id: sourceId, candidate_id: "candidate-alias", title: "Official page", canonical_text: officialContent, original_hash: contentHash(officialContent), revision: contentHash(officialContent), media_type: "text/plain", created_at: now }];
+    const chunks = [{ id: chunkId, source_id: sourceId, ordinal: 0, text: officialContent, hash: contentHash(officialContent), created_at: now }];
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "source_adaptation" },
+      artifacts: [blueprint, characterArtifact],
+      sources,
+      knowledge_chunks: chunks,
+      facts: baseFacts,
+      fact_review_runs: [run],
+      fact_review_decisions: [decision],
+      reviews: [{ id: "review-alias", artifact_id: characterArtifact.id, artifact_revision: characterArtifact.revision, reviewer: "critic", status: "passed" as const, issue_ids: [], created_at: now }],
+      operations: [operation("op-publish")],
+    }));
+    expect(validateWorkflow(await repository.read(), "publish")).toMatchObject({ ok: true, diagnostics: [] });
+    await repository.commit((await repository.read()).revision, (state) => ({
+      ...state,
+      facts: [{ ...state.facts[0]!, subject: "Someone Else", statement: "Someone Else has_trait direct." }],
+    }));
+    const result = validateWorkflow(await repository.read(), "publish");
+    expect(result.diagnostics.map((item) => item.code)).toContain("FACT_COVERAGE_INCOMPLETE");
   });
 });

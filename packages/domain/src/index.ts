@@ -10,7 +10,7 @@ import {
   type SourceRecord,
 } from "@st-workspace/core";
 
-export { AuthoringService, type AuthoringExecutionResult } from "./authoring.js";
+export { AuthoringService, type AuthoringExecutionResult, inferAuthoringKind } from "./authoring.js";
 export { BuildService, type BuildExecutionResult } from "./build.js";
 export { ConversionService, type ConversionExecutionResult } from "./conversion.js";
 export { ImportService, type ImportExecutionResult } from "./import.js";

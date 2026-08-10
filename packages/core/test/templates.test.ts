@@ -99,7 +99,7 @@ describe("structured template contracts", () => {
       { kind: "review", target: { kind: "character", name: "Demo" }, findings: [], summary: "No findings." },
       { kind: "source_research", query: "official page", candidates: [{ title: "Official", url: "https://example.test" }] },
       { kind: "fact_curation", claims: [{ subject: "demo", predicate: "has_trait", value: "calm", classification: "trait", confidence: 0.9, evidence: [{ source: "official" }] }] },
-      { kind: "fact_review", decisions: [{ claim: "demo is calm", decision: "accept", reason: "Supported." }], summary: "Accepted." },
+      { kind: "fact_review", decisions: [{ fact_id: "demo", claim: "demo is calm", decision: "accept", reason: "Supported." }], summary: "Accepted." },
       { kind: "director_routing", phase: "authoring", next_action: "Draft the selected template." },
     ];
     for (const value of values) expect(templateProposalValueSchema.safeParse(value).success, value.kind).toBe(true);

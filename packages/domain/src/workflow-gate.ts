@@ -1,5 +1,6 @@
 import { parseWardrobeMarkdown, type ArtifactRecord, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "./required-artifacts.js";
+import { contradictingAcceptedFacts } from "./knowledge.js";
 
 export type WorkflowGatePhase = "draft" | "publish";
 
@@ -300,6 +301,15 @@ function reportFacts(state: ProjectState, diagnostics: WorkflowDiagnostic[]): vo
       fact_ids: unproven.map((fact) => fact.id),
     });
   }
+  const contradictions = contradictingAcceptedFacts(accepted);
+  if (contradictions.length > 0) {
+    add(diagnostics, {
+      code: "FACT_REVIEW_CONTRADICTION",
+      message: `${contradictions.length} pair(s) of accepted facts contradict each other on the same subject and predicate; Director resolution is required.`,
+      severity: "error",
+      fact_ids: [...new Set(contradictions.flatMap((pair) => [pair.left.id, pair.right.id]))],
+    });
+  }
   const requiresStrictReview = state.interview.flow === "source_adaptation"
     || state.fact_review_runs.length > 0
     || state.facts.some((fact) => fact.source_ids.length > 0);
@@ -406,7 +416,16 @@ function reportFacts(state: ProjectState, diagnostics: WorkflowDiagnostic[]): vo
     const subjects = Array.isArray(parsedBlueprint?.characters)
       ? parsedBlueprint.characters.map(record).flatMap((item) => {
         if (item === undefined || typeof item.id !== "string") return [];
-        return [{ id: item.id, label: typeof item.label === "string" ? item.label : item.id }];
+        const adaptationSubjects = record(parsedBlueprint?.source_adaptation);
+        const perCharacter = Array.isArray(adaptationSubjects?.subjects) ? adaptationSubjects.subjects : [];
+        const aliases = perCharacter
+          .flatMap((entry) => {
+            const subjectEntry = record(entry);
+            if (subjectEntry === undefined || subjectEntry.character_id !== item.id) return [];
+            const subjectName = typeof subjectEntry.subject_name === "string" ? subjectEntry.subject_name : undefined;
+            return subjectName === undefined || subjectName.length === 0 ? [] : [subjectName];
+          });
+        return [{ id: item.id, label: typeof item.label === "string" ? item.label : item.id, aliases }];
       })
       : [];
     if (subjects.length > 0) {
@@ -418,7 +437,9 @@ function reportFacts(state: ProjectState, diagnostics: WorkflowDiagnostic[]): vo
       subjects.forEach((subject, index) => {
         const subjectFacts = acceptedFacts.filter((fact) => {
           const factSubject = fact.subject ?? fact.statement;
-          return normalized(factSubject) === normalized(subject.id) || normalized(factSubject) === normalized(subject.label);
+          return normalized(factSubject) === normalized(subject.id)
+            || normalized(factSubject) === normalized(subject.label)
+            || subject.aliases.some((alias) => normalized(factSubject) === normalized(alias));
         });
         const covered = new Set(subjectFacts.flatMap((fact) => (fact.coverage ?? []).map(normalized)));
         const required = index === 0 ? requiredPrimary : requiredSupporting;

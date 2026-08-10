@@ -260,6 +260,7 @@ describe("project interview engine", () => {
       "某動漫角色與作品",
       "動漫",
       "官方角色頁、角色別名",
+      "二創詮釋",
       "雪乃",
       "palette",
       "我心中更克制、溫柔且重視界線的版本",
@@ -273,6 +274,7 @@ describe("project interview engine", () => {
     expect(state.current?.id).toBe(BLUEPRINT_DIRECTION_QUESTION_ID);
     expect(state.values.source_subject).toContain("某動漫角色");
     expect(state.values.source_identifiers).toContain("官方角色頁");
+    expect(state.values.canon_policy).toBe("二創詮釋");
   });
 
   it("keeps a multi-character source adaptation in the source path and scopes directions", () => {
@@ -281,12 +283,16 @@ describe("project interview engine", () => {
       "角色設定",
       "多角色卡",
       "原作改編",
-      "甲與乙來自某部作品",
-      "動漫",
-      "官方角色頁、作品名稱",
       "甲、乙",
       "甲",
       "乙",
+      "甲的作品來源",
+      "動漫",
+      "官方角色頁",
+      "乙的作品來源",
+      "動漫",
+      "作品名稱",
+      "二創詮釋",
       "palette",
       "概念甲",
       "背景甲",
@@ -306,7 +312,9 @@ describe("project interview engine", () => {
     expect(state.current?.id).toBe("blueprint_direction:character-2");
     state = answer(state, "乙方向：熱烈但尊重界線");
     expect(state.current?.id).toBe("collaboration_mode");
-    expect(state.values.source_subject).toContain("甲與乙");
+    expect(state.values["source_subject:character-1"]).toContain("甲");
+    expect(state.values["source_subject:character-2"]).toContain("乙");
+    expect(state.values.canon_policy).toBe("二創詮釋");
   });
 
   it("walks Blueprint direction and character expansion branches", () => {

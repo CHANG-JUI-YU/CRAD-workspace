@@ -395,8 +395,15 @@ export const factDecisionSchema = z
     decision: z.enum(["accept", "reject", "conflict", "needs_evidence"]),
     reason: text,
     evidence: z.array(factEvidenceSchema).default([]),
+    evidence_refs: z.array(factEvidenceReferenceSchema).default([]),
+    coverage: z.array(text).default([]),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.fact_id === undefined && value.candidate_occurrence_id === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["candidate_occurrence_id"], message: "fact_id or candidate_occurrence_id must be provided" });
+    }
+  });
 export const factReviewProposalValueSchema = z
   .object({ kind: z.literal("fact_review"), decisions: z.array(factDecisionSchema).min(1), summary: text })
   .strict();
@@ -575,7 +582,7 @@ export const TEMPLATE_GUIDES: Readonly<Record<TemplateKind, { skill: string; tit
   review: { skill: "*-critique", title: "Review report", required: ["target", "findings[].severity", "findings[].evidence", "summary"], example: { kind: "review", target: { kind: "greetings", name: "current" }, findings: [], summary: "No blocking findings" } },
   source_research: { skill: "source-research", title: "Source research candidates", required: ["query", "candidates"], example: { kind: "source_research", query: "official character page", candidates: [{ title: "Official page", url: "https://example.test" }] } },
   fact_curation: { skill: "fact-curation", title: "Fact candidates", required: ["claims[].subject", "claims[].predicate", "claims[].value", "claims[].evidence"], example: { kind: "fact_curation", claims: [{ subject: "demo", predicate: "has_trait", value: "calm", classification: "trait", confidence: 0.9, evidence: [{ source: "official page" }] }] } },
-  fact_review: { skill: "fact-review", title: "Fact review decisions", required: ["decisions[].candidate_occurrence_id", "decisions[].claim", "decisions[].decision", "decisions[].reason", "summary"], example: { kind: "fact_review", decisions: [{ candidate_occurrence_id: "candidate-occurrence-from-context", claim: "demo is calm", decision: "accept", reason: "supported by source", evidence_refs: [{ source_id: "source-from-context", source_revision_id: "source-version-from-context", chunk_id: "chunk-from-context", chunk_hash: "hash-from-context", quote: "demo is calm" }] }], summary: "Accepted supported claims" } },
+  fact_review: { skill: "fact-review", title: "Fact review decisions", required: ["decisions[].candidate_occurrence_id (or fact_id)", "decisions[].claim", "decisions[].decision", "decisions[].reason", "summary"], example: { kind: "fact_review", decisions: [{ candidate_occurrence_id: "candidate-occurrence-from-context", claim: "demo is calm", decision: "accept", reason: "supported by source", evidence_refs: [{ source_id: "source-from-context", source_revision_id: "source-version-from-context", chunk_id: "chunk-from-context", chunk_hash: "hash-from-context", quote: "demo is calm" }] }], summary: "Accepted supported claims" } },
   plugin: { skill: "mvu/ejs/html-creation", title: "Typed plugin proposal", required: ["plugin_id", "source"], example: { kind: "plugin", plugin_id: "official.html", source: { plugin_id: "official.html", features: ["status_bar"], components: [{ id: "status", feature: "status_bar", tag: "div", label: "Status" }] } } },
   director_routing: { skill: "director-orchestration", title: "Director routing decision", required: ["phase", "next_action"], example: { kind: "director_routing", phase: "authoring", next_action: "ask the creator to draft the selected template" } },
 };

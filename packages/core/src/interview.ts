@@ -126,6 +126,9 @@ const isQuestionMarkOnly = (value: string): boolean => /^\?{2,}$/u.test(value.tr
 const isChoiceAnswerValid = (current: InterviewQuestion, answer: string): boolean => {
   const normalized = normalizeChoiceValue(answer);
   if (current.options?.some((option) => normalizeChoiceValue(option) === normalized) === true) return true;
+  if (current.id === "source_medium" || current.id.startsWith("source_medium:")) {
+    return /official|wiki|forum|game|novel|anime|manga|other/iu.test(answer);
+  }
   switch (current.id) {
     case "work_type":
       // Source adaptation is deliberately not accepted at the fixed first
@@ -145,8 +148,8 @@ const isChoiceAnswerValid = (current: InterviewQuestion, answer: string): boolea
       return isFreeAuthoring(answer) || isAssistedAuthoring(answer);
     case "world_timing":
       return /before|after|\u4e4b\u524d|\u4e4b\u5f8c/iu.test(answer);
-    case "source_medium":
-      return /official|wiki|forum|game|novel|anime|manga|other/iu.test(answer);
+    case "canon_policy":
+      return /\u53c3\u8003\u539f\u4f5c|\u4e8c\u5275\u8a6b\u91cb|\u5fe0\u5be6\u539f\u4f5c/iu.test(answer);
     default:
       return false;
   }
@@ -221,11 +224,42 @@ const expansionNameQuestion = (): InterviewQuestion => question("expansion_name"
 
 const worldProjectQuestion = (): InterviewQuestion => question("world_project", "請提供要補世界的既有專案名稱或路徑。", "free_text");
 
-const sourceSubjectQuestion = (): InterviewQuestion => question("source_subject", "請提供要二創的原作角色與作品名稱；可以是動漫、漫畫、遊戲或小說角色。", "free_text");
+const sourceSubjectQuestion = (subject?: InterviewCharacterSubject): InterviewQuestion => {
+  const scoped = subject !== undefined;
+  const q = question(
+    scoped ? `source_subject:${subject.id}` : "source_subject",
+    scoped
+      ? `請提供「${subject.label}」要二創的原作角色與作品名稱；可以是動漫、漫畫、遊戲或小說角色。`
+      : "請提供要二創的原作角色與作品名稱；可以是動漫、漫畫、遊戲或小說角色。",
+    "free_text",
+  );
+  return scoped ? { ...q, subject_id: subject.id, subject_label: subject.label } : q;
+};
 
-const sourceMediumQuestion = (): InterviewQuestion => question("source_medium", "這個角色主要來自哪一種媒體？", "choice", ["動漫", "漫畫", "遊戲", "小說", "其他"]);
+const sourceMediumQuestion = (subject?: InterviewCharacterSubject): InterviewQuestion => {
+  const scoped = subject !== undefined;
+  const q = question(
+    scoped ? `source_medium:${subject.id}` : "source_medium",
+    scoped ? `「${subject.label}」主要來自哪一種媒體？` : "這個角色主要來自哪一種媒體？",
+    "choice",
+    ["動漫", "漫畫", "遊戲", "小說", "其他"],
+  );
+  return scoped ? { ...q, subject_id: subject.id, subject_label: subject.label } : q;
+};
 
-const sourceReferenceQuestion = (): InterviewQuestion => question("source_identifiers", "請提供原作辨識資訊：官方頁面、作品名稱、別名或你希望研究的關鍵詞；之後可再由 Source Researcher 找候選來源。", "free_text");
+const sourceReferenceQuestion = (subject?: InterviewCharacterSubject): InterviewQuestion => {
+  const scoped = subject !== undefined;
+  const q = question(
+    scoped ? `source_identifiers:${subject.id}` : "source_identifiers",
+    scoped
+      ? `請提供「${subject.label}」的原作辨識資訊：官方頁面、作品名稱、別名或你希望研究的關鍵詞；之後可再由 Source Researcher 找候選來源。`
+      : "請提供原作辨識資訊：官方頁面、作品名稱、別名或你希望研究的關鍵詞；之後可再由 Source Researcher 找候選來源。",
+    "free_text",
+  );
+  return scoped ? { ...q, subject_id: subject.id, subject_label: subject.label } : q;
+};
+
+const canonPolicyQuestion = (): InterviewQuestion => question("canon_policy", "二創改編時要採取哪種設定方針？", "choice", ["參考原作", "二創詮釋", "忠實原作"]);
 
 const collaborationQuestion = (): InterviewQuestion => question("collaboration_mode", "這個專案要自由創作還是協助創作？", "choice", ["自由創作", "協助創作"]);
 
@@ -406,7 +440,28 @@ const nextQuestion = (state: InterviewState, current: InterviewQuestion, answer:
     if (nextSubject !== undefined) {
       return { flow: state.flow, question: formalNameQuestion(nextSubject), active_character_id: nextSubject.id };
     }
+    if (state.flow === "source_adaptation" && isMulti(state.values.card_shape ?? "")) {
+      return { flow: state.flow, question: sourceSubjectQuestion(subjects[0]!), active_character_id: subjects[0]!.id };
+    }
     return next(authoringModeQuestion(subjects.length > 1), state.flow);
+  }
+  const sourceScopedKind = current.id.startsWith("source_subject:") ? "source_subject" : current.id.startsWith("source_medium:") ? "source_medium" : current.id.startsWith("source_identifiers:") ? "source_identifiers" : undefined;
+  if (sourceScopedKind !== undefined) {
+    const subjects = characterSubjectsFor(state);
+    const subjectId = current.id.slice(sourceScopedKind.length + 1);
+    const subjectIndex = subjects.findIndex((candidate) => candidate.id === subjectId);
+    const subject = subjectIndex >= 0 ? subjects[subjectIndex]! : subjects[0]!;
+    const nextSubject = subjectIndex >= 0 ? subjects[subjectIndex + 1] : undefined;
+    if (sourceScopedKind === "source_subject") {
+      return { flow: state.flow, question: sourceMediumQuestion(subject), active_character_id: subject.id };
+    }
+    if (sourceScopedKind === "source_medium") {
+      return { flow: state.flow, question: sourceReferenceQuestion(subject), active_character_id: subject.id };
+    }
+    if (nextSubject !== undefined) {
+      return { flow: state.flow, question: sourceSubjectQuestion(nextSubject), active_character_id: nextSubject.id };
+    }
+    return { flow: state.flow, question: canonPolicyQuestion(), active_character_id: subject.id };
   }
   const characterCoreKind = current.id.startsWith("concept:") ? "concept" : current.id.startsWith("background:") ? "background" : current.id.startsWith("personality:") ? "personality" : undefined;
   if (characterCoreKind !== undefined) {
@@ -435,17 +490,28 @@ const nextQuestion = (state: InterviewState, current: InterviewQuestion, answer:
       if (isLegacy(answer)) return { flow: "legacy_review", question: question("import_path", "請提供要審核的舊卡檔案路徑（PNG/JSON/YAML）。", "free_text") };
       return { flow: "character", question: characterShapeQuestion() };
     case "character_origin":
-      return isSourceAdaptation(answer)
-        ? { flow: "source_adaptation", question: sourceSubjectQuestion() }
-        : afterCardShape(state);
+      if (isSourceAdaptation(answer)) {
+        return isMulti(state.values.card_shape ?? "")
+          ? { flow: "source_adaptation", question: characterRosterQuestion() }
+          : { flow: "source_adaptation", question: sourceSubjectQuestion() };
+      }
+      return afterCardShape(state);
     case "source_subject":
       return { flow: state.flow, question: sourceMediumQuestion() };
     case "source_medium":
       return { flow: state.flow, question: sourceReferenceQuestion() };
     case "source_identifiers":
-      return afterCardShape(state);
+      return { flow: state.flow, question: canonPolicyQuestion() };
+    case "canon_policy":
+      return isMulti(state.values.card_shape ?? "") && state.flow === "source_adaptation"
+        ? { flow: state.flow, question: authoringModeQuestion(characterSubjectsFor(state).length > 1) }
+        : afterCardShape(state);
     case "card_shape":
-      if (state.flow === "source_adaptation" && isSourceAdaptation(state.values.work_type ?? "")) return { flow: state.flow, question: sourceSubjectQuestion() };
+      if (state.flow === "source_adaptation" && isSourceAdaptation(state.values.work_type ?? "")) {
+        return isMulti(answer)
+          ? { flow: state.flow, question: characterRosterQuestion() }
+          : { flow: state.flow, question: sourceSubjectQuestion() };
+      }
       return { flow: state.flow, question: characterOriginQuestion() };
     case CHARACTER_ROSTER_QUESTION_ID: {
       const subjects = parseCharacterRoster(answer);

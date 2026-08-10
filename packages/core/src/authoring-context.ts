@@ -6,6 +6,13 @@ export interface SourceAdaptationIntent {
   source_identifiers?: string[];
   adaptation_intent: string;
   canon_policy?: "reference_only" | "canon_inspired" | "canon_faithful";
+  /** Per-character source attribution for multi-character adaptation cards. */
+  subjects?: Array<{
+    character_id: string;
+    subject_name: string;
+    source_medium?: string;
+    source_identifiers?: string[];
+  }>;
 }
 
 export interface FactProvenanceRef {

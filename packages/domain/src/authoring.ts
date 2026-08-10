@@ -43,6 +43,11 @@ function inferKind(request: string): ArtifactKind {
   return "unknown";
 }
 
+/** Public wrapper over inferKind so the runtime can gate authoring by kind. */
+export function inferAuthoringKind(request: string): ArtifactKind {
+  return inferKind(request);
+}
+
 function inferName(request: string, kind: ArtifactKind): string {
   const explicit = request.match(/(?:角色|人物|character)\s*[:：]\s*([^\n，,。；;.]+)/iu)?.[1]?.trim()
     ?? request.match(/(?:名稱|name)\s*[:：]\s*([^\n，,。；;.]+)/iu)?.[1]?.trim();

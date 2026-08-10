@@ -243,4 +243,67 @@ describe("runtime template boundary", () => {
     }));
     expect((await new WorkspaceRuntime(repository).templateContext("palette")).context.existing).toHaveLength(0);
   });
+
+  it("gates character and world authoring on the Blueprint world timing", async () => {
+    const timestamp = new Date().toISOString();
+    const repository = new MemoryProjectRepository("world-order");
+    const precheck = { id: "precheck", schema_version: 1, project_id: "world-order", operation_id: "interview", collaboration_mode: "assisted", candidate_blueprint: { project_id: "world-order" }, candidate_blueprint_revision: contentHash("candidate"), checks: [{ subject_id: "world-order", dimension: "world_dependencies", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }], status: "recorded" as const, created_at: timestamp, created_by: "director" };
+    const blueprintContent = (authoringTiming: string) => JSON.stringify({ kind: "blueprint", flow: "world", world: { enabled: true, authoring_timing: authoringTiming } });
+    const blueprint = (timing: string) => ({ id: "blueprint-1", key: "blueprint:world-order", kind: "blueprint" as const, name: "project-blueprint", content: blueprintContent(timing), media_type: "application/json", content_hash: contentHash(blueprintContent(timing)), revision: contentHash(blueprintContent(timing)), status: "draft" as const, created_at: timestamp, updated_at: timestamp, created_by: "director", operation_id: "interview", blueprint_precheck_id: "precheck" });
+    const characterProposal = { kind: "character" as const, document: { schema_version: 1 as const, id: "yukino", display_name: "Yukino", summary: "A calm character." } };
+    const worldProposal = { kind: "world" as const, entries: [{ schema_version: 1 as const, id: "harbor", category: "geography" as const, title: "Harbor", content: "A coastal city" }] };
+
+    await repository.commit(0, (state) => ({ ...state, interview: { schema_version: 1, status: "complete" as const, flow: "world" as const, answers: [], values: {} }, blueprint_prechecks: [precheck], artifacts: [blueprint("before_characters")] }));
+    const before = new WorkspaceRuntime(repository, { interviewRequired: true });
+    await expect(before.submitTemplateProposal(characterProposal, { actor: "writer", attachments: [] })).rejects.toMatchObject({ code: "WORLD_AUTHORING_ORDER" });
+    const worldResult = await before.submitTemplateProposal(worldProposal, { actor: "writer", attachments: [] });
+    expect(worldResult.status).toBe("completed");
+    const characterResult = await before.submitTemplateProposal(characterProposal, { actor: "writer", attachments: [] });
+    expect(characterResult.status).toBe("completed");
+
+    const afterRepository = new MemoryProjectRepository("world-order-after");
+    await afterRepository.commit(0, (state) => ({ ...state, interview: { schema_version: 1, status: "complete" as const, flow: "world" as const, answers: [], values: {} }, blueprint_prechecks: [precheck], artifacts: [blueprint("after_characters")] }));
+    const after = new WorkspaceRuntime(afterRepository, { interviewRequired: true });
+    await expect(after.submitTemplateProposal(worldProposal, { actor: "writer", attachments: [] })).rejects.toMatchObject({ code: "CHARACTER_AUTHORING_ORDER" });
+    const characterFirst = await after.submitTemplateProposal(characterProposal, { actor: "writer", attachments: [] });
+    expect(characterFirst.status).toBe("completed");
+    const worldAfter = await after.submitTemplateProposal(worldProposal, { actor: "writer", attachments: [] });
+    expect(worldAfter.status).toBe("completed");
+  });
+
+  it("lets Director resolve a fact conflict through conflict resolution", async () => {
+    const repository = new MemoryProjectRepository("conflict-resolution");
+    const text = "Yukino has_trait direct. Yukino has_trait calm.";
+    await repository.commit(0, (state) => ({
+      ...state,
+      sources: [{ id: "source-conflict", candidate_id: "candidate-conflict", title: "official", canonical_text: text, original_hash: contentHash(text), revision: contentHash(text), media_type: "text/plain", created_at: new Date().toISOString() }],
+    }));
+    const runtime = new WorkspaceRuntime(repository);
+    await runtime.submitTemplateProposal({
+      kind: "fact_curation",
+      topic: "Yukino",
+      claims: [
+        { subject: "Yukino", predicate: "has_trait", value: "direct", classification: "trait", confidence: 0.9, coverage: ["character", "personality"], evidence: [{ source: "official", quote: "Yukino has_trait direct." }] },
+        { subject: "Yukino", predicate: "has_trait", value: "calm", classification: "trait", confidence: 0.9, coverage: ["character", "personality"], evidence: [{ source: "official", quote: "Yukino has_trait calm." }] },
+      ],
+      summary: "Two conflicting candidates",
+    }, { actor: "user", attachments: [] });
+    const firstContext = await runtime.templateContext("fact_review");
+    const first = firstContext.context.knowledge?.fact_review?.candidates[0]!;
+    await runtime.submitTemplateProposal({ kind: "fact_review", decisions: [{ candidate_occurrence_id: first.candidate_occurrence_id, claim: first.statement, decision: "accept", reason: "Exact quote.", evidence: [{ source: "official", quote: first.statement }] }], summary: "First review" }, { actor: "user", attachments: [] });
+    const secondContext = await runtime.templateContext("fact_review");
+    const second = secondContext.context.knowledge?.fact_review?.candidates[0]!;
+    const conflicted = await runtime.submitTemplateProposal({ kind: "fact_review", decisions: [{ candidate_occurrence_id: second.candidate_occurrence_id, claim: second.statement, decision: "accept", reason: "Also exact.", evidence: [{ source: "official", quote: second.statement }] }], summary: "Conflicting review" }, { actor: "user", attachments: [] });
+    expect(conflicted.status).toBe("needs_input");
+    let state = await repository.read();
+    expect(state.fact_review_runs[0]?.status).toBe("blocked");
+    expect(state.facts.find((fact) => fact.statement === second.statement)?.status).toBe("conflict");
+
+    const resolved = await runtime.submitConflictResolution({ kind: "fact_review", decisions: [{ candidate_occurrence_id: second.candidate_occurrence_id, claim: second.statement, decision: "accept", reason: "Director overrides the conflict.", evidence: [{ source: "official", quote: second.statement }] }], summary: "Director resolution" }, { actor: "session-user", attachments: [] });
+    expect(resolved).toMatchObject({ status: "completed", agent_id: "director" });
+    state = await repository.read();
+    expect(state.facts.find((fact) => fact.statement === second.statement)?.status).toBe("accepted");
+    expect(state.fact_review_runs[0]?.status).toBe("completed");
+    expect(state.fact_review_decisions.at(-1)?.reviewer_identity).toBe("director");
+  });
 });

@@ -47,6 +47,7 @@ import {
   type SourceAdaptationIntent,
   type ZhujiModuleKind,
   type ZhujiProposalValue,
+  type ArtifactKind,
 } from "@st-workspace/core";
 import {
   AuthoringService,
@@ -55,6 +56,7 @@ import {
   KnowledgeService,
   ReviewService,
   SourceService,
+  inferAuthoringKind,
   PALETTE_REQUIRED_MODULES,
   ZHUJI_REQUIRED_MODULES,
   type IssueUpdateInput,
@@ -159,20 +161,45 @@ function blueprintContent(precheck: BlueprintPrecheckRecord): string {
   });
 }
 
-function sourceAdaptationIntentFromValues(values: Record<string, unknown>): SourceAdaptationIntent | undefined {
+function canonPolicyFromValues(values: Record<string, unknown>): Exclude<SourceAdaptationIntent["canon_policy"], undefined> {
+  const value = nonEmptyInterviewValue(values, ["canon_policy"]);
+  if (value !== undefined) {
+    if (/參考原作|reference/iu.test(value)) return "reference_only";
+    if (/忠實原作|faithful/iu.test(value)) return "canon_faithful";
+    if (/二創詮釋|inspired/iu.test(value)) return "canon_inspired";
+  }
+  return "canon_inspired";
+}
+
+function sourceAdaptationIntentFromValues(values: Record<string, unknown>, subjects: Array<{ id: string; label: string }>): SourceAdaptationIntent | undefined {
   const subject = nonEmptyInterviewValue(values, ["source_subject"]);
-  if (subject === undefined) return undefined;
+  const multi = subjects.length > 1;
+  if (subject === undefined && !multi) return undefined;
   const identifiers = nonEmptyInterviewValue(values, ["source_identifiers"])
     ?.split(/[\n,，、]+/u)
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
   const medium = nonEmptyInterviewValue(values, ["source_medium"]);
+  const perCharacter = subjects.flatMap((character) => {
+    const scoped = (key: string): string | undefined => nonEmptyInterviewValue(values, [`${key}:${character.id}`]) ?? nonEmptyInterviewValue(values, [key]);
+    const subjectName = scoped("source_subject");
+    if (subjectName === undefined) return [];
+    const scopedIdentifiers = scoped("source_identifiers")?.split(/[\n,，、]+/u).map((item) => item.trim()).filter((item) => item.length > 0);
+    const scopedMedium = scoped("source_medium");
+    return [{
+      character_id: character.id,
+      subject_name: subjectName,
+      ...(scopedMedium === undefined ? {} : { source_medium: scopedMedium }),
+      ...(scopedIdentifiers === undefined || scopedIdentifiers.length === 0 ? {} : { source_identifiers: scopedIdentifiers }),
+    }];
+  });
   return {
-    subject_name: subject,
+    subject_name: subject ?? perCharacter[0]?.subject_name ?? "source",
     ...(medium === undefined ? {} : { source_medium: medium }),
     ...(identifiers === undefined || identifiers.length === 0 ? {} : { source_identifiers: identifiers }),
-    adaptation_intent: nonEmptyInterviewValue(values, ["concept"]) ?? subject,
-    canon_policy: "canon_inspired",
+    adaptation_intent: nonEmptyInterviewValue(values, ["concept"]) ?? subject ?? perCharacter[0]?.subject_name ?? "source",
+    canon_policy: canonPolicyFromValues(values),
+    ...(perCharacter.length > 0 ? { subjects: perCharacter } : {}),
   };
 }
 
@@ -399,13 +426,11 @@ function worldConfig(interview: InterviewState): Record<string, unknown> | undef
   const explicitlyEnabled = /^(?:需要|啟用|enabled|yes|y|true)$/iu.test(enabledText) || /需要(?:世界|設定)/iu.test(enabledText);
   const enabled = interview.flow === "world" || worldCharacterKind || (!explicitlyDisabled && explicitlyEnabled);
   if (enabledValue === undefined && interview.flow !== "world" && !worldCharacterKind) return undefined;
-  const timing = interview.flow === "world"
+  const timing = /之前|before/iu.test(String(values.world_timing ?? ""))
     ? "before_characters"
-    : /之前|before/iu.test(String(values.world_timing ?? ""))
-      ? "before_characters"
-      : /之後|after/iu.test(String(values.world_timing ?? ""))
-        ? "after_characters"
-        : undefined;
+    : /之後|after/iu.test(String(values.world_timing ?? ""))
+      ? "after_characters"
+      : undefined;
   return {
     enabled,
     ...(nonEmptyInterviewValue(values, ["world_kind"]) === undefined ? {} : { kind: nonEmptyInterviewValue(values, ["world_kind"]) }),
@@ -437,7 +462,7 @@ function buildBlueprintPrecheck(projectId: string, operationId: string, intervie
     characters,
     ...(characters[0] === undefined ? {} : { primary_character_id: characters[0].id }),
     ...(relationshipConfig(interview, subjects) === undefined ? {} : { relationships: relationshipConfig(interview, subjects) }),
-    ...(interview.flow === "source_adaptation" ? { source_adaptation: sourceAdaptationIntentFromValues(values) } : {}),
+    ...(interview.flow === "source_adaptation" ? { source_adaptation: sourceAdaptationIntentFromValues(values, subjects) } : {}),
     // Keep the legacy mirror for old creators and readers when there is one subject.
     ...(subjects.length === 1 && firstDirection !== undefined ? { blueprint_direction: firstDirection } : {}),
     intake_values: values,
@@ -1445,6 +1470,18 @@ export class WorkspaceRuntime {
     if (parsed.data.kind === "wardrobe") {
       await this.ensureWardrobeAuthoringReady(parsed.data.character_id);
     }
+    const worldOrderKind: ArtifactKind | undefined = parsed.data.kind === "world"
+      ? "world_lore"
+      : parsed.data.kind === "character"
+        ? "character"
+        : parsed.data.kind === "zhuji"
+          ? "zhuji"
+          : parsed.data.kind === "palette"
+            ? "palette"
+            : parsed.data.kind === "wardrobe"
+              ? "wardrobe"
+              : undefined;
+    if (worldOrderKind !== undefined) await this.ensureWorldAuthoringOrder(worldOrderKind);
     const request = `create ${parsed.data.kind}`;
     const fallbackAgent = parsed.data.kind === "fact_review"
       ? nextFactReviewer(knowledgeState)
@@ -1537,6 +1574,11 @@ export class WorkspaceRuntime {
       agent_id: resolution.agent_id,
       agent_role: resolution.agent_role,
     };
+  }
+
+  /** Director-only fact review submission; bypasses reviewer rotation so conflicts can be resolved. */
+  async submitConflictResolution(proposal: unknown, context: WorkspaceContext): Promise<RequestResult> {
+    return this.submitTemplateProposal(proposal, context, { agent: "director" });
   }
 
   async submitZhujiProposal(proposal: unknown, context: WorkspaceContext, options: { agent?: string } = {}): Promise<RequestResult> {
@@ -1879,6 +1921,12 @@ export class WorkspaceRuntime {
     }
     const state = existing;
     if (kind === "authoring") this.ensureSourceAdaptationFactsReady(state);
+    if (kind === "authoring") {
+      const inferred = inferAuthoringKind(trimmed);
+      if (inferred === "character" || inferred === "world_lore" || inferred === "zhuji" || inferred === "palette" || inferred === "wardrobe") {
+        await this.ensureWorldAuthoringOrder(inferred);
+      }
+    }
     const isSourceSearch = kind === "source" && /搜尋|找來源|research|search/iu.test(trimmed) && !/加入|匯入|保存|批准/iu.test(trimmed);
     const operationId = internalId("operation");
     const attachmentRefs = context.attachments.length > 0 ? await this.attachmentStore.save(operationId, context.attachments) : [];
@@ -2094,6 +2142,38 @@ export class WorkspaceRuntime {
     });
     if (!hasCharacterSettings) {
       throw new CoreError("CHARACTER_SETTINGS_REQUIRED", "請先完成至少一個珠璣或調色盤角色設定模組，再建立衣櫃。", true);
+    }
+  }
+
+  private async ensureWorldAuthoringOrder(kind: ArtifactKind): Promise<void> {
+    if (!this.interviewRequired) return;
+    const state = await this.repository.read();
+    const workflowBacked = state.interview.status === "complete" || ["ready", "published"].includes(state.project_status);
+    if (!workflowBacked) return;
+    const latestRecordedPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
+    const blueprint = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint"
+      && hasUsableArtifact(artifact)
+      && (latestRecordedPrecheck === undefined || artifact.blueprint_precheck_id === latestRecordedPrecheck.id));
+    const world = blueprint === undefined ? undefined : (() => {
+      try {
+        return objectValue(JSON.parse(blueprint.content)?.world);
+      } catch {
+        return undefined;
+      }
+    })();
+    if (world?.enabled !== true) return;
+    const timing = typeof world.authoring_timing === "string" && world.authoring_timing.length > 0 ? world.authoring_timing : "before_characters";
+    const characterKinds: readonly ArtifactKind[] = ["character", "zhuji", "palette", "wardrobe"];
+    const hasWorldLore = state.artifacts.some((artifact) => artifact.kind === "world_lore" && hasUsableArtifact(artifact));
+    const hasCharacterSide = state.artifacts.some((artifact) => characterKinds.includes(artifact.kind) && hasUsableArtifact(artifact));
+    if (timing === "before_characters") {
+      if (characterKinds.includes(kind) && !hasWorldLore) {
+        throw new CoreError("WORLD_AUTHORING_ORDER", "世界設定需在角色創作之前完成；請先建立世界設定。", true);
+      }
+      return;
+    }
+    if (timing === "after_characters" && kind === "world_lore" && !hasCharacterSide) {
+      throw new CoreError("CHARACTER_AUTHORING_ORDER", "角色創作需在世界設定之前完成；請先建立角色設定。", true);
     }
   }
 

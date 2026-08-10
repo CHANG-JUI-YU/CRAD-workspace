@@ -8,6 +8,7 @@ import {
   type FactEvidenceReference,
   type FactRecord,
   type FactClassification,
+  type FactReviewDecisionStatus,
   type FactReviewDecisionRecord,
   type FactReviewPassRecord,
   type FactReviewRunRecord,
@@ -72,6 +73,54 @@ function normalize(value: string): string {
 function factKey(fact: Pick<FactRecord, "statement" | "subject" | "predicate" | "value">): string {
   const structured = [fact.subject, fact.predicate, fact.value].filter((value): value is string => value !== undefined).join("|");
   return normalize(structured.length > 0 ? structured : fact.statement);
+}
+
+/** Coverage dimensions inferred from the auto-extraction classification. */
+export function coverageForClassification(classification: FactClassification): string[] {
+  switch (classification) {
+    case "identity":
+      return ["identity"];
+    case "trait":
+      return ["personality"];
+    case "relationship":
+      return ["relationships"];
+    case "event":
+      return ["background"];
+    case "world":
+      return ["world_context"];
+    default:
+      return [];
+  }
+}
+
+/** Generic linking verbs and copulas that do not describe a contested attribute. */
+const GENERIC_PREDICATES = new Set([
+  "is", "are", "was", "were", "be", "been", "being",
+  "has", "have", "had",
+  "是", "為", "为", "係", "系",
+]);
+
+/**
+ * Detect accepted facts that contradict each other on the same subject and
+ * predicate but different values. Returns pairs that require Director review.
+ * Generic linking predicates are skipped because they carry no contested
+ * attribute (e.g. "X is direct" vs "X is observant" both describe traits).
+ */
+export function contradictingAcceptedFacts(facts: readonly FactRecord[]): Array<{ left: FactRecord; right: FactRecord }> {
+  const accepted = facts.filter((fact) => fact.status === "accepted" && fact.subject !== undefined && fact.predicate !== undefined && fact.value !== undefined);
+  const pairs: Array<{ left: FactRecord; right: FactRecord }> = [];
+  for (let i = 0; i < accepted.length; i += 1) {
+    for (let j = i + 1; j < accepted.length; j += 1) {
+      const left = accepted[i]!;
+      const right = accepted[j]!;
+      const leftPredicate = normalize(left.predicate!);
+      if (GENERIC_PREDICATES.has(leftPredicate)) continue;
+      if (normalize(left.subject!) === normalize(right.subject!) && leftPredicate === normalize(right.predicate!) && normalize(left.value!) !== normalize(right.value!)) {
+        pairs.push({ left, right });
+      }
+    }
+  }
+  return pairs;
 }
 
 function inferClassification(predicate: string): FactClassification {
@@ -247,7 +296,7 @@ function factFromSentence(source: SourceRecord, statement: string, actor: string
     candidate_occurrence_id: internalId("candidate_occurrence"),
     statement,
     ...structured,
-    coverage: [],
+    coverage: coverageForClassification(structured?.classification ?? "other"),
     status: "candidate",
     confidence: 0.7,
     source_ids: [source.id],
@@ -379,7 +428,6 @@ export class KnowledgeService {
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
     const pending = initial.facts.filter((fact) => fact.status === "candidate");
-    if (pending.length === 0) throw new CoreError("FACT_REVIEW_NO_CANDIDATES", "No fact candidates are available for review.", true);
     const inferredCurationRunId = curationRunId ?? [...initial.audit].reverse().find((event) => event.event === "fact.curation.applied" || event.event === "knowledge.refreshed")?.operation_id;
     const sourceRevisions: FactReviewRunRecord["source_revisions"] = initial.sources
       .filter((source) => pending.some((fact) => fact.source_ids.includes(source.id)))
@@ -401,6 +449,7 @@ export class KnowledgeService {
       return run.source_revisions.every((sourceRevision) => initial.sources.some((source) => source.id === sourceRevision.source_id && source.revision === sourceRevision.revision));
     });
     if (openRun !== undefined) return openRun;
+    if (pending.length === 0) throw new CoreError("FACT_REVIEW_NO_CANDIDATES", "No fact candidates are available for review.", true);
     const candidateSetRevision = contentHash(canonicalJson({
       curation_run_id: inferredCurationRunId,
       candidates: pending.map((fact) => ({ id: candidateOccurrenceForFact(fact), revision: factCandidateRevision(fact, initial.sources) })).sort((left, right) => left.id.localeCompare(right.id)),
@@ -509,10 +558,12 @@ export class KnowledgeService {
     if (decisions.length === 0) throw new CoreError("FACT_REVIEW_BATCH_EMPTY", "At least one fact review decision is required.", true);
     const targetIds: string[] = [];
     const records: FactReviewDecisionRecord[] = [];
-    const updates = new Map<string, { decision: FactDecision; evidence: FactEvidenceReference[]; record: FactReviewDecisionRecord }>();
+    const updates = new Map<string, { decision: FactDecision; evidence: FactEvidenceReference[]; record: FactReviewDecisionRecord; coverage: string[] }>();
+    let skippedCount = 0;
+    const acceptedPool = initial.facts.filter((fact) => fact.status === "accepted");
     for (const decision of decisions) {
-      if (decision.candidate_occurrence_id === undefined) {
-        throw new CoreError("FACT_CANDIDATE_OCCURRENCE_REQUIRED", "Strict fact review decisions must identify the candidate occurrence from context.", true);
+      if (decision.candidate_occurrence_id === undefined && decision.fact_id === undefined) {
+        throw new CoreError("FACT_CANDIDATE_OCCURRENCE_REQUIRED", "Strict fact review decisions must identify the candidate occurrence or fact id from context.", true);
       }
       const occurrenceId = decision.candidate_occurrence_id ?? decision.fact_id;
       const target = occurrenceId === undefined
@@ -526,7 +577,8 @@ export class KnowledgeService {
       if (targetIds.includes(target.id)) throw new CoreError("FACT_REVIEW_TARGET_DUPLICATE", `Fact ${target.id} appears more than once in this review.`, true);
       const previousDecision = latestDecisionForOccurrence(initial.fact_review_decisions, run.id, targetOccurrenceId);
       if (previousDecision?.decision === "accepted" || previousDecision?.decision === "rejected") {
-        throw new CoreError("FACT_CANDIDATE_NOT_ACTIVE", `Candidate ${targetOccurrenceId} has already been adjudicated in review run ${run.id}.`, true);
+        skippedCount += 1;
+        continue;
       }
       if (previousDecision?.decision === "conflict" && reviewerIdentity !== "director") {
         throw new CoreError("FACT_REVIEW_CONFLICT_DIRECTOR_REQUIRED", `Candidate ${targetOccurrenceId} is in conflict and requires Director resolution.`, true);
@@ -537,7 +589,26 @@ export class KnowledgeService {
       const evidence = decision.decision === "accept" || decision.evidence.length > 0 || structuredEvidenceCount > 0
         ? strictEvidenceReferences(decision, target, initial.sources, initial.knowledge_chunks, decision.decision === "accept")
         : [];
-      if (decision.decision === "accept") assertStrictFactQuality(target);
+      const effectiveCoverage = [...new Set([...(target.coverage ?? []), ...(decision.coverage ?? [])])];
+      const effectiveFact: FactRecord = effectiveCoverage.length > 0 ? { ...target, coverage: effectiveCoverage } : target;
+      if (decision.decision === "accept") assertStrictFactQuality(effectiveFact);
+      let finalStatus: FactReviewDecisionStatus = status;
+      let finalReason = decision.reason;
+      if (status === "accepted" && reviewerIdentity !== "director") {
+        const targetPredicate = normalize(target.predicate ?? "");
+        if (!GENERIC_PREDICATES.has(targetPredicate)) {
+          const contradicting = acceptedPool.find((accepted) => {
+            if (accepted.id === target.id || accepted.subject === undefined || accepted.predicate === undefined || accepted.value === undefined || target.subject === undefined || target.predicate === undefined || target.value === undefined) return false;
+            return normalize(accepted.subject) === normalize(target.subject) && normalize(accepted.predicate) === normalize(target.predicate) && normalize(accepted.value) !== normalize(target.value);
+          });
+          if (contradicting !== undefined) {
+            finalStatus = "conflict";
+            finalReason = `${decision.reason} Conflict with accepted fact ${contradicting.id}: ${contradicting.statement}`.trim();
+          } else {
+            acceptedPool.push(effectiveFact);
+          }
+        }
+      }
       const record: FactReviewDecisionRecord = {
         schema_version: 1,
         id: internalId("fact_review_decision"),
@@ -546,8 +617,8 @@ export class KnowledgeService {
         candidate_occurrence_id: targetOccurrenceId,
         fact_id: target.id,
         reviewer_identity: reviewerIdentity,
-        decision: status,
-        reason: decision.reason,
+        decision: finalStatus,
+        reason: finalReason,
         evidence,
         candidate_revision: currentCandidateRevision,
         expected_projection_revision: actualProjectionRevision,
@@ -555,9 +626,11 @@ export class KnowledgeService {
         created_at: now(),
       };
       records.push(record);
-      updates.set(target.id, { decision, evidence, record });
+      updates.set(target.id, { decision, evidence, record, coverage: effectiveCoverage });
     }
-    const summary = `Adjudicated ${targetIds.length} fact candidates in review run ${run.id}.`;
+    const summary = skippedCount > 0
+      ? `Adjudicated ${targetIds.length} fact candidates in review run ${run.id}; skipped ${skippedCount} already-adjudicated candidates.`
+      : `Adjudicated ${targetIds.length} fact candidates in review run ${run.id}.`;
     try {
       await this.repository.commit(initial.revision, (current) => {
         const decisionsForRun = [...current.fact_review_decisions, ...records];
@@ -565,10 +638,7 @@ export class KnowledgeService {
         for (const item of decisionsForRun) {
           if (item.review_run_id === run!.id) latestByOccurrence.set(item.candidate_occurrence_id, item);
         }
-        const reviewedIds = new Set([...latestByOccurrence.entries()]
-          .filter(([, item]) => item.decision === "accepted" || item.decision === "rejected")
-          .map(([occurrenceId]) => occurrenceId));
-        const complete = run!.candidate_occurrence_ids.every((id) => reviewedIds.has(id));
+        const complete = run!.candidate_occurrence_ids.every((id) => latestByOccurrence.has(id));
         const blocked = [...latestByOccurrence.values()].some((item) => item.decision === "needs_evidence" || item.decision === "conflict");
         const updatedRun: FactReviewRunRecord = {
           ...run!,
@@ -587,6 +657,7 @@ export class KnowledgeService {
               status: update.record.decision === "accepted" ? "accepted" : update.record.decision === "rejected" ? "rejected" : update.record.decision === "conflict" ? "conflict" : "candidate",
               evidence: [...new Set([...fact.evidence, ...addedEvidence])],
               evidence_refs: [...(fact.evidence_refs ?? []), ...update.evidence],
+              ...(update.coverage.length > 0 ? { coverage: update.coverage } : {}),
               fact_revision: (fact.fact_revision ?? 0) + 1,
               candidate_occurrence_id: candidateOccurrenceForFact(fact),
               review_run_id: run!.id,
@@ -613,6 +684,21 @@ export class KnowledgeService {
     }
     const needsInput = records.some((record) => record.decision === "needs_evidence" || record.decision === "conflict");
     return { fact_ids: targetIds, status: needsInput ? "needs_input" : "completed", summary };
+  }
+
+  /** Director-only resolution entry that may overwrite conflict decisions. */
+  async resolveFactConflict(
+    operationId: string,
+    decisions: FactDecision[],
+    actor: string,
+    reviewerIdentity: string,
+    reviewRunId?: string,
+    expectedProjectionRevision?: string,
+  ): Promise<FactReviewExecutionResult> {
+    if (reviewerIdentity !== "director") {
+      throw new CoreError("FACT_REVIEW_CONFLICT_DIRECTOR_REQUIRED", "Conflict resolution requires the Director.", true);
+    }
+    return this.applyReviewBatch(operationId, decisions, actor, reviewerIdentity, reviewRunId, expectedProjectionRevision);
   }
 
   async applyReview(operationId: string, decisions: FactDecision[], actor: string, reviewPass?: 1 | 2 | 3): Promise<FactReviewExecutionResult> {

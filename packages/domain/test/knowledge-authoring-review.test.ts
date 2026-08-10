@@ -414,4 +414,128 @@ describe("knowledge, authoring and review services", () => {
     await service.updateIssue("op-stricter-policy", { issue_id: "issue-overridable", action: "override", severity: "error", reason: "Downgrade from the current critical policy baseline." }, "director");
     expect((await repository.read()).issues.find((issue) => issue.id === "issue-overridable")).toMatchObject({ effective_severity: "error", override: { severity: "error", against_effective_severity: "critical" } });
   });
+
+  it("accepts a fact by repairing coverage through the review decision", async () => {
+    const repository = new MemoryProjectRepository("coverage-repair");
+    const text = "Yukino is direct.";
+    const source: SourceRecord = { id: "source-coverage", candidate_id: "candidate-coverage", title: "official", canonical_text: text, original_hash: contentHash(text), revision: contentHash(text), media_type: "text/plain", created_at: new Date().toISOString() };
+    await repository.commit(0, (state) => ({ ...state, sources: [source], operations: [operation("op-refresh-coverage", "knowledge"), operation("op-review-coverage", "review")] }));
+    const service = new KnowledgeService(repository);
+    await service.refresh("op-refresh-coverage", "refresh new sources", "fact-curator");
+    await repository.commit((await repository.read()).revision, (state) => ({
+      ...state,
+      facts: state.facts.map((fact) => ({ ...fact, coverage: [] })),
+    }));
+    const run = await service.beginFactReviewRun("op-review-coverage", "fact-reviewer-1");
+    const context = await service.factReviewContext();
+    const candidate = context.candidates[0]!;
+    const decision: FactDecision = {
+      candidate_occurrence_id: candidate.candidate_occurrence_id,
+      claim: candidate.statement,
+      decision: "accept",
+      reason: "The exact sentence appears in the current official source chunk.",
+      coverage: ["character", "background"],
+      evidence: [{ source: source.title, quote: candidate.statement }],
+    };
+    const applied = await service.applyReviewBatch("op-review-coverage", [decision], "fact-reviewer-1", "fact-reviewer-1", run.id, context.projection_revision);
+    expect(applied.status).toBe("completed");
+    const after = await repository.read();
+    expect(after.facts.find((fact) => fact.id === candidate.fact_id)).toMatchObject({ status: "accepted", coverage: ["character", "background"] });
+  });
+
+  it("skips already-adjudicated candidates in a later batch instead of failing", async () => {
+    const repository = new MemoryProjectRepository("skip-settled");
+    const text = "Yukino has_trait direct. Yukino belongs to Sobu High School.";
+    const source: SourceRecord = { id: "source-skip", candidate_id: "candidate-skip", title: "official", canonical_text: text, original_hash: contentHash(text), revision: contentHash(text), media_type: "text/plain", created_at: new Date().toISOString() };
+    await repository.commit(0, (state) => ({ ...state, sources: [source], operations: [operation("op-refresh-skip", "knowledge"), operation("op-review-skip", "review"), operation("op-review-skip-2", "review")] }));
+    const service = new KnowledgeService(repository);
+    await service.refresh("op-refresh-skip", "refresh new sources", "fact-curator");
+    const run = await service.beginFactReviewRun("op-review-skip", "fact-reviewer-1");
+    const candidates = (await service.factReviewContext()).candidates;
+    expect(candidates).toHaveLength(2);
+    const first = candidates[0]!;
+    const second = candidates[1]!;
+    const decisionFor = (candidate: (typeof candidates)[number]): FactDecision => ({
+      candidate_occurrence_id: candidate.candidate_occurrence_id,
+      claim: candidate.statement,
+      decision: "accept",
+      reason: "The exact sentence appears in the current official source chunk.",
+      coverage: ["character", "personality"],
+      evidence: [{ source: source.title, quote: candidate.statement }],
+    });
+    await service.applyReviewBatch("op-review-skip", [decisionFor(first)], "fact-reviewer-1", "fact-reviewer-1", run.id);
+    const secondBatch = await service.applyReviewBatch("op-review-skip-2", [decisionFor(first), decisionFor(second)], "fact-reviewer-2", "fact-reviewer-2", run.id);
+    expect(secondBatch.status).toBe("completed");
+    expect(secondBatch.summary).toContain("skipped 1 already-adjudicated candidates.");
+    const after = await repository.read();
+    expect(after.fact_review_runs.find((item) => item.id === run.id)?.status).toBe("completed");
+    const facts = after.facts.filter((fact) => [first.fact_id, second.fact_id].includes(fact.id));
+    expect(facts).toHaveLength(2);
+    expect(facts.every((fact) => fact.status === "accepted")).toBe(true);
+  });
+
+  it("marks a run blocked when every candidate is needs_evidence", async () => {
+    const repository = new MemoryProjectRepository("blocked-run");
+    const text = "Yukino has_trait direct. Yukino has_trait calm.";
+    const source: SourceRecord = { id: "source-blocked", candidate_id: "candidate-blocked", title: "official", canonical_text: text, original_hash: contentHash(text), revision: contentHash(text), media_type: "text/plain", created_at: new Date().toISOString() };
+    await repository.commit(0, (state) => ({ ...state, sources: [source], operations: [operation("op-refresh-blocked", "knowledge"), operation("op-review-blocked", "review")] }));
+    const service = new KnowledgeService(repository);
+    await service.refresh("op-refresh-blocked", "refresh new sources", "fact-curator");
+    const run = await service.beginFactReviewRun("op-review-blocked", "fact-reviewer-1");
+    const candidates = (await service.factReviewContext()).candidates;
+    expect(candidates).toHaveLength(2);
+    const applied = await service.applyReviewBatch(
+      "op-review-blocked",
+      candidates.map((candidate) => ({ candidate_occurrence_id: candidate.candidate_occurrence_id, claim: candidate.statement, decision: "needs_evidence" as const, reason: "Quote-level evidence is required before acceptance.", evidence: [] })),
+      "fact-reviewer-1",
+      "fact-reviewer-1",
+      run.id,
+    );
+    expect(applied.status).toBe("needs_input");
+    const after = await repository.read();
+    const updatedRun = after.fact_review_runs.find((item) => item.id === run.id)!;
+    expect(updatedRun.status).toBe("blocked");
+    expect(updatedRun.completed_at).toBeDefined();
+  });
+
+  it("flags contradicting accepted facts as conflict and lets the director resolve them", async () => {
+    const repository = new MemoryProjectRepository("conflict-director");
+    const text = "Yukino has_trait direct. Yukino has_trait calm.";
+    const source: SourceRecord = { id: "source-conflict", candidate_id: "candidate-conflict", title: "official", canonical_text: text, original_hash: contentHash(text), revision: contentHash(text), media_type: "text/plain", created_at: new Date().toISOString() };
+    await repository.commit(0, (state) => ({ ...state, sources: [source], operations: [operation("op-refresh-conflict", "knowledge"), operation("op-review-conflict", "review"), operation("op-review-conflict-2", "review")] }));
+    const service = new KnowledgeService(repository);
+    await service.refresh("op-refresh-conflict", "refresh new sources", "fact-curator");
+    const run = await service.beginFactReviewRun("op-review-conflict", "fact-reviewer-1");
+    const candidates = (await service.factReviewContext()).candidates;
+    expect(candidates).toHaveLength(2);
+    const decisionFor = (candidate: (typeof candidates)[number]): FactDecision => ({
+      candidate_occurrence_id: candidate.candidate_occurrence_id,
+      claim: candidate.statement,
+      decision: "accept",
+      reason: "The exact sentence appears in the current official source chunk.",
+      coverage: ["character", "personality"],
+      evidence: [{ source: source.title, quote: candidate.statement }],
+    });
+    await service.applyReviewBatch("op-review-conflict", [decisionFor(candidates[0]!)], "fact-reviewer-1", "fact-reviewer-1", run.id);
+    const applied = await service.applyReviewBatch("op-review-conflict-2", [decisionFor(candidates[1]!)], "fact-reviewer-2", "fact-reviewer-2", run.id);
+    expect(applied.status).toBe("needs_input");
+    const after = await repository.read();
+    expect(after.facts.find((fact) => fact.id === candidates[1]!.fact_id)).toMatchObject({ status: "conflict" });
+    expect(after.fact_review_decisions).toContainEqual(expect.objectContaining({ candidate_occurrence_id: candidates[1]!.candidate_occurrence_id, decision: "conflict", reviewer_identity: "fact-reviewer-2" }));
+    expect(after.fact_review_runs.find((item) => item.id === run.id)?.status).toBe("blocked");
+    const directorDecision: FactDecision = {
+      candidate_occurrence_id: candidates[1]!.candidate_occurrence_id,
+      claim: candidates[1]!.statement,
+      decision: "accept",
+      reason: "Director overrides the reviewer conflict after weighing both claims.",
+      coverage: ["character", "personality"],
+      evidence: [{ source: source.title, quote: candidates[1]!.statement }],
+    };
+    await expect(service.resolveFactConflict("op-review-conflict-2", [directorDecision], "director", "fact-reviewer-1", run.id)).rejects.toMatchObject({ code: "FACT_REVIEW_CONFLICT_DIRECTOR_REQUIRED" });
+    const resolved = await service.resolveFactConflict("op-review-conflict-2", [directorDecision], "director", "director", run.id);
+    expect(resolved.status).toBe("completed");
+    const resolvedState = await repository.read();
+    expect(resolvedState.facts.find((fact) => fact.id === candidates[1]!.fact_id)).toMatchObject({ status: "accepted" });
+    expect(resolvedState.fact_review_runs.find((item) => item.id === run.id)?.status).toBe("completed");
+  });
 });
