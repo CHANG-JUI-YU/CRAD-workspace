@@ -50,7 +50,12 @@ export class ImportService {
       }));
       return { status: "needs_input", summary: "匯入需要一個附件。" };
     }
-    const originalContent = new TextDecoder("utf-8", { fatal: false }).decode(attachment.content).replace(/^\uFEFF/u, "");
+    let originalContent: string;
+    try {
+      originalContent = new TextDecoder("utf-8", { fatal: true }).decode(attachment.content).replace(/^\uFEFF/u, "");
+    } catch {
+      throw new CoreError("SOURCE_DECODE_FAILED", "The attachment content is not valid UTF-8", true);
+    }
     const originalHash = contentHash(attachment.content);
     const dryRun = /dry[- ]?run|只檢查|檢視轉換|預覽轉換/iu.test(request);
     let payload: Record<string, unknown>;

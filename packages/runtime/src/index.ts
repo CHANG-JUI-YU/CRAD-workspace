@@ -1972,12 +1972,26 @@ export class WorkspaceRuntime {
         return { operation_id: operation.id, status: searched.status, summary: searched.summary, completed: searched.completed, blocked: searched.blocked };
       }
       const executionContext = this.fetcher === undefined ? context : { ...context, fetcher: this.fetcher };
-      const result = context.attachments.length > 0 || /https?:\/\//iu.test(trimmed)
-        ? await this.sources.resume(operation.id, trimmed, executionContext)
-        : await this.sources.execute(operation.id, executionContext);
+      if (context.attachments.length > 0 || /https?:\/\//iu.test(trimmed)) {
+        const resumed = await this.sources.resume(operation.id, trimmed, executionContext);
+        const latestResume = await this.repository.read();
+        const finalResume = latestResume.operations.find((item) => item.id === operation.id);
+        if (finalResume === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operation.id} does not exist`);
+        return { ...responseFromOperation(finalResume), status: resumed.status, summary: resumed.summary, completed: resumed.completed, blocked: resumed.blocked };
+      }
+      const beforeExecute = await this.repository.read();
+      const snapshotCandidate = beforeExecute.candidates.find((candidate) => candidate.status === "approved" && candidate.selection_snapshot !== undefined);
+      const executeOperationId = snapshotCandidate?.selection_snapshot?.operation_id ?? operation.id;
+      const result = await this.sources.execute(executeOperationId, executionContext);
       const latest = await this.repository.read();
-      const finalOperation = latest.operations.find((item) => item.id === operation.id);
-      if (finalOperation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operation.id} does not exist`);
+      const finalOperation = latest.operations.find((item) => item.id === executeOperationId);
+      if (finalOperation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${executeOperationId} does not exist`);
+      if (executeOperationId !== operation.id) {
+        await this.repository.commit(latest.revision, (current) => ({
+          ...current,
+          operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "completed", updated_at: now() } : item),
+        }));
+      }
       return { ...responseFromOperation(finalOperation), status: result.status, summary: result.summary, completed: result.completed, blocked: result.blocked };
     }
     if (kind === "knowledge" || kind === "authoring" || kind === "review") {

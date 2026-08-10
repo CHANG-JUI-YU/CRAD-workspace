@@ -104,7 +104,7 @@ describe("workflow gates and editable publish", () => {
       publishes: [{ id: "publish-1", operation_id: "op-old", artifact_ids: [], content: "{}", content_hash: contentHash("{}"), created_at: now }],
       operations: [operation("op-edit", "authoring")],
     }));
-    const result = await new AuthoringService(repository).create("op-edit", "Create character: Revised. Personality: calm and direct.", "writer");
+    const result = await new AuthoringService(repository).create("op-edit", "Draft note: Create character: Revised. Personality: calm and direct.", "writer");
     expect(result.status).toBe("completed");
     const state = await repository.read();
     expect(state.project_status).toBe("ready");
@@ -303,12 +303,13 @@ describe("workflow gates and editable publish", () => {
     const modules = moduleNames.map((module, index) => artifact(`zhuji-scope-${index}`, `zhuji:demo/${module}`, "zhuji", `demo/${module}`, { kind: "zhuji", character_id: "demo", module: { schema_version: 1, mode: "zhuji", module, title: module, content: "Complete module content." } }));
     const greeting = artifact("greeting-scope", "greeting:demo", "greeting", "demo", { document: { greetings: [{ character_ids: ["demo"], text: "Hello." }] } });
     const outOfScope = artifact("palette-out", "palette:demo/basic_information", "palette", "demo/basic_information", { kind: "palette", character_id: "demo", module: { schema_version: 1, mode: "palette", module: "basic_information", title: "Basic", content: "Unreviewed." } });
+    const bound = [target, ...modules, greeting, outOfScope].map((item) => ({ ...item, blueprint_precheck_id: precheck.id, blueprint_precheck_revision: precheck.candidate_blueprint_revision }));
     await repository.commit(0, (state) => ({
       ...state,
       project_status: "ready",
       interview: { ...state.interview, status: "complete" },
       blueprint_prechecks: [precheck],
-      artifacts: [target, ...modules, greeting, outOfScope],
+      artifacts: bound,
       reviews: [target, ...modules, greeting].map((item, index) => ({ id: `review-scope-${index}`, artifact_id: item.id, artifact_revision: item.revision, reviewer: "critic", status: "passed", issue_ids: [], created_at: now })),
       operations: [operation("op-publish")],
     }));
@@ -461,5 +462,41 @@ describe("workflow gates and editable publish", () => {
     }));
     const result = validateWorkflow(await repository.read(), "publish");
     expect(result.diagnostics.map((item) => item.code)).toContain("SOURCE_RESEARCH_NOT_INGESTED");
+  });
+
+  it("flags artifacts authored against an outdated Blueprint revision", async () => {
+    const repository = new MemoryProjectRepository("stale-binding");
+    const precheck = { id: "precheck-current", schema_version: 1, project_id: "stale-binding", operation_id: "interview", collaboration_mode: "assisted", candidate_blueprint: { project_id: "stale-binding" }, candidate_blueprint_revision: contentHash("current"), checks: [{ subject_id: "demo", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }], status: "recorded" as const, created_at: new Date().toISOString(), created_by: "director" };
+    const characterArtifact = artifact("character-stale", "character:demo", "character", "demo", { kind: "character", document: { schema_version: 1, id: "demo", display_name: "Demo", summary: "A character bound to an outdated blueprint." } });
+    const bound = { ...characterArtifact, blueprint_precheck_id: precheck.id, blueprint_precheck_revision: contentHash("old") };
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      artifacts: [bound],
+      blueprint_prechecks: [precheck],
+      reviews: [{ id: "review-stale", artifact_id: bound.id, artifact_revision: bound.revision, reviewer: "critic", status: "passed", issue_ids: [], created_at: new Date().toISOString() }],
+      operations: [operation("op-stale")],
+    }));
+    const result = validateWorkflow(await repository.read(), "publish");
+    expect(result.diagnostics.find((item) => item.code === "BLUEPRINT_BINDING_STALE")).toMatchObject({ severity: "error", artifact_ids: [bound.id] });
+  });
+
+  it("passes artifacts bound to the current Blueprint revision", async () => {
+    const repository = new MemoryProjectRepository("fresh-binding");
+    const precheck = { id: "precheck-current", schema_version: 1, project_id: "fresh-binding", operation_id: "interview", collaboration_mode: "assisted", candidate_blueprint: { project_id: "fresh-binding" }, candidate_blueprint_revision: contentHash("current"), checks: [{ subject_id: "demo", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }], status: "recorded" as const, created_at: new Date().toISOString(), created_by: "director" };
+    const characterArtifact = artifact("character-fresh", "character:demo", "character", "demo", { kind: "character", document: { schema_version: 1, id: "demo", display_name: "Demo", summary: "A character bound to the current blueprint." } });
+    const bound = { ...characterArtifact, blueprint_precheck_id: precheck.id, blueprint_precheck_revision: precheck.candidate_blueprint_revision };
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      artifacts: [bound],
+      blueprint_prechecks: [precheck],
+      reviews: [{ id: "review-fresh", artifact_id: bound.id, artifact_revision: bound.revision, reviewer: "critic", status: "passed", issue_ids: [], created_at: new Date().toISOString() }],
+      operations: [operation("op-fresh")],
+    }));
+    const result = validateWorkflow(await repository.read(), "publish");
+    expect(result.diagnostics.map((item) => item.code)).not.toContain("BLUEPRINT_BINDING_STALE");
   });
 });

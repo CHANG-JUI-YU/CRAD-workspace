@@ -31,6 +31,7 @@ function updateOperation(operation: OperationRecord, patch: Partial<OperationRec
 }
 
 function inferKind(request: string): ArtifactKind {
+  if (/draft_note|draft note|\bdraft\b|草稿|筆記|備忘|note|brief/iu.test(request)) return "draft_note";
   if (/relationship|關係|關係圖|relationships/iu.test(request)) return "relationship";
   if (/world|世界|世界觀|lore/iu.test(request)) return "world_lore";
   if (/greeting|開場|開場白/iu.test(request)) return "greeting";
@@ -69,6 +70,7 @@ function inferName(request: string, kind: ArtifactKind): string {
     conversion: "conversion",
     import_analysis: "import-analysis",
     director_routing: "director-routing",
+    draft_note: "draft-note",
     unknown: "artifact",
   };
   return labels[kind];
@@ -171,7 +173,7 @@ export class AuthoringService {
       created_by: actor,
       operation_id: operationId,
       ...(previous === undefined ? {} : { based_on: previous.revision }),
-      ...(kind === "blueprint" || kind === "palette" || kind === "wardrobe" ? blueprintBinding(initial) : {}),
+      ...blueprintBinding(initial),
     };
     const summary = `Stored ${parsed.data.kind} template ${name}.`;
     const state = await this.repository.read();
@@ -302,6 +304,15 @@ export class AuthoringService {
       }));
       return { status: "needs_input", summary: "衣櫃不能以自由文字略過完整清單與數量驗證。" };
     }
+    if (kind !== "draft_note") {
+      await this.repository.commit(initial.revision, (current) => ({
+        ...current,
+        operations: current.operations.map((item) => item.id === operationId
+          ? updateOperation(item, { status: "needs_input", question: `${kind} 必須使用對應的結構化 proposal；請由專屬 Creator 讀取 context 後提交，自由文字只能建立草稿筆記。` })
+          : item),
+      }));
+      return { status: "needs_input", summary: `${kind} 不能以自由文字略過 typed schema。` };
+    }
     const content = request.replace(/^\s*(建立|新增|更新|create|make|draft)\s*/iu, "").trim();
     if (content.length < 3) {
       await this.repository.commit(initial.revision, (current) => ({
@@ -338,7 +349,7 @@ export class AuthoringService {
       created_by: actor,
       operation_id: operationId,
       ...(previous === undefined ? {} : { based_on: previous.revision }),
-      ...(kind === "blueprint" ? blueprintBinding(initial) : {}),
+      ...blueprintBinding(initial),
     };
     const summary = `已建立 ${kind} artifact「${name}」revision ${artifact.revision.slice(0, 12)}。`;
     const state = await this.repository.read();

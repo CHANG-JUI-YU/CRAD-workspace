@@ -56,7 +56,7 @@ describe("runtime-facing server contract", () => {
       expect(JSON.stringify(await zhujiContextResponse.json())).toContain("trait_dialogue");
       const allZhujiContextResponse = await fetch(`${base}/workspace/zhuji/context`);
       expect(JSON.stringify(await allZhujiContextResponse.json())).toContain("self_introduction");
-      const requestResponse = await fetch(`${base}/workspace/request`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: "Create character: Demo. Personality: calm and clear.", agent: "director" }) });
+      const requestResponse = await fetch(`${base}/workspace/request`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: "Draft note: Create character: Demo. Personality: calm and clear.", agent: "director" }) });
       expect((await requestResponse.json() as { status: string }).status).toBe("completed");
       const listResponse = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
       expect(JSON.stringify(await listResponse.json())).toContain("workspace_zhuji_submit");
@@ -77,7 +77,7 @@ describe("runtime-facing server contract", () => {
       expect(await initialize.json()).toMatchObject({ result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "st-workspace-v3" } } });
       const modernInitialize = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "initialize", params: { protocolVersion: "2025-11-25" } }) });
       expect(await modernInitialize.json()).toMatchObject({ result: { protocolVersion: "2025-11-25", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "st-workspace-v3" } } });
-      const requestCall = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "workspace_request", arguments: { request: "Create greeting: Hello. This is enough content." } } }) });
+      const requestCall = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "workspace_request", arguments: { request: "Draft note: Create greeting: Hello. This is enough content." } } }) });
       expect(JSON.stringify(await requestCall.json())).toContain("completed");
       const zhujiRest = await fetch(`${base}/workspace/zhuji`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(zhujiProposal()) });
       expect((await zhujiRest.json() as { status: string }).status).toBe("completed");
@@ -162,7 +162,7 @@ describe("runtime-facing server contract", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-server-recovery-"));
     const repository = new FileProjectRepository(root, "recover", { layout: "project", materialize: true });
     const timestamp = new Date().toISOString();
-    const operation: OperationRecord = { id: "op-restart", kind: "authoring", request: "Create character: Restarted. Personality: calm and clear.", actor: "before-restart", status: "running", created_at: timestamp, updated_at: timestamp, progress: [] };
+    const operation: OperationRecord = { id: "op-restart", kind: "authoring", request: "Draft note: Create character: Restarted. Personality: calm and clear.", actor: "before-restart", status: "running", created_at: timestamp, updated_at: timestamp, progress: [] };
     await repository.commit(0, (state) => ({ ...state, operations: [operation] }));
     const server = createWorkspaceServer({ runtime: new WorkspaceRuntime(repository), workerOptions: { pollIntervalMs: 10, retryDelayMs: 1 } });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

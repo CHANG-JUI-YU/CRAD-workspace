@@ -21,7 +21,7 @@ describe("background workspace worker", () => {
     const repository = new MemoryProjectRepository("demo");
     await repository.commit(0, (state) => ({
       ...state,
-      operations: [operation("op-recover", "Create character: Resume. Personality: calm and clear.")],
+      operations: [operation("op-recover", "Draft note: Create character: Resume. Personality: calm and clear.")],
     }));
     const events: string[] = [];
     const worker = new WorkspaceWorker(new WorkspaceRuntime(repository), { pollIntervalMs: 10, retryDelayMs: 1, onEvent: (event) => events.push(event.type) });
@@ -49,7 +49,7 @@ describe("background workspace worker", () => {
   it("runs queued requests without blocking the caller", async () => {
     const repository = new MemoryProjectRepository("demo");
     const worker = new WorkspaceWorker(new WorkspaceRuntime(repository), { pollIntervalMs: 10 });
-    const queued = worker.enqueue({ request: "Create character: Queued. Personality: calm and clear.", context: { actor: "writer", attachments: [] } });
+    const queued = worker.enqueue({ request: "Draft note: Create character: Queued. Personality: calm and clear.", context: { actor: "writer", attachments: [] } });
     expect(queued.status).toBe("queued");
     expect(worker.status()).toMatchObject({ running: true });
     try {
@@ -86,7 +86,7 @@ describe("background workspace worker", () => {
     let current = new WorkspaceRuntime(first);
     const worker = new WorkspaceWorker(() => current, { pollIntervalMs: 10, retryDelayMs: 1 });
     current = new WorkspaceRuntime(second);
-    const queued = worker.enqueue({ request: "Create character: Switched. Personality: calm and clear.", context: { actor: "writer", attachments: [] } });
+    const queued = worker.enqueue({ request: "Draft note: Create character: Switched. Personality: calm and clear.", context: { actor: "writer", attachments: [] } });
     try {
       await expect(worker.wait(queued.job_id)).resolves.toMatchObject({ status: "completed" });
       expect((await first.read()).artifacts).toHaveLength(0);
@@ -98,7 +98,7 @@ describe("background workspace worker", () => {
 
   it("marks a persisted operation failed after retry exhaustion", async () => {
     const repository = new MemoryProjectRepository("demo");
-    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-fail", "Create character: Fail. Personality: clear.")] }));
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-fail", "Draft note: Create character: Fail. Personality: clear.")] }));
     const runtime = new WorkspaceRuntime(repository);
     vi.spyOn(runtime, "recoverOperation").mockRejectedValue(new Error("permanent"));
     const fail = vi.spyOn(runtime, "failOperation").mockResolvedValue();
@@ -154,7 +154,7 @@ describe("background workspace worker", () => {
     await repository.commit((await repository.read()).revision, (state) => ({
       ...state,
       operations: [
-        { ...operation("op-fallback-actor", "Create character: Fallback. Personality: calm."), actor: undefined },
+        { ...operation("op-fallback-actor", "Draft note: Create character: Fallback. Personality: calm."), actor: undefined },
       ],
     }));
     expect((await runtime.recoverOperation("op-fallback-actor", { actor: "", attachments: [] })).status).toBe("completed");
@@ -174,7 +174,7 @@ describe("background workspace worker", () => {
 
   it("claims the lease so a second worker never double-executes", async () => {
     const repository = new MemoryProjectRepository("demo");
-    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-lease", "Create character: Lease. Personality: calm and clear.")] }));
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-lease", "Draft note: Create character: Lease. Personality: calm and clear.")] }));
     const runtime = new WorkspaceRuntime(repository);
     const recover = vi.spyOn(runtime, "recoverOperation").mockImplementation(async (operationId) => {
       await repository.commit((await repository.read()).revision, (state) => ({
@@ -200,7 +200,7 @@ describe("background workspace worker", () => {
     const repository = new MemoryProjectRepository("demo");
     const now = new Date().toISOString();
     const future = new Date(Date.now() + 60_000).toISOString();
-    const leased: OperationRecord = { ...operation("op-held", "Create character: Held. Personality: calm."), lease_owner: "owner-a", lease_token: "token-a", lease_expires_at: future };
+    const leased: OperationRecord = { ...operation("op-held", "Draft note: Create character: Held. Personality: calm."), lease_owner: "owner-a", lease_token: "token-a", lease_expires_at: future };
     await repository.commit(0, (state) => ({ ...state, operations: [leased] }));
     const runtime = new WorkspaceRuntime(repository);
     expect(await runtime.claimOperation("op-held", "owner-b")).toBeUndefined();
@@ -217,7 +217,7 @@ describe("background workspace worker", () => {
     const repository = new MemoryProjectRepository("demo");
     const now = new Date().toISOString();
     const stale = new Date(Date.now() - 5_000).toISOString();
-    const expired: OperationRecord = { ...operation("op-stale", "Create character: Stale. Personality: calm."), lease_owner: "dead-worker", lease_token: "stale-token", lease_expires_at: stale };
+    const expired: OperationRecord = { ...operation("op-stale", "Draft note: Create character: Stale. Personality: calm."), lease_owner: "dead-worker", lease_token: "stale-token", lease_expires_at: stale };
     await repository.commit(0, (state) => ({ ...state, operations: [expired] }));
     const runtime = new WorkspaceRuntime(repository);
     const claimed = await runtime.claimOperation("op-stale", "worker-2");

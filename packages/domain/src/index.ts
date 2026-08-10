@@ -85,7 +85,13 @@ function decodeText(content: Uint8Array): string {
   if (content.length > 0 && nulCount * 100 > content.length) {
     throw new CoreError("SOURCE_BINARY_UNSUPPORTED", "The source content contains binary bytes", true);
   }
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(content).replace(/^\uFEFF/u, "").replace(/\r\n?/gu, "\n").trim();
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(content);
+  } catch {
+    throw new CoreError("SOURCE_DECODE_FAILED", "The source content is not valid UTF-8", true);
+  }
+  text = text.replace(/^\uFEFF/u, "").replace(/\r\n?/gu, "\n").trim();
   if (text.length === 0) throw new CoreError("SOURCE_EMPTY", "The source content is empty", true);
   return text;
 }

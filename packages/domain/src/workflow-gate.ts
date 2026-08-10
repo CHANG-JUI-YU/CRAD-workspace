@@ -500,6 +500,23 @@ function reportDerivedLinks(state: ProjectState, artifacts: ArtifactRecord[], di
   }
 }
 
+function reportBlueprintBindings(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[]): void {
+  const precheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
+  if (precheck === undefined) return;
+  const bindingKinds = new Set(["character", "relationship", "world_lore", "greeting", "zhuji", "palette", "wardrobe", "plugin"]);
+  for (const artifact of artifacts) {
+    if (!bindingKinds.has(artifact.kind)) continue;
+    if (artifact.blueprint_precheck_id !== precheck.id || artifact.blueprint_precheck_revision !== precheck.candidate_blueprint_revision) {
+      add(diagnostics, {
+        code: "BLUEPRINT_BINDING_STALE",
+        message: `Artifact ${artifact.name} was authored against an outdated Blueprint revision; re-author it against the current Blueprint before publishing.`,
+        severity: "error",
+        artifact_ids: [artifact.id],
+      });
+    }
+  }
+}
+
 export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase): WorkflowGateResult {
   const diagnostics: WorkflowDiagnostic[] = [];
   const managed = managedProject(state);
@@ -537,6 +554,7 @@ export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase):
   reportSourceResearch(state, artifacts, diagnostics);
   reportMissingReferences(state, artifacts, diagnostics, manifest);
   reportFacts(state, diagnostics);
+  reportBlueprintBindings(state, artifacts, diagnostics);
   reportDerivedLinks(state, artifacts, diagnostics);
   reportBlockingIssues(state, content, diagnostics, manifest);
   return { ok: diagnostics.length === 0, diagnostics };

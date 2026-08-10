@@ -199,11 +199,11 @@ describe("knowledge, authoring and review services", () => {
     expect((await repository.read()).facts.length).toBeGreaterThan(0);
   });
 
-  it("creates a revision and does not duplicate identical authoring content", async () => {
+  it("creates a revision and does not duplicate identical draft-note content", async () => {
     const repository = new MemoryProjectRepository("demo");
     await repository.commit(0, (state) => ({ ...state, quality_profile: { blocking_severity: "error", overrides: { CONTENT_TOO_SHORT: "info", PLACEHOLDER_REMAINS: "info" } }, operations: [operation("op-author", "authoring")] }));
     const service = new AuthoringService(repository);
-    const request = "Create character: Yukino. Personality: calm, direct, and observant.";
+    const request = "Draft note: Create character: Yukino. Personality: calm, direct, and observant.";
     const first = await service.create("op-author", request, "writer");
     expect(first.status).toBe("completed");
     await repository.commit((await repository.read()).revision, (state) => ({ ...state, operations: [...state.operations, operation("op-author-2", "authoring")] }));
@@ -221,16 +221,20 @@ describe("knowledge, authoring and review services", () => {
     await expect(service.create("missing-authoring", "character content", "writer")).rejects.toMatchObject({ code: "OPERATION_NOT_FOUND" });
   });
 
-  it("supports the remaining artifact kinds through the same flexible authoring service", async () => {
+  it("requires typed proposals for formal artifact kinds and keeps free text as draft notes", async () => {
     const repository = new MemoryProjectRepository("demo");
-    const kinds = ["relationship", "world", "greeting", "blueprint", "palette", "plugin"] as const;
+    const kinds = ["relationship", "world", "greeting", "blueprint", "palette", "plugin", "character"] as const;
     await repository.commit(0, (state) => ({ ...state, operations: kinds.map((_, index) => operation(`op-kind-${index}`, "authoring")) }));
     const service = new AuthoringService(repository);
     for (const [index, kind] of kinds.entries()) {
       const result = await service.create(`op-kind-${index}`, `${kind} content. This is enough content for the artifact.`, "writer");
-      expect(result.status).toBe("completed");
+      expect(result.status).toBe("needs_input");
     }
-    expect((await repository.read()).artifacts).toHaveLength(kinds.length);
+    await repository.commit((await repository.read()).revision, (state) => ({ ...state, operations: [...state.operations, operation("op-note", "authoring")] }));
+    const note = await service.create("op-note", "筆記：先記錄 Yukino 的設定想法，之後再正式建立角色。", "writer");
+    expect(note.status).toBe("completed");
+    expect(note.artifact_id).toBeDefined();
+    expect((await repository.read()).artifacts).toHaveLength(1);
   });
 
   it("requires a structured Zhuji proposal and validates it before writing", async () => {
@@ -265,17 +269,17 @@ describe("knowledge, authoring and review services", () => {
     const repository = new MemoryProjectRepository("demo");
     await repository.commit(0, (state) => ({ ...state, operations: [operation("op-rev-1", "authoring"), operation("op-rev-2", "authoring"), operation("op-punctuation", "authoring")] }));
     const service = new AuthoringService(repository);
-    const first = await service.create("op-rev-1", "character name: Yukino。 First complete content.", "writer");
-    const second = await service.create("op-rev-2", "character name: Yukino。 Second complete content.", "writer");
+    const first = await service.create("op-rev-1", "draft character name: Yukino。 First complete content.", "writer");
+    const second = await service.create("op-rev-2", "draft character name: Yukino。 Second complete content.", "writer");
     expect(first.artifact_id).not.toBe(second.artifact_id);
-    expect((await service.create("op-punctuation", "name: !!!。 character content is complete.", "writer")).status).toBe("completed");
+    expect((await service.create("op-punctuation", "draft name: !!!。 character content is complete.", "writer")).status).toBe("completed");
     expect((await repository.read()).artifacts.find((item) => item.key.endsWith(":default"))?.key).toContain("default");
   });
 
   it("blocks self-review and lets a different reviewer record issues", async () => {
     const repository = new MemoryProjectRepository("demo");
     await repository.commit(0, (state) => ({ ...state, quality_profile: { blocking_severity: "error", overrides: { CONTENT_TOO_SHORT: "info", PLACEHOLDER_REMAINS: "info" } }, operations: [operation("op-author", "authoring")] }));
-    const authoring = await new AuthoringService(repository).create("op-author", "Create character: Short. TODO", "writer");
+    const authoring = await new AuthoringService(repository).createTemplate("op-author", { kind: "character", document: { schema_version: 1, id: "short", display_name: "Short", summary: "A character document that still contains TODO placeholder content." } }, "writer");
     expect(authoring.artifact_id).toBeDefined();
     await repository.commit((await repository.read()).revision, (state) => ({ ...state, operations: [ ...state.operations, operation("op-review-self", "review"), operation("op-review-peer", "review") ] }));
     const service = new ReviewService(repository);
@@ -537,5 +541,40 @@ describe("knowledge, authoring and review services", () => {
     const resolvedState = await repository.read();
     expect(resolvedState.facts.find((fact) => fact.id === candidates[1]!.fact_id)).toMatchObject({ status: "accepted" });
     expect(resolvedState.fact_review_runs.find((item) => item.id === run.id)?.status).toBe("completed");
+  });
+
+  it("does not rebuild duplicate chunks on repeated refresh", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    const text = "Yukino has_trait direct. Yukino belongs to Sobu High School.";
+    const source: SourceRecord = { id: "source-1", candidate_id: "candidate-1", title: "official", canonical_text: text, original_hash: contentHash(text), revision: contentHash(text), media_type: "text/plain", created_at: new Date().toISOString() };
+    await repository.commit(0, (state) => ({ ...state, sources: [source], operations: [operation("op-k1", "knowledge")] }));
+    const service = new KnowledgeService(repository);
+    const first = await service.refresh("op-k1", "整理知識", "curator");
+    expect(first.status).toBe("completed");
+    expect(first.chunks.length).toBeGreaterThan(0);
+    await repository.commit((await repository.read()).revision, (state) => ({ ...state, operations: [...state.operations, operation("op-k2", "knowledge")] }));
+    const second = await service.refresh("op-k2", "整理知識", "curator");
+    expect(second.chunks).toHaveLength(0);
+  });
+
+  it("merges corroborating evidence from a second source instead of dropping it", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    const text = "Yukino is direct.";
+    const mk = (id: string): SourceRecord => ({ id, candidate_id: `candidate-${id}`, title: id, canonical_text: text, original_hash: contentHash(text), revision: contentHash(text), media_type: "text/plain", created_at: new Date().toISOString() });
+    await repository.commit(0, (state) => ({ ...state, sources: [mk("source-a"), mk("source-b")], operations: [operation("op-k1", "knowledge")] }));
+    const result = await new KnowledgeService(repository).refresh("op-k1", "整理知識", "curator");
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    expect(state.facts).toHaveLength(1);
+    expect(state.facts[0]!.source_ids).toEqual(expect.arrayContaining(["source-a", "source-b"]));
+  });
+
+  it("returns the chunks created by structured curation", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-curation-2", "authoring")], sources: [{ id: "source-official", candidate_id: "candidate-official", title: "official page", canonical_text: "Yukino is direct and calm.", original_hash: contentHash("x"), revision: contentHash("x"), media_type: "text/plain", created_at: new Date().toISOString() }] }));
+    const claim: FactClaim = { subject: "Yukino", predicate: "has_trait", value: "direct", classification: "trait", confidence: 0.9, coverage: ["character", "personality"], evidence: [{ source: "official page", quote: "Yukino is direct and calm." }] };
+    const result = await new KnowledgeService(repository).applyCuration("op-curation-2", [claim], "curator");
+    expect(result.status).toBe("completed");
+    expect(result.chunks.length).toBeGreaterThan(0);
   });
 });

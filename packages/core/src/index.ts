@@ -38,6 +38,7 @@ export type ArtifactKind =
   | "conversion"
   | "import_analysis"
   | "director_routing"
+  | "draft_note"
   | "unknown";
 
 export type ArtifactStatus = "draft" | "reviewed" | "approved" | "published";
@@ -601,7 +602,7 @@ const factReviewDecisionRecordSchema = z.object({
 const artifactSchema = z.object({
   id: z.string().min(1),
   key: z.string().min(1),
-  kind: z.enum(["character", "relationship", "world_lore", "greeting", "blueprint", "zhuji", "palette", "wardrobe", "plugin", "review", "source_research", "fact_curation", "fact_review", "conversion", "import_analysis", "director_routing", "unknown"]),
+  kind: z.enum(["character", "relationship", "world_lore", "greeting", "blueprint", "zhuji", "palette", "wardrobe", "plugin", "review", "source_research", "fact_curation", "fact_review", "conversion", "import_analysis", "director_routing", "draft_note", "unknown"]),
   name: z.string().min(1),
   content: z.string().min(1),
   media_type: z.string().min(1),

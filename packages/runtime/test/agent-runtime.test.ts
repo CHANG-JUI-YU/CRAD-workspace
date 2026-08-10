@@ -98,7 +98,10 @@ describe("high-level agent compatibility layer", () => {
     const runtime = new WorkspaceRuntime(repository);
     const adapter = new AgentAdapter(runtime);
     expect(adapter.resolve("搜尋官方來源")).toMatchObject({ agent_id: "source-researcher" });
-    const result = await adapter.request({ request: "Create character: Adapter. Personality: calm.", context: { actor: "writer", attachments: [] } });
+    const result = await runtime.submitTemplateProposal(
+      { kind: "character", document: { schema_version: 1, id: "adapter", display_name: "Adapter", summary: "A calm character." } },
+      { actor: "writer", attachments: [] },
+    );
     expect(result.status).toBe("completed");
     expect((await repository.read()).audit.find((event) => event.event === "operation.created")?.details).toMatchObject({ agent_id: "director" });
     expect(adapter.list().find((agent) => agent.id === "director")).toMatchObject({ role: "orchestrator", prompt: ".agents/agents/director.md" });

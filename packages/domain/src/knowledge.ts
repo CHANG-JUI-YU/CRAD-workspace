@@ -51,9 +51,18 @@ function splitIntoChunks(text: string, size = 800): string[] {
   const normalized = text.trim();
   if (normalized.length <= size) return normalized.length === 0 ? [] : [normalized];
   const chunks: string[] = [];
-  for (let offset = 0; offset < normalized.length; offset += size) {
-    const chunk = normalized.slice(offset, offset + size).trim();
+  let offset = 0;
+  while (offset < normalized.length) {
+    let end = Math.min(offset + size, normalized.length);
+    if (end < normalized.length) {
+      while (end > offset && normalized.charCodeAt(end - 1) >= 0xd800 && normalized.charCodeAt(end - 1) <= 0xdbff) end -= 1;
+      const window = normalized.slice(offset, end);
+      const boundary = Math.max(window.lastIndexOf("。"), window.lastIndexOf("！"), window.lastIndexOf("？"), window.lastIndexOf("."), window.lastIndexOf("!"), window.lastIndexOf("?"), window.lastIndexOf("\n"));
+      if (boundary > size * 0.5) end = offset + boundary + 1;
+    }
+    const chunk = normalized.slice(offset, end).trim();
     if (chunk.length > 0) chunks.push(chunk);
+    offset = end;
   }
   return chunks;
 }
@@ -62,8 +71,7 @@ function sentenceCandidates(text: string): string[] {
   return text
     .split(/(?:[.!?。！？]\s*|\n+)/u)
     .map((item) => item.trim())
-    .filter((item) => item.length >= 8)
-    .slice(0, 100);
+    .filter((item) => item.length >= 8);
 }
 
 function normalize(value: string): string {
@@ -73,6 +81,21 @@ function normalize(value: string): string {
 function factKey(fact: Pick<FactRecord, "statement" | "subject" | "predicate" | "value">): string {
   const structured = [fact.subject, fact.predicate, fact.value].filter((value): value is string => value !== undefined).join("|");
   return normalize(structured.length > 0 ? structured : fact.statement);
+}
+
+function mergeFactEvidence(target: FactRecord, extra: FactRecord): FactRecord {
+  const sourceIds = [...new Set([...(target.source_ids ?? []), ...(extra.source_ids ?? [])])];
+  const evidence = [...new Set([...(target.evidence ?? []), ...(extra.evidence ?? [])])];
+  const refsByKey = new Map<string, FactEvidenceReference>();
+  for (const reference of [...(target.evidence_refs ?? []), ...(extra.evidence_refs ?? [])]) {
+    refsByKey.set(`${reference.source_id}:${reference.quote}`, reference);
+  }
+  return {
+    ...target,
+    source_ids: sourceIds,
+    evidence,
+    ...(refsByKey.size > 0 ? { evidence_refs: [...refsByKey.values()] } : {}),
+  };
 }
 
 /** Coverage dimensions inferred from the auto-extraction classification. */
@@ -317,9 +340,7 @@ export class KnowledgeService {
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
     const knownSourceIds = new Set(initial.knowledge_chunks.map((chunk) => chunk.source_id));
-    const sources = /refresh|new[_ -]?sources?|刷新|新來源|新来源/iu.test(request)
-      ? initial.sources.filter((source) => !knownSourceIds.has(source.id))
-      : initial.sources;
+    const sources = initial.sources.filter((source) => !knownSourceIds.has(source.id));
     if (sources.length === 0) {
       const summary = "No new sources are available for knowledge refresh.";
       await this.repository.commit(initial.revision, (current) => ({
@@ -334,6 +355,7 @@ export class KnowledgeService {
     const chunks: KnowledgeChunk[] = [];
     const facts: FactRecord[] = [];
     const existingFactKeys = new Set(initial.facts.map((fact) => factKey(fact)));
+    const batchKeys = new Map<string, number>();
     for (const source of sources) {
       splitIntoChunks(source.canonical_text).forEach((text, ordinal) => {
         chunks.push({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), created_at: now() });
@@ -341,8 +363,14 @@ export class KnowledgeService {
       for (const statement of sentenceCandidates(source.canonical_text)) {
         const candidate = factFromSentence(source, statement, actor);
         const key = factKey(candidate);
+        const batchIndex = batchKeys.get(key);
+        if (batchIndex !== undefined && facts[batchIndex] !== undefined) {
+          facts[batchIndex] = mergeFactEvidence(facts[batchIndex], candidate);
+          continue;
+        }
         if (existingFactKeys.has(key)) continue;
         existingFactKeys.add(key);
+        batchKeys.set(key, facts.length);
         facts.push(candidate);
       }
     }
@@ -420,7 +448,7 @@ export class KnowledgeService {
         details: { fact_ids: facts.map((fact) => fact.id), claim_count: claims.length, agent_id: actor },
       }],
     }));
-    return { chunks: [], facts: facts.map((fact) => fact.id), status: "completed", summary };
+    return { chunks: chunks.map((chunk) => chunk.id), facts: facts.map((fact) => fact.id), status: "completed", summary };
   }
 
   async beginFactReviewRun(operationId: string, actor: string, curationRunId?: string, auditActor = actor): Promise<FactReviewRunRecord> {

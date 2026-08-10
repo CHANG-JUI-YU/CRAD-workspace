@@ -256,4 +256,22 @@ describe("source vertical slice", () => {
     const final = await repository.read();
     expect(final.sources).toHaveLength(0);
   });
+
+  it("fails loudly when the fetched source is not valid UTF-8", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({
+      ...state,
+      candidates: [{ id: "candidate-bad", title: "Bad", url: "https://bad.example", status: "approved" }],
+      operations: [{ id: "operation-decode", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+    const service = new SourceService(repository);
+    const result = await service.execute("operation-decode", {
+      actor: "director",
+      attachments: [],
+      fetcher: async () => ({ content: new Uint8Array([0x80, 0x81, 0x82]), media_type: "text/plain" }),
+    });
+    expect(result.status).toBe("needs_input");
+    const final = await repository.read();
+    expect(final.candidates[0]!.failure?.code).toBe("SOURCE_DECODE_FAILED");
+  });
 });

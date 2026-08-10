@@ -495,7 +495,10 @@ describe("natural language runtime boundary", () => {
   it("routes authoring and review through natural language only", async () => {
     const repository = new MemoryProjectRepository("demo");
     const runtime = new WorkspaceRuntime(repository);
-    const created = await runtime.request("Create character: Yukino. Personality: calm, direct, and observant.", { actor: "writer", attachments: [] });
+    const created = await runtime.submitTemplateProposal(
+      { kind: "character", document: { schema_version: 1, id: "yukino", display_name: "Yukino", summary: "A calm character." } },
+      { actor: "writer", attachments: [] },
+    );
     expect(created.status).toBe("completed");
     expect((await repository.read()).artifacts[0]?.name).toBe("Yukino");
     const selfReview = await runtime.request("Review current character", { actor: "writer", attachments: [] });
@@ -517,7 +520,10 @@ describe("natural language runtime boundary", () => {
   it("routes preview, publish and import intents without low-level IDs", async () => {
     const repository = new MemoryProjectRepository("demo");
     const runtime = new WorkspaceRuntime(repository);
-    await runtime.request("Create character: Yukino. Personality: calm, direct, and observant.", { actor: "writer", attachments: [] });
+    await runtime.submitTemplateProposal(
+      { kind: "character", document: { schema_version: 1, id: "yukino", display_name: "Yukino", summary: "A calm character." } },
+      { actor: "writer", attachments: [] },
+    );
     const preview = await runtime.request("Preview current card", { actor: "builder", attachments: [] });
     expect(preview.status).toBe("completed");
     const publish = await runtime.request("Publish current card", { actor: "publisher", attachments: [] });
