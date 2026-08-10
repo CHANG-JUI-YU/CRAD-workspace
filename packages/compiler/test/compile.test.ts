@@ -23,6 +23,20 @@ function zhuji(characterId: string, module: string, content: unknown): unknown {
   return { kind: "zhuji", character_id: characterId, module: { schema_version: 1, mode: "zhuji", module, title: module, data: content } };
 }
 
+function runtimeBlueprint(characters: Array<{ id: string; label?: string; display_name?: string; ordinal: number }>, primaryCharacterId?: string): unknown {
+  return {
+    schema_version: 1,
+    kind: "blueprint",
+    project_id: "runtime-blueprint",
+    flow: "character",
+    collaboration_mode: "independent",
+    characters,
+    intake_values: {},
+    ...(primaryCharacterId === undefined ? {} : { primary_character_id: primaryCharacterId }),
+    provenance: { blueprint_precheck_id: "precheck-1", checks: [] },
+  };
+}
+
 function palette(characterId: string, module: string, content: string): unknown {
   return { kind: "palette", character_id: characterId, module: { schema_version: 1, mode: "palette", module, title: module, content, sections: {}, provenance: [], extensions: {} } };
 }
@@ -223,5 +237,142 @@ value:
     expect(entries.find((item) => item.name === "Demo_外觀")?.content).toBe("title: 外顯\ndata:\n  核心:\n    描述: 金髮與明亮笑容");
     expect(entries.find((item) => item.name === "Demo_自我介紹")?.content).toBe("title: 自我介紹\ndata:\n  內容: 我是 Demo。");
     expect(entries.find((item) => item.name === "Demo_衣櫃")?.content).toBe("# Demo wardrobe");
+  });
+
+  it("compiles the runtime JSON Blueprint roster and preserves nested mode structure", async () => {
+    const repository = new MemoryProjectRepository("runtime-json-blueprint");
+    const nestedZhuji = {
+      核心: {
+        描述: "金髮與明亮笑容",
+        標籤: ["開朗", "敏銳"],
+        語料: [
+          "第一句語料",
+          { 場景: "午後教室", 對白: ["你好。", "今天也一起走吧。"] },
+        ],
+      },
+    };
+    const nestedPalette = {
+      冷色調: { 主色: "深藍", 點綴: ["銀白", "霧紫"] },
+      例外: ["壓力下會提高音量"],
+    };
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_name: "Runtime Blueprint Project",
+      artifacts: [
+        artifact("blueprint", "blueprint:runtime-json-blueprint", "blueprint", "project-blueprint", runtimeBlueprint([
+          { id: "second", label: "第二角色", ordinal: 1 },
+          { id: "first", label: "第一角色", ordinal: 2 },
+        ])),
+        artifact("first-appearance", "zhuji:first/appearance", "zhuji", "first/appearance", zhuji("first", "appearance", { 內容: "第一角色內容" })),
+        artifact("second-appearance", "zhuji:second/appearance", "zhuji", "second/appearance", zhuji("second", "appearance", nestedZhuji)),
+        artifact("second-palette", "palette:second/basic_information", "palette", "second/basic_information", {
+          kind: "palette",
+          character_id: "second",
+          module: {
+            schema_version: 1,
+            mode: "palette",
+            module: "basic_information",
+            title: "基本資訊",
+            content: "安靜而可靠。",
+            sections: nestedPalette,
+            provenance: [{ kind: "creator", agent: "palette-creator" }],
+            extensions: { technical: true },
+          },
+        }),
+      ],
+    }));
+
+    const result = compileProject(await repository.read());
+    const entries = result.card.data.character_book?.entries ?? [];
+    const appearance = entries.find((item) => item.name === "第二角色_外觀");
+    const paletteEntry = entries.find((item) => item.name === "第二角色_基本資訊");
+    const workspace = result.card.data.extensions["card-workspace"] as { project?: { primary_character_id?: string; characters?: Array<{ id: string; display_name: string }> } };
+
+    expect(workspace.project?.primary_character_id).toBe("second");
+    expect(workspace.project?.characters?.map((character) => [character.id, character.display_name])).toEqual([
+      ["second", "第二角色"],
+      ["first", "第一角色"],
+    ]);
+    expect(result.diagnostics).toEqual([expect.objectContaining({ code: "PRIMARY_CHARACTER_ID_FALLBACK", severity: "warning" })]);
+    expect(appearance?.content).toContain("## data");
+    expect(appearance?.content).toContain("### 核心");
+    expect(appearance?.content).toContain("#### 描述");
+    expect(appearance?.content).toContain("#### 標籤");
+    expect(appearance?.content).toContain("1. 開朗");
+    expect(appearance?.content).toContain("#### 場景");
+    expect(appearance?.content).toContain("午後教室");
+    expect(appearance?.content).toContain("你好。");
+    expect(appearance?.content).not.toContain("schema_version");
+    expect(appearance?.content).not.toContain("provenance");
+    expect(paletteEntry?.content).toContain("## content");
+    expect(paletteEntry?.content).toContain("安靜而可靠。");
+    expect(paletteEntry?.content).toContain("## sections");
+    expect(paletteEntry?.content).toContain("### 冷色調");
+    expect(paletteEntry?.content).toContain("#### 主色");
+    expect(paletteEntry?.content).toContain("1. 銀白");
+    expect(result.card.data.description).toBe("");
+    expect(result.card.data.personality).toBe("");
+    expect(result.card.data.scenario).toBe("");
+  });
+
+  it("honors explicit JSON Blueprint primary_character_id without a fallback diagnostic", async () => {
+    const repository = new MemoryProjectRepository("explicit-primary");
+    await repository.commit(0, (state) => ({
+      ...state,
+      artifacts: [
+        artifact("blueprint", "blueprint:explicit-primary", "blueprint", "project-blueprint", runtimeBlueprint([
+          { id: "first", display_name: "第一角色", ordinal: 1 },
+          { id: "second", label: "第二角色", ordinal: 2 },
+        ], "second")),
+        artifact("first-appearance", "zhuji:first/appearance", "zhuji", "first/appearance", zhuji("first", "appearance", { 內容: "第一角色內容" })),
+        artifact("second-appearance", "zhuji:second/appearance", "zhuji", "second/appearance", zhuji("second", "appearance", { 內容: "第二角色內容" })),
+      ],
+    }));
+
+    const result = compileProject(await repository.read());
+    const workspace = result.card.data.extensions["card-workspace"] as { project?: { primary_character_id?: string } };
+    expect(workspace.project?.primary_character_id).toBe("second");
+    expect(result.diagnostics).toEqual([]);
+    expect(result.card.data.character_book?.entries.map((item) => item.name)).toEqual(["第一角色_外觀", "第二角色_外觀"]);
+  });
+
+  it("keeps a formal Character display_name ahead of a temporary Blueprint label", async () => {
+    const repository = new MemoryProjectRepository("formal-character-name");
+    await repository.commit(0, (state) => ({
+      ...state,
+      artifacts: [
+        artifact("blueprint", "blueprint:formal-character-name", "blueprint", "project-blueprint", runtimeBlueprint([
+          { id: "demo", label: "暫用角色名稱", ordinal: 1 },
+        ])),
+        artifact("character", "character:demo", "character", "formal-character", character("demo", "正式角色名稱")),
+        artifact("appearance", "zhuji:demo/appearance", "zhuji", "demo/appearance", zhuji("demo", "appearance", { 內容: "角色內容" })),
+      ],
+    }));
+
+    const result = compileProject(await repository.read());
+    const workspace = result.card.data.extensions["card-workspace"] as { project?: { characters?: Array<{ id: string; display_name: string }> } };
+    expect(result.card.data.character_book?.entries.map((item) => item.name)).toEqual(["正式角色名稱_外觀"]);
+    expect(workspace.project?.characters).toEqual([expect.objectContaining({ id: "demo", display_name: "正式角色名稱" })]);
+  });
+
+  it("falls back when explicit primary_character_id is not a known character", async () => {
+    const repository = new MemoryProjectRepository("invalid-primary");
+    await repository.commit(0, (state) => ({
+      ...state,
+      artifacts: [
+        artifact("blueprint", "blueprint:invalid-primary", "blueprint", "project-blueprint", runtimeBlueprint([
+          { id: "first", label: "第一角色", ordinal: 1 },
+          { id: "second", label: "第二角色", ordinal: 2 },
+        ], "missing")),
+        artifact("first-appearance", "zhuji:first/appearance", "zhuji", "first/appearance", zhuji("first", "appearance", { 內容: "第一角色內容" })),
+        artifact("second-appearance", "zhuji:second/appearance", "zhuji", "second/appearance", zhuji("second", "appearance", { 內容: "第二角色內容" })),
+      ],
+    }));
+
+    const result = compileProject(await repository.read());
+    const workspace = result.card.data.extensions["card-workspace"] as { project?: { primary_character_id?: string } };
+    expect(workspace.project?.primary_character_id).toBe("first");
+    expect(result.diagnostics).toEqual([expect.objectContaining({ code: "PRIMARY_CHARACTER_ID_INVALID", severity: "warning" })]);
+    expect(JSON.stringify(result.card)).not.toContain('"primary_character_id":"missing"');
   });
 });

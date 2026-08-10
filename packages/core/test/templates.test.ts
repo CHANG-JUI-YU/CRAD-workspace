@@ -103,6 +103,12 @@ describe("structured template contracts", () => {
       { kind: "director_routing", phase: "authoring", next_action: "Draft the selected template." },
     ];
     for (const value of values) expect(templateProposalValueSchema.safeParse(value).success, value.kind).toBe(true);
+    expect(templateProposalValueSchema.safeParse({
+      kind: "review",
+      target: { kind: "character", name: "Demo" },
+      findings: [{ id: "critical", severity: "critical", summary: "Critical issue.", evidence: [{ source: "test" }] }],
+      summary: "Critical finding is representable.",
+    }).success).toBe(true);
     expect(paletteProposalValueSchema.safeParse(values[1]).success).toBe(true);
     expect(factCurationProposalValueSchema.safeParse(values[10]).success).toBe(true);
   });

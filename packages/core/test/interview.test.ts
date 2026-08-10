@@ -116,10 +116,38 @@ describe("project interview engine", () => {
     expect(state.values.project_name).toBe("雪乃專案");
     expect(state.values.world_enabled).toBe("需要");
     expect(state.values.world_timing).toBe("之後");
-    state = answer(state, "沒有");
+    state = answer(state, "沒有，開始建立");
     expect(state.status).toBe("complete");
     expect(state.confirmed_no_additional_settings).toBe(true);
     expect(state.answers).toHaveLength(16);
+  });
+
+  it("accepts the displayed positive and negative final confirmation choices", () => {
+    let state = beginInterview(createInterviewState());
+    for (const value of [
+      "角色設定",
+      "單人角色卡",
+      "完全原創",
+      "palette",
+      "核心是冷靜而直接的觀察者",
+      "在嚴格家庭中成長並學會自立",
+      "克制、誠實、重視界線與長期目標",
+      "我直接命名",
+      "雪乃專案",
+      "不需要",
+      "外冷內熱、重視界線但願意建立長期信任",
+      "自由創作",
+    ]) state = answer(state, value);
+
+    expect(state.current?.id).toBe("additional_settings");
+    state = answer(state, "有，繼續補充");
+    expect(state.current?.id).toBe("supplement");
+    state = answer(state, "補充設定已整理完成");
+    expect(state.current?.id).toBe("additional_settings");
+
+    state = answer(state, "沒有，開始建立");
+    expect(state.status).toBe("complete");
+    expect(state.confirmed_no_additional_settings).toBe(true);
   });
 
   it("asks the relationships activation questions for a multi-character card", () => {

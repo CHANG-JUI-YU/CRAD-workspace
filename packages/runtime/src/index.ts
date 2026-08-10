@@ -47,6 +47,7 @@ import {
   KnowledgeService,
   ReviewService,
   SourceService,
+  type IssueUpdateInput,
   type SourceSelectionDecision,
   type SourceFetcher,
 } from "@st-workspace/domain";
@@ -935,6 +936,9 @@ export class WorkspaceRuntime {
       ? nextFactReviewer(knowledgeState)
       : defaultAgentForTemplate(parsed.data);
     const resolution = this.agents.resolve(request, options.agent ?? fallbackAgent);
+    if (!this.agents.registryView().canSubmitProposal(resolution.agent_id, parsed.data.kind, proposalCapability(parsed.data))) {
+      throw new CoreError("AGENT_CAPABILITY_DENIED", `Agent ${resolution.agent_id} is not allowed to submit ${parsed.data.kind} proposals.`, true, { agent_id: resolution.agent_id, proposal_kind: parsed.data.kind });
+    }
     const initial = await this.repository.read();
     const operation: OperationRecord = {
       id: internalId("operation"),
@@ -972,16 +976,16 @@ export class WorkspaceRuntime {
     let domainSummary: string | undefined;
     let domainCompleted: string[] = [];
     if (parsed.data.kind === "fact_curation") {
-      const applied = await this.knowledge.applyCuration(operation.id, parsed.data.claims, context.actor);
+      const applied = await this.knowledge.applyCuration(operation.id, parsed.data.claims, resolution.agent_id, context.actor);
       domainSummary = applied.summary;
       domainCompleted = applied.facts;
     } else if (parsed.data.kind === "fact_review") {
-      const run = await this.knowledge.beginFactReviewRun(operation.id, resolution.agent_id);
+      const run = await this.knowledge.beginFactReviewRun(operation.id, resolution.agent_id, undefined, context.actor);
       const reviewProjection = (await this.knowledge.factReviewContext()).projection_revision;
       const applied = await this.knowledge.applyReviewBatch(operation.id, parsed.data.decisions, context.actor, resolution.agent_id, run.id, reviewProjection);
       domainSummary = applied.summary;
       domainCompleted = applied.fact_ids;
-      const result = await this.authoring.createTemplate(operation.id, parsed.data as TemplateProposalValue, context.actor);
+      const result = await this.authoring.createTemplate(operation.id, parsed.data as TemplateProposalValue, resolution.agent_id, context.actor);
       if (applied.status === "needs_input") {
         const latest = await this.repository.read();
         await this.repository.commit(latest.revision, (current) => ({
@@ -1001,11 +1005,11 @@ export class WorkspaceRuntime {
         agent_role: resolution.agent_role,
       };
     } else if (parsed.data.kind === "review") {
-      const applied = await this.review.applyProposal(operation.id, parsed.data, context.actor);
+      const applied = await this.review.applyProposal(operation.id, parsed.data, resolution.agent_id, context.actor);
       domainSummary = applied.summary;
       domainCompleted = [...(applied.review_id === undefined ? [] : [applied.review_id]), ...applied.issue_ids];
     }
-    const result = await this.authoring.createTemplate(operation.id, parsed.data as TemplateProposalValue, context.actor);
+    const result = await this.authoring.createTemplate(operation.id, parsed.data as TemplateProposalValue, resolution.agent_id, context.actor);
     return {
       operation_id: operation.id,
       status: result.status,
@@ -1028,6 +1032,9 @@ export class WorkspaceRuntime {
     await this.ensureBlueprintAuthoringReady("zhuji", parsed.data.character_id, parsed.data.module.module);
     const request = `建立珠璣 ${parsed.data.character_id} ${parsed.data.module.module}`;
     const resolution = this.agents.resolve(request, options.agent ?? "zhuji-creator");
+    if (!this.agents.registryView().canSubmitProposal(resolution.agent_id, parsed.data.kind)) {
+      throw new CoreError("AGENT_CAPABILITY_DENIED", `Agent ${resolution.agent_id} is not allowed to submit ${parsed.data.kind} proposals.`, true, { agent_id: resolution.agent_id, proposal_kind: parsed.data.kind });
+    }
     const initial = await this.repository.read();
     const operation: OperationRecord = {
       id: internalId("operation"),
@@ -1052,7 +1059,7 @@ export class WorkspaceRuntime {
         details: { kind: "authoring", request, agent_id: resolution.agent_id, module: parsed.data.module.module },
       }],
     }));
-    const result = await this.authoring.createZhuji(operation.id, parsed.data as ZhujiProposalValue, context.actor);
+    const result = await this.authoring.createZhuji(operation.id, parsed.data as ZhujiProposalValue, resolution.agent_id, context.actor);
     return {
       operation_id: operation.id,
       status: result.status,
@@ -1098,6 +1105,49 @@ export class WorkspaceRuntime {
       completed: [operation.id],
       blocked: [],
       project_id: created.project_id,
+    };
+  }
+
+  async updateIssue(input: IssueUpdateInput, context: WorkspaceContext, options: { agent?: string } = {}): Promise<RequestResult> {
+    const request = `issue ${input.action} ${input.issue_id}`;
+    const resolution = this.agents.resolve(request, options.agent ?? "director");
+    if (!this.agents.registryView().canUpdateIssue(resolution.agent_id)) {
+      throw new CoreError("AGENT_CAPABILITY_DENIED", `Agent ${resolution.agent_id} is not allowed to update review issues.`, true, { agent_id: resolution.agent_id, capability: "issue_update" });
+    }
+    const initial = await this.repository.read();
+    const operation: OperationRecord = {
+      id: internalId("operation"),
+      kind: "review",
+      request,
+      actor: context.actor,
+      status: "running",
+      created_at: now(),
+      updated_at: now(),
+      progress: [],
+    };
+    const created = await this.repository.commit(initial.revision, (current) => ({
+      ...current,
+      operations: [...current.operations, operation],
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "operation.created",
+        actor: context.actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { kind: "issue_update", issue_id: input.issue_id, action: input.action, agent_id: resolution.agent_id },
+      }],
+    }));
+    const result = await this.review.updateIssue(operation.id, input, resolution.agent_id, context.actor);
+    return {
+      operation_id: operation.id,
+      status: result.status,
+      summary: result.summary,
+      completed: [result.issue_id],
+      blocked: [],
+      project_id: created.project_id,
+      agent_id: resolution.agent_id,
+      agent_role: resolution.agent_role,
     };
   }
 
@@ -1356,7 +1406,7 @@ export class WorkspaceRuntime {
         return { operation_id: operation.id, status: result.status, summary: result.summary, completed: [...result.chunks, ...result.facts], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }) };
       }
       if (kind === "authoring") {
-        const result = await this.authoring.create(operation.id, trimmed, context.actor);
+        const result = await this.authoring.create(operation.id, trimmed, resolution.agent_id, context.actor);
         const latest = await this.repository.read();
         const finalOperation = latest.operations.find((item) => item.id === operation.id);
         return {
@@ -1366,11 +1416,13 @@ export class WorkspaceRuntime {
           completed: result.artifact_id === undefined ? [] : [result.artifact_id],
           blocked: [],
           ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+          agent_id: resolution.agent_id,
+          agent_role: resolution.agent_role,
         };
       }
       const result = /重新評估|re-?evaluate|quality profile/iu.test(trimmed)
         ? await this.review.reevaluate(operation.id, context.actor)
-        : await this.review.review(operation.id, trimmed, context.actor);
+        : await this.review.review(operation.id, trimmed, resolution.agent_id, context.actor);
       const latest = await this.repository.read();
       const finalOperation = latest.operations.find((item) => item.id === operation.id);
       return {
@@ -1380,6 +1432,8 @@ export class WorkspaceRuntime {
         completed: result.review_id === undefined ? [] : [result.review_id],
         blocked: result.status === "blocked" ? [operation.id] : [],
         ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+        agent_id: resolution.agent_id,
+        agent_role: resolution.agent_role,
       };
     }
     if (kind === "build" || kind === "import") {
@@ -1525,7 +1579,7 @@ function defaultAgentForTemplate(proposal: TemplateProposalValue): string {
     return "mvu-creator";
   }
   if (proposal.kind === "review") {
-    const target = proposal.target.kind.toLocaleLowerCase();
+    const target = `${proposal.target.kind} ${proposal.target.name}`.toLocaleLowerCase();
     if (/world|lore/iu.test(target)) return "world-lore-critic";
     if (/greeting/iu.test(target)) return "greetings-critic";
     if (/mvu/iu.test(target)) return "mvu-critic";
@@ -1548,6 +1602,12 @@ function defaultAgentForTemplate(proposal: TemplateProposalValue): string {
     case "conversion": return "mode-conversion";
     case "import_analysis": return "card-import-analyst";
   }
+}
+
+function proposalCapability(proposal: TemplateProposalValue): string | undefined {
+  if (proposal.kind === "plugin") return proposal.plugin_id;
+  if (proposal.kind === "review") return `${proposal.target.kind} ${proposal.target.name}`;
+  return undefined;
 }
 
 function nextFactReviewer(state: ProjectState): string {

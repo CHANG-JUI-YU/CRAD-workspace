@@ -3,6 +3,7 @@ import {
   MemoryProjectRepository,
   contentHash,
   internalId,
+  qualityProfileForLevel,
   type ZhujiProposalValue,
   type FactClaim,
   type FactDecision,
@@ -11,7 +12,7 @@ import {
   type SourceRecord,
   type BlueprintPrecheckRecord,
 } from "@st-workspace/core";
-import { AuthoringService, KnowledgeService, ReviewService } from "../src/index.js";
+import { AuthoringService, KnowledgeService, ReviewService, validateWorkflow } from "../src/index.js";
 
 function operation(id: string, kind: OperationRecord["kind"]): OperationRecord {
   const timestamp = new Date().toISOString();
@@ -324,11 +325,93 @@ describe("knowledge, authoring and review services", () => {
     expect((await repository.read()).issues[0]?.effective_severity).toBe("error");
   });
 
+  it("preserves an issue-scoped override across reevaluation and profile changes", async () => {
+    const repository = new MemoryProjectRepository("issue-override-lifecycle");
+    const timestamp = new Date().toISOString();
+    await repository.commit(0, (state) => ({
+      ...state,
+      issues: [{ id: "issue-lifecycle", artifact_id: "artifact", review_id: "review", code: "FINDING_STYLE", message: "Style", severity: "error", effective_severity: "error", against_effective_severity: "error", overridable: true, status: "open", created_at: timestamp, updated_at: timestamp }],
+      operations: [operation("op-lifecycle-override", "review"), operation("op-lifecycle-reevaluate", "review"), operation("op-lifecycle-profile", "review")],
+    }));
+    const service = new ReviewService(repository);
+    await service.updateIssue("op-lifecycle-override", { issue_id: "issue-lifecycle", action: "override", severity: "warning", reason: "Keep the intentional style." }, "director", "session-user");
+    await service.reevaluate("op-lifecycle-reevaluate", "reviewer");
+    let state = await repository.read();
+    expect(state.issues[0]).toMatchObject({ effective_severity: "warning", override: { by: "director", reason: "Keep the intentional style.", against_effective_severity: "error", severity: "warning", policy_snapshot: expect.objectContaining({ blocking_severity: "error" }) } });
+    await service.configureQualityProfile("op-lifecycle-profile", "strict", "director");
+    state = await repository.read();
+    expect(state.issues[0]?.override).toMatchObject({ by: "director", against_effective_severity: "error" });
+    expect(state.audit.find((event) => event.event === "quality.profile.updated")?.details).toMatchObject({ preserved_issue_override_ids: ["issue-lifecycle"] });
+  });
+
+  it("preserves an issue override under a lenient policy and audits invalidation after a stricter reevaluation", async () => {
+    const repository = new MemoryProjectRepository("issue-override-reevaluation");
+    const timestamp = new Date().toISOString();
+    await repository.commit(0, (state) => ({
+      ...state,
+      issues: [{ id: "issue-reevaluation", artifact_id: "artifact", review_id: "review", code: "FINDING_STYLE", message: "Style", severity: "error", effective_severity: "error", against_effective_severity: "error", overridable: true, status: "open", created_at: timestamp, updated_at: timestamp }],
+      operations: [operation("op-reevaluation-override", "review"), operation("op-reevaluation-lenient", "review"), operation("op-reevaluation-strict", "review")],
+    }));
+    const service = new ReviewService(repository);
+    await service.updateIssue("op-reevaluation-override", { issue_id: "issue-reevaluation", action: "override", severity: "warning", reason: "Keep this one intentional style choice." }, "director");
+    await repository.commit((await repository.read()).revision, (state) => ({ ...state, quality_profile: qualityProfileForLevel("normal", { FINDING_STYLE: "warning" }) }));
+    await service.reevaluate("op-reevaluation-lenient", "director");
+    expect((await repository.read()).issues[0]).toMatchObject({ effective_severity: "warning", override: { severity: "warning", against_effective_severity: "error" } });
+    await repository.commit((await repository.read()).revision, (state) => ({ ...state, quality_profile: qualityProfileForLevel("normal", { FINDING_STYLE: "critical" }) }));
+    await service.reevaluate("op-reevaluation-strict", "director");
+    const state = await repository.read();
+    expect(state.issues[0]).toMatchObject({ effective_severity: "critical" });
+    expect(state.issues[0]?.override).toBeUndefined();
+    expect(state.audit.find((event) => event.event === "review.issue.override.invalidated")?.details).toMatchObject({ issue_id: "issue-reevaluation", against_effective_severity: "error", policy_effective_severity: "critical" });
+  });
+
   it("returns recoverable results when there is nothing to review", async () => {
     const repository = new MemoryProjectRepository("demo");
     await repository.commit(0, (state) => ({ ...state, operations: [operation("op-review-empty", "review"), operation("op-reevaluate-empty", "review")] }));
     const service = new ReviewService(repository);
     expect((await service.review("op-review-empty", "review", "reviewer")).status).toBe("needs_input");
     expect((await service.reevaluate("op-reevaluate-empty", "reviewer")).summary).toContain("沒有待重新評估");
+  });
+
+  it("supports audited issue resolve, ignore and severity override actions", async () => {
+    const repository = new MemoryProjectRepository("issue-actions");
+    const timestamp = new Date().toISOString();
+    await repository.commit(0, (state) => ({
+      ...state,
+      issues: [{ id: "issue-action", artifact_id: "artifact", review_id: "review", code: "FINDING_STYLE", message: "Style", severity: "error", effective_severity: "error", against_effective_severity: "error", overridable: true, status: "open", created_at: timestamp, updated_at: timestamp }],
+      operations: [operation("op-override", "review"), operation("op-ignore", "review")],
+    }));
+    const service = new ReviewService(repository);
+    await service.updateIssue("op-override", { issue_id: "issue-action", action: "override", severity: "warning", reason: "The project intentionally keeps this style." }, "critic", "session-user");
+    expect((await repository.read()).issues[0]).toMatchObject({ effective_severity: "warning", status: "open", override: { by: "critic", reason: "The project intentionally keeps this style.", against_effective_severity: "error" } });
+    expect((await repository.read()).quality_profile.overrides.FINDING_STYLE).toBeUndefined();
+    await repository.commit((await repository.read()).revision, (state) => ({ ...state, quality_profile: qualityProfileForLevel("normal", { FINDING_STYLE: "info" }) }));
+    await service.updateIssue("op-ignore", { issue_id: "issue-action", action: "ignore", reason: "Reviewed and accepted for this release." }, "critic", "session-user");
+    const state = await repository.read();
+    expect(state.issues[0]?.status).toBe("ignored");
+    expect(state.quality_profile.overrides.FINDING_STYLE).toBe("info");
+    expect(state.audit.slice(-2).map((event) => event.event)).toEqual(["review.issue.updated", "review.issue.updated"]);
+    expect(state.audit.slice(-2).every((event) => event.actor === "session-user")).toBe(true);
+    expect(state.audit.at(-1)?.details).toMatchObject({ action: "ignore", reason: "Reviewed and accepted for this release.", operator: "critic", agent_id: "critic", original_severity: "error", effective_severity: "info" });
+  });
+
+  it("requires an overridable issue and rejects override escalation or no-op", async () => {
+    const repository = new MemoryProjectRepository("issue-override-invariants");
+    const timestamp = new Date().toISOString();
+    await repository.commit(0, (state) => ({
+      ...state,
+      issues: [
+        { id: "issue-non-overridable", artifact_id: "artifact", review_id: "review", code: "HARD_RULE", message: "Hard", severity: "error", effective_severity: "error", against_effective_severity: "error", overridable: false, status: "open", created_at: timestamp, updated_at: timestamp },
+        { id: "issue-overridable", artifact_id: "artifact", review_id: "review", code: "STYLE_RULE", message: "Style", severity: "error", effective_severity: "error", against_effective_severity: "error", overridable: true, status: "open", created_at: timestamp, updated_at: timestamp },
+      ],
+      operations: [operation("op-non-overridable", "review"), operation("op-escalation", "review"), operation("op-noop", "review"), operation("op-stricter-policy", "review")],
+    }));
+    const service = new ReviewService(repository);
+    await expect(service.updateIssue("op-non-overridable", { issue_id: "issue-non-overridable", action: "override", severity: "warning", reason: "Try to bypass a hard rule." }, "director")).rejects.toMatchObject({ code: "ISSUE_NOT_OVERRIDABLE" });
+    await expect(service.updateIssue("op-escalation", { issue_id: "issue-overridable", action: "override", severity: "critical", reason: "Escalation is invalid." }, "director")).rejects.toMatchObject({ code: "ISSUE_OVERRIDE_SEVERITY_ESCALATION" });
+    await expect(service.updateIssue("op-noop", { issue_id: "issue-overridable", action: "override", severity: "error", reason: "No change." }, "director")).rejects.toMatchObject({ code: "ISSUE_OVERRIDE_SEVERITY_ESCALATION" });
+    await repository.commit((await repository.read()).revision, (state) => ({ ...state, quality_profile: qualityProfileForLevel("normal", { STYLE_RULE: "critical" }) }));
+    await service.updateIssue("op-stricter-policy", { issue_id: "issue-overridable", action: "override", severity: "error", reason: "Downgrade from the current critical policy baseline." }, "director");
+    expect((await repository.read()).issues.find((issue) => issue.id === "issue-overridable")).toMatchObject({ effective_severity: "error", override: { severity: "error", against_effective_severity: "critical" } });
   });
 });

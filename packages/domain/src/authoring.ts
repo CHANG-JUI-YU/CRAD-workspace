@@ -128,11 +128,11 @@ export class AuthoringService {
   }
 
   /** Persist any model-facing structured template using one common path. */
-  async createTemplate(operationId: string, proposal: TemplateProposalValue, actor: string): Promise<AuthoringExecutionResult> {
+  async createTemplate(operationId: string, proposal: TemplateProposalValue, actor: string, auditActor = actor): Promise<AuthoringExecutionResult> {
     const parsed = templateProposalValueSchema.safeParse(proposal);
     if (!parsed.success) throw new CoreError("TEMPLATE_SCHEMA_INVALID", parsed.error.message, true);
-    if (parsed.data.kind === "zhuji") return this.createZhuji(operationId, parsed.data, actor);
-    if (parsed.data.kind === "conversion") return this.conversion.materialize(operationId, parsed.data, actor);
+    if (parsed.data.kind === "zhuji") return this.createZhuji(operationId, parsed.data, actor, auditActor);
+    if (parsed.data.kind === "conversion") return this.conversion.materialize(operationId, parsed.data, actor, auditActor);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -181,20 +181,20 @@ export class AuthoringService {
         id: internalId("audit"),
         operation_id: operationId,
         event: "template.created",
-        actor,
+        actor: auditActor,
         occurred_at: now(),
         project_revision: current.revision + 1,
-        details: { artifact_id: artifact.id, key, template_kind: parsed.data.kind, artifact_kind: kind, based_on: previous?.revision },
+        details: { artifact_id: artifact.id, key, template_kind: parsed.data.kind, artifact_kind: kind, based_on: previous?.revision, agent_id: actor },
       }],
     }));
     return { artifact_id: artifact.id, artifact_key: key, status: "completed", summary };
   }
 
-  async createStructured(operationId: string, proposal: TemplateProposalValue, actor: string): Promise<AuthoringExecutionResult> {
-    return this.createTemplate(operationId, proposal, actor);
+  async createStructured(operationId: string, proposal: TemplateProposalValue, actor: string, auditActor = actor): Promise<AuthoringExecutionResult> {
+    return this.createTemplate(operationId, proposal, actor, auditActor);
   }
 
-  async createZhuji(operationId: string, proposal: ZhujiProposalValue, actor: string): Promise<AuthoringExecutionResult> {
+  async createZhuji(operationId: string, proposal: ZhujiProposalValue, actor: string, auditActor = actor): Promise<AuthoringExecutionResult> {
     const parsed = zhujiProposalValueSchema.safeParse(proposal);
     if (!parsed.success) throw new CoreError("ZHUJI_SCHEMA_INVALID", parsed.error.message, true);
     const initial = await this.repository.read();
@@ -245,16 +245,16 @@ export class AuthoringService {
         id: internalId("audit"),
         operation_id: operationId,
         event: "zhuji.created",
-        actor,
+        actor: auditActor,
         occurred_at: now(),
         project_revision: current.revision + 1,
-        details: { artifact_id: artifact.id, key, kind: "zhuji", character_id: parsed.data.character_id, module: module.module, revision: artifact.revision, based_on: previous?.revision },
+        details: { artifact_id: artifact.id, key, kind: "zhuji", character_id: parsed.data.character_id, module: module.module, revision: artifact.revision, based_on: previous?.revision, agent_id: actor },
       }],
     }));
     return { artifact_id: artifact.id, artifact_key: key, status: "completed", summary };
   }
 
-  async create(operationId: string, request: string, actor: string): Promise<AuthoringExecutionResult> {
+  async create(operationId: string, request: string, actor: string, auditActor = actor): Promise<AuthoringExecutionResult> {
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -348,10 +348,10 @@ export class AuthoringService {
         id: internalId("audit"),
         operation_id: operationId,
         event: "artifact.created",
-        actor,
+        actor: auditActor,
         occurred_at: now(),
         project_revision: current.revision + 1,
-        details: { artifact_id: artifact.id, key, kind, revision: artifact.revision, based_on: previous?.revision },
+        details: { artifact_id: artifact.id, key, kind, revision: artifact.revision, based_on: previous?.revision, agent_id: actor },
       }],
     }));
     return { artifact_id: artifact.id, artifact_key: key, status: "completed", summary };

@@ -6,6 +6,7 @@ import {
   FileProjectRepository,
   MemoryProjectRepository,
   contentHash,
+  qualityProfileForLevel,
   type ArtifactRecord,
   type OperationRecord,
 } from "@st-workspace/core";
@@ -175,6 +176,25 @@ describe("build, publish and import", () => {
     const result = await new BuildService(repository).run("op-none", "publish", "publisher");
     expect(result.status).toBe("completed");
     expect((await repository.read()).builds[0]?.quality_policy_snapshot).toMatchObject({ level: "none", blocking_severity: "none" });
+  });
+
+  it("publishes when the current profile override allows a stored blocking severity", async () => {
+    const repository = new MemoryProjectRepository("profile-override-publish");
+    const target = artifact("op-author", "TODO unfinished card");
+    const timestamp = new Date().toISOString();
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete" },
+      artifacts: [target],
+      reviews: [{ id: "review-current", artifact_id: target.id, artifact_revision: target.revision, reviewer: "character-critic", status: "failed", issue_ids: ["issue-current"], created_at: timestamp }],
+      issues: [{ id: "issue-current", artifact_id: target.id, review_id: "review-current", code: "PLACEHOLDER_REMAINS", message: "unfinished", severity: "error", effective_severity: "error", against_effective_severity: "error", status: "open", created_at: timestamp, updated_at: timestamp }],
+      quality_profile: qualityProfileForLevel("normal", { PLACEHOLDER_REMAINS: "info" }),
+      operations: [operation("op-profile-override", "build")],
+    }));
+    const result = await new BuildService(repository).run("op-profile-override", "publish", "publisher");
+    expect(result.status).toBe("completed");
+    expect((await repository.read()).publishes).toHaveLength(1);
   });
 
   it("asks for an artifact before building and rejects unknown operations", async () => {

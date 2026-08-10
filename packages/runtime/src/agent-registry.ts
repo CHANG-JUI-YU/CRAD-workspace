@@ -139,6 +139,51 @@ export class AgentRegistry {
   has(id: string): boolean {
     return this.definitions.has(id);
   }
+
+  /**
+   * Return whether an execution agent is allowed to submit a typed proposal.
+   * The registry is the trusted capability boundary for model-facing template
+   * endpoints; natural-language routing remains intentionally more permissive.
+   */
+  canSubmitProposal(agentId: string, kind: string, capability?: string): boolean {
+    const agent = this.definitions.get(agentId);
+    if (agent === undefined) return false;
+    if (kind === "plugin") {
+      const expected = capability === "official.mvu-zod" ? "mvu-creator" : capability === "official.ejs" ? "ejs-creator" : capability === "official.html" ? "html-creator" : undefined;
+      return expected !== undefined && agent.id === expected;
+    }
+    if (kind === "review") {
+      const target = capability?.toLocaleLowerCase() ?? "";
+      const expected = /world|lore/iu.test(target) ? "world-lore-critic"
+        : /greeting/iu.test(target) ? "greetings-critic"
+          : /mvu/iu.test(target) ? "mvu-critic"
+            : /ejs/iu.test(target) ? "ejs-critic"
+              : /html/iu.test(target) ? "html-critic"
+                : "character-critic";
+      return agent.id === expected;
+    }
+    if (kind === "fact_review") return /^fact-reviewer-[123]$/u.test(agent.id);
+    const expected: Readonly<Record<string, string>> = {
+      character: "director",
+      zhuji: "zhuji-creator",
+      palette: "palette-creator",
+      wardrobe: "wardrobe-creator",
+      greetings: "greetings-creator",
+      relationships: "relationship-creator",
+      world: "world-lore-creator",
+      conversion: "mode-conversion",
+      import_analysis: "card-import-analyst",
+      source_research: "source-researcher",
+      fact_curation: "fact-curator",
+      director_routing: "director",
+    };
+    return expected[kind] === agent.id;
+  }
+
+  /** Issue mutations are Director/orchestrator decisions, not creator actions. */
+  canUpdateIssue(agentId: string): boolean {
+    return this.definitions.get(agentId)?.role === "orchestrator";
+  }
 }
 
 export type RoutedKind = OperationRecord["kind"];

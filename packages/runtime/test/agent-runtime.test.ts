@@ -56,8 +56,22 @@ describe("high-level agent compatibility layer", () => {
     expect(classifyIntent("something else")).toBe("unknown");
   });
 
-  it("falls back safely when an explicit agent name is unknown", () => {
-    expect(new AgentRouter().resolve("建立角色", "does-not-exist")).toMatchObject({ agent_id: "director", fallback: true, explicit: true });
+  it("rejects an explicit agent name that is not in the trusted registry", () => {
+    expect(() => new AgentRouter().resolve("建立角色", "does-not-exist")).toThrowError(expect.objectContaining({ code: "AGENT_UNKNOWN" }));
+  });
+
+  it("exposes proposal capabilities without allowing a critic to author", () => {
+    const registry = new AgentRegistry();
+    expect(registry.canSubmitProposal("palette-creator", "palette")).toBe(true);
+    expect(registry.canSubmitProposal("zhuji-creator", "palette")).toBe(false);
+    expect(registry.canSubmitProposal("html-creator", "zhuji")).toBe(false);
+    expect(registry.canSubmitProposal("mvu-creator", "plugin", "official.mvu-zod")).toBe(true);
+    expect(registry.canSubmitProposal("html-creator", "plugin", "official.mvu-zod")).toBe(false);
+    expect(registry.canSubmitProposal("character-critic", "palette")).toBe(false);
+    expect(registry.canSubmitProposal("character-critic", "review", "character")).toBe(true);
+    expect(registry.canSubmitProposal("character-critic", "review", "world")).toBe(false);
+    expect(registry.canSubmitProposal("mvu-critic", "review", "plugin official.mvu-zod")).toBe(true);
+    expect(registry.canSubmitProposal("character-critic", "review", "plugin official.mvu-zod")).toBe(false);
   });
 
   it("honors explicit specialist roles and tolerates a reduced registry", () => {

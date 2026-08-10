@@ -329,7 +329,7 @@ export class KnowledgeService {
     return { chunks: chunks.map((chunk) => chunk.id), facts: facts.map((fact) => fact.id), status: "completed", summary };
   }
 
-  async applyCuration(operationId: string, claims: FactClaim[], actor: string): Promise<KnowledgeExecutionResult> {
+  async applyCuration(operationId: string, claims: FactClaim[], actor: string, auditActor = actor): Promise<KnowledgeExecutionResult> {
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -367,14 +367,14 @@ export class KnowledgeService {
         ? updateOperation(item, { status: "completed", progress: [...item.progress, ...facts.map((fact) => ({ item_id: fact.id, status: "completed" as const, message: "Fact curation applied." }))], result_summary: summary })
         : item),
       audit: [...current.audit, {
-        id: internalId("audit"), operation_id: operationId, event: "fact.curation.applied", actor, occurred_at: now(), project_revision: current.revision + 1,
-        details: { fact_ids: facts.map((fact) => fact.id), claim_count: claims.length },
+        id: internalId("audit"), operation_id: operationId, event: "fact.curation.applied", actor: auditActor, occurred_at: now(), project_revision: current.revision + 1,
+        details: { fact_ids: facts.map((fact) => fact.id), claim_count: claims.length, agent_id: actor },
       }],
     }));
     return { chunks: [], facts: facts.map((fact) => fact.id), status: "completed", summary };
   }
 
-  async beginFactReviewRun(operationId: string, actor: string, curationRunId?: string): Promise<FactReviewRunRecord> {
+  async beginFactReviewRun(operationId: string, actor: string, curationRunId?: string, auditActor = actor): Promise<FactReviewRunRecord> {
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -430,10 +430,10 @@ export class KnowledgeService {
         id: internalId("audit"),
         operation_id: operationId,
         event: "fact.review.run.created",
-        actor,
+        actor: auditActor,
         occurred_at: now(),
         project_revision: current.revision + 1,
-        details: { review_run_id: run.id, candidate_set_revision: run.candidate_set_revision, candidate_count: run.candidate_occurrence_ids.length, source_revisions: run.source_revisions },
+        details: { review_run_id: run.id, candidate_set_revision: run.candidate_set_revision, candidate_count: run.candidate_occurrence_ids.length, source_revisions: run.source_revisions, agent_id: actor },
       }],
     }));
     return run;
@@ -498,7 +498,7 @@ export class KnowledgeService {
       ? [...initial.fact_review_runs].reverse().find((candidate) => candidate.status === "open" || candidate.status === "blocked")
       : initial.fact_review_runs.find((candidate) => candidate.id === reviewRunId);
     if (run === undefined) {
-      run = await this.beginFactReviewRun(operationId, actor);
+      run = await this.beginFactReviewRun(operationId, reviewerIdentity, undefined, actor);
       return this.applyReviewBatch(operationId, decisions, actor, reviewerIdentity, run.id, expectedProjectionRevision);
     }
     if (run.status === "completed" || run.status === "superseded") throw new CoreError("FACT_REVIEW_RUN_CLOSED", `Fact review run ${run.id} is no longer open.`, true);
@@ -601,7 +601,7 @@ export class KnowledgeService {
             : item),
           audit: [...current.audit, {
             id: internalId("audit"), operation_id: operationId, event: "fact.review.batch.applied", actor, occurred_at: now(), project_revision: current.revision + 1,
-            details: { review_run_id: run!.id, reviewer_identity: reviewerIdentity, candidate_occurrence_ids: records.map((record) => record.candidate_occurrence_id), decisions: records.map((record) => ({ id: record.id, fact_id: record.fact_id, decision: record.decision, reason: record.reason })), expected_projection_revision: actualProjectionRevision },
+            details: { review_run_id: run!.id, reviewer_identity: reviewerIdentity, agent_id: reviewerIdentity, candidate_occurrence_ids: records.map((record) => record.candidate_occurrence_id), decisions: records.map((record) => ({ id: record.id, fact_id: record.fact_id, decision: record.decision, reason: record.reason })), expected_projection_revision: actualProjectionRevision },
           }],
         };
       });

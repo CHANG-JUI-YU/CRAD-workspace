@@ -76,7 +76,16 @@ export class InterviewError extends Error {
 
 const WORK_TYPE_OPTIONS = ["角色設定", "世界設定", "繼續專案", "舊卡審核", "擴充既有角色卡"] as const;
 
-const isNo = (value: string): boolean => /^(?:no|n|沒有|不需要|不想|不要|無|算了)$/iu.test(value.trim()) || /不需要(?:任何|什麼)?(?:設定|世界)/iu.test(value);
+const normalizeConfirmationValue = (value: string): string => value
+  .normalize("NFKC")
+  .replace(/[\s\u3000,，、.!！?？:：;；]+/gu, "")
+  .toLocaleLowerCase();
+
+const isNo = (value: string): boolean => {
+  const normalized = normalizeConfirmationValue(value);
+  return /^(?:no|n|沒有|不需要|不想|不要|無|算了|沒有開始建立)$/iu.test(normalized)
+    || /不需要(?:任何|什麼)?(?:設定|世界)/iu.test(normalized);
+};
 const isYes = (value: string): boolean => !isNo(value) && (/^(?:yes|y|需要|好|要|啟用|開啟|开启)$/iu.test(value.trim()) || /需要(?:世界|設定)/iu.test(value));
 const isMulti = (value: string): boolean => /multi/iu.test(value) || /多人卡|多角色卡/iu.test(value);
 const isWorld = (value: string): boolean => /world/iu.test(value) || /世界|世界觀/iu.test(value);

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -70,6 +70,17 @@ export interface QualityOverrideAudit {
   against_effective_severity: IssueSeverity;
   actor: string;
   occurred_at: string;
+}
+
+/** Audited, issue-scoped downgrade. Global policy overrides live on QualityProfile. */
+export interface IssueOverride {
+  by: string;
+  reason: string;
+  timestamp: string;
+  against_effective_severity: IssueSeverity;
+  /** Explicit target; optional only for backward-compatible legacy records. */
+  severity?: IssueSeverity;
+  policy_snapshot?: QualityPolicySnapshot;
 }
 
 export interface QualityProfile {
@@ -321,6 +332,8 @@ export interface IssueRecord {
   effective_severity: IssueSeverity;
   /** Raw policy severity used as the comparison baseline for overrides. */
   against_effective_severity?: IssueSeverity;
+  /** Optional per-issue downgrade; never a global quality policy mutation. */
+  override?: IssueOverride;
   evidence?: string[];
   overridable?: boolean;
   status: IssueStatus;
@@ -597,6 +610,15 @@ const qualityOverrideAuditSchema = z.object({
   occurred_at: z.string().datetime({ offset: true }),
 }).strict();
 
+const issueOverrideSchema = z.object({
+  by: z.string().min(1),
+  reason: z.string().min(1),
+  timestamp: z.string().datetime({ offset: true }),
+  against_effective_severity: z.enum(["info", "warning", "error", "critical"]),
+  severity: z.enum(["info", "warning", "error", "critical"]).optional(),
+  policy_snapshot: qualityPolicySnapshotSchema.optional(),
+}).strict();
+
 const reviewSchema = z.object({
   id: z.string().min(1),
   artifact_id: z.string().min(1),
@@ -617,6 +639,7 @@ const issueSchema = z.object({
   severity: z.enum(["info", "warning", "error", "critical"]),
   effective_severity: z.enum(["info", "warning", "error", "critical"]),
   against_effective_severity: z.enum(["info", "warning", "error", "critical"]).optional(),
+  override: issueOverrideSchema.optional(),
   evidence: z.array(z.string().min(1)).optional(),
   overridable: z.boolean().optional(),
   status: z.enum(["open", "resolved", "ignored"]),
@@ -972,10 +995,127 @@ export interface RepositoryTransactionCommit<T> {
 
 export type RepositoryTransactionWork<T> = (state: ProjectState) => Promise<RepositoryTransactionResult<T>> | RepositoryTransactionResult<T>;
 
+export type RepositoryFailureInjectionPoint =
+  | "after_journal"
+  | "before_backup"
+  | "after_backup"
+  | "before_install"
+  | "after_install"
+  | "before_cleanup"
+  | "after_cleanup";
+
+/** Test-only hooks for deterministic crash/rollback tests. */
+export interface RepositoryFailureInjection {
+  readonly point: RepositoryFailureInjectionPoint;
+  readonly mode?: "error" | "crash";
+  readonly once?: boolean;
+  /** Restrict the injection to one transaction entry path. */
+  readonly relative_path?: string;
+}
+
+export interface RepositoryLockOptions {
+  readonly lease_ms?: number;
+  readonly heartbeat_ms?: number;
+  readonly timeout_ms?: number;
+  readonly poll_ms?: number;
+}
+
 export interface FileProjectRepositoryOptions {
   readonly layout?: "legacy" | "project";
   readonly materialize?: boolean;
+  readonly lock?: RepositoryLockOptions;
+  readonly failure_injection?: RepositoryFailureInjection;
 }
+
+export interface RepositoryTransactionRecoveryAuditRecord {
+  readonly schema_version: 1;
+  readonly id: string;
+  readonly kind: "transaction_recovery";
+  readonly project_id: string;
+  readonly transaction_id: string;
+  readonly direction: "rollback" | "finalize";
+  readonly outcome: "completed" | "failed";
+  readonly occurred_at: string;
+  readonly error_code?: string;
+}
+
+export interface RepositoryStaleLockTakeoverAuditRecord {
+  readonly schema_version: 1;
+  readonly id: string;
+  readonly kind: "stale_lock_takeover";
+  readonly project_id: string;
+  /** The lock filename's existing SHA-256 key; never the temporary path. */
+  readonly lock_key: string;
+  /** SHA-256 of the displaced owner token; the raw token is never persisted. */
+  readonly previous_owner_hash: string;
+  readonly outcome: "completed";
+  readonly occurred_at: string;
+}
+
+export type RepositoryRecoveryAuditRecord = RepositoryTransactionRecoveryAuditRecord | RepositoryStaleLockTakeoverAuditRecord;
+
+type RepositoryTransactionPhase = "prepared" | "applying" | "committed";
+type RepositoryTransactionEntryPhase = "planned" | "backing_up" | "backed_up" | "installing" | "installed" | "removed";
+type RepositoryTargetKind = "missing" | "file" | "directory" | "other";
+
+interface RepositoryTargetSnapshot {
+  readonly kind: RepositoryTargetKind;
+  readonly hash?: string;
+  readonly size?: number;
+}
+
+interface RepositoryTransactionJournalEntry {
+  readonly action: "write" | "remove";
+  readonly relative_path: string;
+  readonly target_path: string;
+  readonly staged_path?: string;
+  readonly backup_path: string;
+  original: RepositoryTargetSnapshot;
+  readonly expected: RepositoryTargetSnapshot;
+  phase: RepositoryTransactionEntryPhase;
+  backup_created: boolean;
+  installed: boolean;
+}
+
+interface RepositoryTransactionJournal {
+  readonly schema_version: 1;
+  readonly id: string;
+  readonly project_id: string;
+  readonly owner: string;
+  readonly expected_revision: number;
+  readonly staging_directory: string;
+  readonly transaction_directory: string;
+  readonly entries: RepositoryTransactionJournalEntry[];
+  phase: RepositoryTransactionPhase;
+  created_at: string;
+  updated_at: string;
+}
+
+interface LockRecord {
+  readonly schema_version: 1;
+  readonly owner: string;
+  readonly pid: number;
+  readonly created_at: string;
+  readonly heartbeat_at: string;
+  readonly lease_expires_at: string;
+}
+
+interface LockLeaseContext {
+  readonly owner: string;
+  readonly lock_files: readonly string[];
+  readonly lease_ms: number;
+  readonly heartbeat_ms: number;
+  heartbeat_timer?: ReturnType<typeof setInterval>;
+  heartbeat_tail: Promise<void>;
+  lost?: CoreError;
+}
+
+const DEFAULT_LOCK_OPTIONS: Required<RepositoryLockOptions> = {
+  lease_ms: 30_000,
+  heartbeat_ms: 10_000,
+  timeout_ms: 10_000,
+  poll_ms: 25,
+};
 
 export class MemoryProjectRepository implements ProjectRepository {
   private state: ProjectState;
@@ -1022,12 +1162,17 @@ export class FileProjectRepository implements ProjectRepository {
   private readonly projectRoot: string;
   private readonly layout: "legacy" | "project";
   private readonly materializeEnabled: boolean;
+  private readonly lockOptions: Required<RepositoryLockOptions>;
+  private failureInjection: RepositoryFailureInjection | undefined;
+  private activeLock: LockLeaseContext | undefined;
 
   constructor(projectRoot: string, projectId: string, options: FileProjectRepositoryOptions = {}) {
     this.projectRoot = projectRoot;
     this.projectIdValue = projectId;
     this.layout = options.layout ?? "legacy";
     this.materializeEnabled = options.materialize ?? false;
+    this.lockOptions = { ...DEFAULT_LOCK_OPTIONS, ...options.lock };
+    this.failureInjection = options.failure_injection;
     this.stateFile = this.stateFileFor(projectId);
     this.lockFile = this.lockFileFor(projectId);
   }
@@ -1040,6 +1185,11 @@ export class FileProjectRepository implements ProjectRepository {
     return path.join(this.projectRoot, this.projectIdValue);
   }
 
+  /** Read the append-only repository recovery ledger without taking a project lock. */
+  async readRecoveryLedger(): Promise<readonly RepositoryRecoveryAuditRecord[]> {
+    return readRecoveryLedgerFile(this.recoveryLedgerFile());
+  }
+
   /** Move a temporary project directory without changing the repository instance. */
   async relocate(newProjectId: string): Promise<void> {
     const normalized = newProjectId.trim();
@@ -1050,8 +1200,14 @@ export class FileProjectRepository implements ProjectRepository {
     const run = previous.then(async () => {
       if (normalized === this.projectIdValue) return;
       const targetDirectory = path.join(this.projectRoot, normalized);
-      await mkdir(this.projectRoot, { recursive: true });
-      await renameWithRetry(this.projectDirectory, targetDirectory);
+      const sourceLockFile = this.lockFile;
+      const targetLockFile = this.lockFileFor(normalized);
+      await this.withLockFiles([sourceLockFile, targetLockFile], async () => {
+        await this.recoverIncompleteTransactions();
+        await mkdir(this.projectRoot, { recursive: true });
+        await this.assertLockOwner();
+        await renameWithRetry(this.projectDirectory, targetDirectory);
+      });
       this.projectIdValue = normalized;
       this.stateFile = this.stateFileFor(normalized);
       this.lockFile = this.lockFileFor(normalized);
@@ -1071,9 +1227,14 @@ export class FileProjectRepository implements ProjectRepository {
     return path.join(tmpdir(), "st-workspace-v3-locks", `${lockKey}.lock`);
   }
 
+  private recoveryLedgerFile(): string {
+    return path.join(this.projectDirectory, ".workspace", "recovery-ledger.jsonl");
+  }
+
   async read(): Promise<ProjectState> {
     await this.queue;
     return this.withProjectLock(async () => {
+      await this.recoverIncompleteTransactions();
       let state: ProjectState;
       try {
         const raw = await readFile(this.stateFile, "utf8");
@@ -1097,6 +1258,7 @@ export class FileProjectRepository implements ProjectRepository {
     const previous = this.queue;
     const run = previous.then(async () => {
       await this.withProjectLock(async () => {
+        await this.recoverIncompleteTransactions();
         const current = await this.readUnlocked();
         if (current.revision !== expectedRevision) {
           throw new CoreError("REVISION_CONFLICT", `Expected project revision ${expectedRevision}, found ${current.revision}`, true);
@@ -1243,50 +1405,353 @@ export class FileProjectRepository implements ProjectRepository {
 
   private async writeTransactional(state: ProjectState, writeSet: RepositoryWriteSet = {}): Promise<void> {
     await mkdir(this.projectDirectory, { recursive: true });
-    const staging = path.join(this.projectDirectory, ".workspace", `.staging-${randomUUID()}`);
-    await mkdir(staging, { recursive: true });
+    const transactionId = `transaction-${randomUUID()}`;
+    const staging = path.join(this.projectDirectory, ".workspace", `.staging-${transactionId}`);
+    const transactionDirectory = path.join(this.projectDirectory, ".workspace", "transactions", transactionId);
+    const journalPath = path.join(transactionDirectory, "journal.jsonl");
     const files = new Map<string, Uint8Array | string>();
-    files.set(path.relative(this.projectDirectory, this.stateFile), `${canonicalJson(state)}\n`);
+    files.set(normalizeRepositoryPath(path.relative(this.projectDirectory, this.stateFile)), `${canonicalJson(state)}\n`);
     if (this.materializeEnabled) {
-      for (const file of this.materializedFiles(state)) files.set(file.path, file.content);
+      for (const file of this.materializedFiles(state)) files.set(normalizeRepositoryPath(file.path), file.content);
     }
     for (const file of writeSet.files ?? []) files.set(normalizeRepositoryPath(file.path), file.content);
 
-    const stagedPaths: Array<{ relativePath: string; stagedPath: string; targetPath: string }> = [];
+    const entries: RepositoryTransactionJournalEntry[] = [];
+    let entryIndex = 0;
     for (const [relativePath, content] of files) {
       const normalized = normalizeRepositoryPath(relativePath);
+      assertTransactionTargetPath(normalized);
       const stagedPath = path.join(staging, normalized);
       const targetPath = path.join(this.projectDirectory, normalized);
-      await mkdir(path.dirname(stagedPath), { recursive: true });
-      await writeStagedFile(stagedPath, content);
-      stagedPaths.push({ relativePath: normalized, stagedPath, targetPath });
+      const backupPath = path.join(transactionDirectory, "backups", `${entryIndex}-${safeSegment(path.basename(normalized))}`);
+      entries.push({
+        action: "write",
+        relative_path: normalized,
+        target_path: normalized,
+        staged_path: normalizeRepositoryPath(path.relative(this.projectDirectory, stagedPath)),
+        backup_path: normalizeRepositoryPath(path.relative(this.projectDirectory, backupPath)),
+        original: await inspectTarget(targetPath),
+        expected: snapshotForContent(content),
+        phase: "planned",
+        backup_created: false,
+        installed: false,
+      });
+      entryIndex += 1;
+    }
+    for (const relativePath of [...(writeSet.remove ?? [])].map(normalizeRepositoryPath)) {
+      assertTransactionTargetPath(relativePath);
+      const targetPath = path.join(this.projectDirectory, relativePath);
+      const backupPath = path.join(transactionDirectory, "backups", `${entryIndex}-${safeSegment(path.basename(relativePath))}`);
+      entries.push({
+        action: "remove",
+        relative_path: relativePath,
+        target_path: relativePath,
+        backup_path: normalizeRepositoryPath(path.relative(this.projectDirectory, backupPath)),
+        original: await inspectTarget(targetPath),
+        expected: { kind: "missing" },
+        phase: "planned",
+        backup_created: false,
+        installed: false,
+      });
+      entryIndex += 1;
     }
 
-    const removals = [...(writeSet.remove ?? [])].map(normalizeRepositoryPath);
-    const applied: Array<{ targetPath: string; backupPath?: string; created: boolean }> = [];
+    const now = new Date().toISOString();
+    const journal: RepositoryTransactionJournal = {
+      schema_version: 1,
+      id: transactionId,
+      project_id: this.projectIdValue,
+      owner: this.activeLock?.owner ?? "internal",
+      expected_revision: state.revision,
+      staging_directory: normalizeRepositoryPath(path.relative(this.projectDirectory, staging)),
+      transaction_directory: normalizeRepositoryPath(path.relative(this.projectDirectory, transactionDirectory)),
+      entries,
+      phase: "prepared",
+      created_at: now,
+      updated_at: now,
+    };
+    let journalPersisted = false;
+    let committed = false;
+    let preserveArtifacts = false;
     try {
-      for (const item of stagedPaths) {
-        await mkdir(path.dirname(item.targetPath), { recursive: true });
-        const backupPath = await moveToBackup(item.targetPath);
-        await renameWithRetry(item.stagedPath, item.targetPath);
-        applied.push({ targetPath: item.targetPath, ...(backupPath === undefined ? {} : { backupPath }), created: backupPath === undefined });
+      await mkdir(staging, { recursive: true });
+      await mkdir(path.join(transactionDirectory, "backups"), { recursive: true });
+      await this.persistJournal(journalPath, journal);
+      journalPersisted = true;
+      this.injectFailure("after_journal");
+
+      for (const entry of journal.entries) {
+        if (entry.action !== "write" || entry.staged_path === undefined) continue;
+        await this.assertLockOwner();
+        const stagedPath = path.join(this.projectDirectory, entry.staged_path);
+        const content = files.get(entry.relative_path);
+        if (content === undefined) throw new CoreError("TRANSACTION_PLAN_INVALID", `Missing staged content for ${entry.relative_path}`);
+        await mkdir(path.dirname(stagedPath), { recursive: true });
+        await writeStagedFile(stagedPath, content);
       }
-      for (const relativePath of removals) {
-        const targetPath = path.join(this.projectDirectory, relativePath);
-        const backupPath = await moveToBackup(targetPath);
-        if (backupPath !== undefined) applied.push({ targetPath, backupPath, created: false });
+      journal.phase = "applying";
+      await this.persistJournal(journalPath, journal);
+
+      for (const entry of journal.entries) {
+        await this.assertLockOwner();
+        const targetPath = path.join(this.projectDirectory, entry.target_path);
+        const backupPath = path.join(this.projectDirectory, entry.backup_path);
+        await mkdir(path.dirname(targetPath), { recursive: true });
+        entry.phase = "backing_up";
+        await this.persistJournal(journalPath, journal);
+        this.injectFailure("before_backup");
+        const backupCreated = await moveToBackup(targetPath, backupPath);
+        entry.backup_created = backupCreated;
+        if (backupCreated && entry.original.kind === "missing") entry.original = await inspectTarget(backupPath);
+        entry.phase = "backed_up";
+        await this.persistJournal(journalPath, journal);
+        this.injectFailure("after_backup", entry.relative_path);
+
+        if (entry.action === "remove") {
+          entry.installed = true;
+          entry.phase = "removed";
+          await this.persistJournal(journalPath, journal);
+          continue;
+        }
+
+        if (entry.staged_path === undefined) throw new CoreError("TRANSACTION_PLAN_INVALID", `Missing staged path for ${entry.relative_path}`);
+        const stagedPath = path.join(this.projectDirectory, entry.staged_path);
+        entry.phase = "installing";
+        await this.persistJournal(journalPath, journal);
+        this.injectFailure("before_install", entry.relative_path);
+        await renameWithRetry(stagedPath, targetPath);
+        await syncDirectory(path.dirname(targetPath));
+        entry.installed = true;
+        entry.phase = "installed";
+        await this.persistJournal(journalPath, journal);
+        this.injectFailure("after_install", entry.relative_path);
       }
-      for (const item of applied) {
-        if (item.backupPath !== undefined) await rm(item.backupPath, { force: true });
-      }
+
+      journal.phase = "committed";
+      await this.persistJournal(journalPath, journal);
+      committed = true;
+      await this.cleanupCommittedJournal(journal, journalPath);
     } catch (error) {
-      for (const item of [...applied].reverse()) {
-        await rm(item.targetPath, { force: true }).catch(() => undefined);
-        if (item.backupPath !== undefined) await renameWithRetry(item.backupPath, item.targetPath).catch(() => undefined);
+      if (error instanceof RepositoryCrashInjection) {
+        preserveArtifacts = true;
+        throw error;
+      }
+      if (committed || error instanceof CoreError && error.code === "REPOSITORY_LOCK_LOST") {
+        preserveArtifacts = true;
+        throw error;
+      }
+      if (journalPersisted) {
+        try {
+          await this.rollbackJournal(journal, journalPath);
+        } catch (recoveryError) {
+          preserveArtifacts = true;
+          throw new CoreError("TRANSACTION_RECOVERY_REQUIRED", `Transaction ${transactionId} could not be rolled back safely`, true, { cause: recoveryError, transaction_id: transactionId });
+        }
       }
       throw error;
     } finally {
-      await rm(staging, { recursive: true, force: true });
+      if (!preserveArtifacts) await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private async persistJournal(journalPath: string, journal: RepositoryTransactionJournal): Promise<void> {
+    await this.assertLockOwner();
+    journal.updated_at = new Date().toISOString();
+    await appendDurableJournalSnapshot(journalPath, journal);
+  }
+
+  private async recoverIncompleteTransactions(): Promise<void> {
+    const transactionsRoot = path.join(this.projectDirectory, ".workspace", "transactions");
+    let entries;
+    try {
+      entries = await readdir(transactionsRoot, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const transactionDirectory = path.join(transactionsRoot, entry.name);
+      const journalPath = path.join(transactionDirectory, "journal.jsonl");
+      let journal: RepositoryTransactionJournal | undefined;
+      try {
+        journal = await readLatestJournalSnapshot(journalPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          const leftovers = await readdir(transactionDirectory);
+          if (leftovers.length === 0) {
+            await rm(transactionDirectory, { recursive: true, force: true });
+            continue;
+          }
+        }
+        throw new CoreError("TRANSACTION_RECOVERY_UNCERTAIN", `Cannot determine the state of transaction ${entry.name}`, true, { cause: error, transaction_id: entry.name });
+      }
+      if (journal === undefined) throw new CoreError("TRANSACTION_RECOVERY_UNCERTAIN", `Transaction ${entry.name} has no durable journal`, true, { transaction_id: entry.name });
+      if (journal.project_id !== this.projectIdValue || journal.id !== entry.name) {
+        throw new CoreError("TRANSACTION_RECOVERY_UNCERTAIN", `Transaction ${entry.name} does not belong to this project`, true, { transaction_id: entry.name });
+      }
+      const direction: RepositoryTransactionRecoveryAuditRecord["direction"] = journal.phase === "committed" ? "finalize" : "rollback";
+      let completedAuditRecorded = false;
+      try {
+        if (direction === "finalize") await this.finalizeCommittedJournal(journal, journalPath, false);
+        else await this.rollbackJournal(journal, journalPath, false);
+        await this.appendTransactionRecoveryAudit(journal, direction, "completed");
+        completedAuditRecorded = true;
+        if (direction === "finalize") await this.cleanupCommittedJournal(journal, journalPath);
+        else await this.cleanupRecoveredRollback(journal, journalPath);
+      } catch (error) {
+        if (!completedAuditRecorded) {
+          try {
+            await this.appendTransactionRecoveryAudit(journal, direction, "failed", error);
+          } catch (auditError) {
+            throw new CoreError("RECOVERY_AUDIT_WRITE_FAILED", `Could not audit recovery of transaction ${journal.id}`, true, {
+              audit_error: auditError,
+              recovery_error: error,
+              transaction_id: journal.id,
+            });
+          }
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async rollbackJournal(journal: RepositoryTransactionJournal, journalPath: string, cleanup = true): Promise<void> {
+    for (const entry of [...journal.entries].reverse()) {
+      await this.assertLockOwner();
+      const targetPath = path.join(this.projectDirectory, entry.target_path);
+      const backupPath = path.join(this.projectDirectory, entry.backup_path);
+      if (await pathExists(backupPath)) {
+        await removePath(targetPath);
+        await renameWithRetry(backupPath, targetPath);
+        await syncDirectory(path.dirname(targetPath));
+        entry.backup_created = false;
+        entry.installed = false;
+        entry.phase = "planned";
+        await this.persistJournal(journalPath, journal);
+      } else {
+        const actual = await inspectTarget(targetPath);
+        if (snapshotsEqual(actual, entry.original)) {
+          entry.installed = false;
+          entry.phase = "planned";
+          await this.persistJournal(journalPath, journal);
+        } else if (entry.original.kind === "missing" && snapshotsEqual(actual, entry.expected)) {
+          await removePath(targetPath);
+          entry.installed = false;
+          entry.phase = "planned";
+          await this.persistJournal(journalPath, journal);
+        } else {
+          throw new CoreError("TRANSACTION_RECOVERY_UNCERTAIN", `Cannot restore ${entry.relative_path} without its original backup`, true, { path: entry.relative_path, transaction_id: journal.id });
+        }
+      }
+    }
+    for (const entry of journal.entries) {
+      const actual = await inspectTarget(path.join(this.projectDirectory, entry.target_path));
+      if (!snapshotsEqual(actual, entry.original)) {
+        throw new CoreError("TRANSACTION_RECOVERY_UNCERTAIN", `Rollback verification failed for ${entry.relative_path}`, true, { path: entry.relative_path, transaction_id: journal.id });
+      }
+    }
+    if (cleanup) {
+      await rm(path.join(this.projectDirectory, journal.staging_directory), { recursive: true, force: true });
+      await rm(path.dirname(journalPath), { recursive: true, force: true });
+    }
+  }
+
+  private async finalizeCommittedJournal(journal: RepositoryTransactionJournal, journalPath: string, cleanup = true): Promise<void> {
+    for (const entry of journal.entries) {
+      await this.assertLockOwner();
+      const targetPath = path.join(this.projectDirectory, entry.target_path);
+      if (entry.action === "remove") {
+        await removePath(targetPath);
+        continue;
+      }
+      const expected = await inspectTarget(targetPath);
+      if (!snapshotsEqual(expected, entry.expected)) {
+        if (entry.staged_path === undefined || !(await pathExists(path.join(this.projectDirectory, entry.staged_path)))) {
+          throw new CoreError("TRANSACTION_RECOVERY_UNCERTAIN", `Committed transaction is missing the new content for ${entry.relative_path}`, true, { path: entry.relative_path, transaction_id: journal.id });
+        }
+        await removePath(targetPath);
+        await mkdir(path.dirname(targetPath), { recursive: true });
+        await renameWithRetry(path.join(this.projectDirectory, entry.staged_path), targetPath);
+        await syncDirectory(path.dirname(targetPath));
+      }
+      const verified = await inspectTarget(targetPath);
+      if (!snapshotsEqual(verified, entry.expected)) {
+        throw new CoreError("TRANSACTION_RECOVERY_UNCERTAIN", `Commit verification failed for ${entry.relative_path}`, true, { path: entry.relative_path, transaction_id: journal.id });
+      }
+    }
+    if (cleanup) await this.cleanupCommittedJournal(journal, journalPath);
+  }
+
+  private async cleanupRecoveredRollback(journal: RepositoryTransactionJournal, journalPath: string): Promise<void> {
+    try {
+      await this.assertLockOwner();
+      await rm(path.join(this.projectDirectory, journal.staging_directory), { recursive: true, force: true });
+      await rm(path.dirname(journalPath), { recursive: true, force: true });
+    } catch (error) {
+      if (error instanceof CoreError && error.code === "REPOSITORY_LOCK_LOST") throw error;
+      // The old version has already been verified and its audit record is
+      // durable. Leftovers are safe to retry on the next repository read.
+    }
+  }
+
+  private async appendTransactionRecoveryAudit(
+    journal: RepositoryTransactionJournal,
+    direction: RepositoryTransactionRecoveryAuditRecord["direction"],
+    outcome: RepositoryTransactionRecoveryAuditRecord["outcome"],
+    error?: unknown,
+  ): Promise<void> {
+    const errorCode = recoveryErrorCode(error);
+    await this.appendRecoveryAudit({
+      schema_version: 1,
+      id: `transaction-recovery-${contentHash(`${this.projectIdValue}\0${journal.id}\0${direction}\0${outcome}`)}`,
+      kind: "transaction_recovery",
+      project_id: this.projectIdValue,
+      transaction_id: journal.id,
+      direction,
+      outcome,
+      occurred_at: new Date().toISOString(),
+      ...(errorCode === undefined ? {} : { error_code: errorCode }),
+    });
+  }
+
+  private async appendStaleLockTakeoverAudit(event: ExpiredLockTakeover): Promise<void> {
+    const lockKey = path.basename(event.lock_file, ".lock");
+    const previousOwnerHash = `sha256:${contentHash(event.previous_owner)}`;
+    await this.appendRecoveryAudit({
+      schema_version: 1,
+      id: `stale-lock-takeover-${contentHash(`${this.projectIdValue}\0${lockKey}\0${previousOwnerHash}`)}`,
+      kind: "stale_lock_takeover",
+      project_id: this.projectIdValue,
+      lock_key: lockKey,
+      previous_owner_hash: previousOwnerHash,
+      outcome: "completed",
+      occurred_at: event.occurred_at,
+    });
+  }
+
+  private async appendRecoveryAudit(record: RepositoryRecoveryAuditRecord): Promise<void> {
+    const ledgerFile = this.recoveryLedgerFile();
+    const existing = await readRecoveryLedgerFile(ledgerFile);
+    if (existing.some((candidate) => candidate.id === record.id)) return;
+    await appendDurableRecoveryAuditRecord(ledgerFile, record);
+  }
+
+  private async cleanupCommittedJournal(journal: RepositoryTransactionJournal, journalPath: string): Promise<void> {
+    try {
+      await this.assertLockOwner();
+      this.injectFailure("before_cleanup");
+      for (const entry of journal.entries) {
+        await removePath(path.join(this.projectDirectory, entry.backup_path));
+      }
+      await rm(path.join(this.projectDirectory, journal.staging_directory), { recursive: true, force: true });
+      this.injectFailure("after_cleanup");
+      await rm(journalPath, { force: true });
+      await rm(path.dirname(journalPath), { recursive: true, force: true });
+    } catch (error) {
+      if (error instanceof RepositoryCrashInjection || error instanceof CoreError && error.code === "REPOSITORY_LOCK_LOST") throw error;
+      // The commit marker is already durable. A failed cleanup is safe to retry
+      // on the next read, so never roll a committed transaction back.
     }
   }
 
@@ -1364,47 +1829,451 @@ export class FileProjectRepository implements ProjectRepository {
   }
 
   private async withProjectLock<T>(work: () => Promise<T>): Promise<T> {
-    await mkdir(path.dirname(this.lockFile), { recursive: true });
+    return this.withLockFiles([this.lockFile], work);
+  }
+
+  private async withLockFiles<T>(lockFiles: readonly string[], work: () => Promise<T>): Promise<T> {
+    const orderedLockFiles = [...new Set(lockFiles)].sort();
     const owner = `${process.pid}:${randomUUID()}`;
-    const deadline = Date.now() + 10_000;
-    let acquired = false;
-    while (!acquired) {
+    const context: LockLeaseContext = {
+      owner,
+      lock_files: orderedLockFiles,
+      lease_ms: this.lockOptions.lease_ms,
+      heartbeat_ms: Math.max(1, Math.min(this.lockOptions.heartbeat_ms, Math.max(1, this.lockOptions.lease_ms - 1))),
+      heartbeat_tail: Promise.resolve(),
+    };
+    const acquired: string[] = [];
+    try {
+      for (const lockFile of orderedLockFiles) {
+        await acquireLockFile(lockFile, owner, this.lockOptions, (event) => this.appendStaleLockTakeoverAudit(event));
+        acquired.push(lockFile);
+      }
+      this.activeLock = context;
+      context.heartbeat_timer = setInterval(() => {
+        context.heartbeat_tail = context.heartbeat_tail.then(async () => {
+          if (context.lost !== undefined) return;
+          try {
+            for (const lockFile of context.lock_files) await refreshLockFile(lockFile, context.owner, context.lease_ms);
+          } catch (error) {
+            context.lost = new CoreError("REPOSITORY_LOCK_LOST", `Project lock ownership was lost for ${this.projectIdValue}`, true, { cause: error });
+          }
+        });
+      }, context.heartbeat_ms);
+      context.heartbeat_timer.unref?.();
+      const result = await work();
+      await context.heartbeat_tail;
+      if (context.lost !== undefined) throw context.lost;
+      return result;
+    } finally {
+      if (context.heartbeat_timer !== undefined) clearInterval(context.heartbeat_timer);
+      await context.heartbeat_tail;
+      if (this.activeLock === context) this.activeLock = undefined;
+      for (const lockFile of [...acquired].reverse()) await releaseLockFile(lockFile, owner);
+    }
+  }
+
+  private async assertLockOwner(): Promise<void> {
+    const context = this.activeLock;
+    if (context === undefined) return;
+    if (context.lost !== undefined) throw context.lost;
+    for (const lockFile of context.lock_files) {
+      let record: LockRecord;
       try {
-        const handle = await open(this.lockFile, "wx");
-        await handle.writeFile(JSON.stringify({ owner, pid: process.pid, created_at: new Date().toISOString() }), "utf8");
-        await handle.close();
-        acquired = true;
+        record = await readLockRecord(lockFile);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        let stale = false;
-        try {
-          const lockStat = await stat(this.lockFile);
-          stale = Date.now() - lockStat.mtimeMs > 30_000;
-        } catch (statError) {
-          // Windows scanners can briefly deny stat() on a lock file that is
-          // already being released. Treat that like a live lock and retry;
-          // only unrelated filesystem failures should escape immediately.
-          const code = (statError as NodeJS.ErrnoException).code;
-          if (code !== "ENOENT" && code !== "EPERM" && code !== "EACCES") throw statError;
-        }
-        if (stale) {
-          await unlink(this.lockFile).catch(() => undefined);
+        context.lost = new CoreError("REPOSITORY_LOCK_LOST", `Project lock is no longer readable for ${this.projectIdValue}`, true, { cause: error });
+        throw context.lost;
+      }
+      if (record.owner !== context.owner || Date.parse(record.lease_expires_at) <= Date.now()) {
+        context.lost = new CoreError("REPOSITORY_LOCK_LOST", `Project lock ownership changed for ${this.projectIdValue}`, true, { owner: context.owner, current_owner: record.owner });
+        throw context.lost;
+      }
+    }
+  }
+
+  private injectFailure(point: RepositoryFailureInjectionPoint, relativePath?: string): void {
+    if (this.failureInjection?.point !== point) return;
+    if (this.failureInjection.relative_path !== undefined && this.failureInjection.relative_path !== relativePath) return;
+    const injection = this.failureInjection;
+    if (injection.once !== false) this.failureInjection = undefined;
+    if (injection.mode === "crash") throw new RepositoryCrashInjection(point);
+    throw new CoreError("INJECTED_FAILURE", `Injected repository failure at ${point}`, true, { point });
+  }
+}
+
+class RepositoryCrashInjection extends Error {
+  constructor(point: RepositoryFailureInjectionPoint) {
+    super(`Injected repository crash at ${point}`);
+    this.name = "RepositoryCrashInjection";
+  }
+}
+
+async function appendDurableJournalSnapshot(journalPath: string, journal: RepositoryTransactionJournal): Promise<void> {
+  await mkdir(path.dirname(journalPath), { recursive: true });
+  const handle = await open(journalPath, "a");
+  try {
+    await handle.writeFile(`${JSON.stringify(journal)}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await syncDirectory(path.dirname(journalPath));
+}
+
+async function appendDurableRecoveryAuditRecord(ledgerFile: string, record: RepositoryRecoveryAuditRecord): Promise<void> {
+  await mkdir(path.dirname(ledgerFile), { recursive: true });
+  const handle = await open(ledgerFile, "a");
+  try {
+    await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await syncDirectory(path.dirname(ledgerFile));
+}
+
+async function readRecoveryLedgerFile(ledgerFile: string): Promise<readonly RepositoryRecoveryAuditRecord[]> {
+  let raw: string;
+  try {
+    raw = await readFile(ledgerFile, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const lines = raw.split(/\r?\n/u);
+  const records = new Map<string, RepositoryRecoveryAuditRecord>();
+  let lastNonEmpty = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index]?.trim().length !== 0) lastNonEmpty = index;
+  }
+  for (let index = 0; index <= lastNonEmpty; index += 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (line.length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line) as unknown;
+    } catch (error) {
+      if (index === lastNonEmpty && !raw.endsWith("\n")) break;
+      throw new CoreError("RECOVERY_LEDGER_CORRUPT", `Repository recovery ledger ${ledgerFile} is corrupt`, true, { cause: error });
+    }
+    if (!isRepositoryRecoveryAuditRecord(parsed)) {
+      throw new CoreError("RECOVERY_LEDGER_CORRUPT", `Repository recovery ledger ${ledgerFile} contains an invalid record`, true);
+    }
+    if (!records.has(parsed.id)) records.set(parsed.id, parsed);
+  }
+  return [...records.values()];
+}
+
+function isRepositoryRecoveryAuditRecord(value: unknown): value is RepositoryRecoveryAuditRecord {
+  if (value === null || typeof value !== "object") return false;
+  const record = value as Partial<RepositoryRecoveryAuditRecord>;
+  if (record.schema_version !== 1 || typeof record.id !== "string" || record.id.length === 0 || typeof record.project_id !== "string" || typeof record.occurred_at !== "string") return false;
+  if (record.kind === "transaction_recovery") {
+    const transactionRecord = record as Partial<RepositoryTransactionRecoveryAuditRecord>;
+    return typeof transactionRecord.transaction_id === "string"
+      && ["rollback", "finalize"].includes(transactionRecord.direction ?? "")
+      && ["completed", "failed"].includes(transactionRecord.outcome ?? "")
+      && (transactionRecord.error_code === undefined || typeof transactionRecord.error_code === "string");
+  }
+  if (record.kind === "stale_lock_takeover") {
+    const takeoverRecord = record as Partial<RepositoryStaleLockTakeoverAuditRecord>;
+    return typeof takeoverRecord.lock_key === "string"
+      && takeoverRecord.lock_key.length > 0
+      && typeof takeoverRecord.previous_owner_hash === "string"
+      && takeoverRecord.previous_owner_hash.startsWith("sha256:")
+      && takeoverRecord.outcome === "completed";
+  }
+  return false;
+}
+
+function recoveryErrorCode(error: unknown): string | undefined {
+  if (error === undefined) return undefined;
+  if (error instanceof CoreError) return error.code;
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === "string" && code.length > 0 ? code : "UNKNOWN";
+}
+
+async function readLatestJournalSnapshot(journalPath: string): Promise<RepositoryTransactionJournal | undefined> {
+  const raw = await readFile(journalPath, "utf8");
+  const lines = raw.split(/\r?\n/u);
+  let latest: RepositoryTransactionJournal | undefined;
+  let lastNonEmpty = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index]?.trim().length !== 0) lastNonEmpty = index;
+  }
+  for (let index = 0; index <= lastNonEmpty; index += 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (line.length === 0) continue;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (!isTransactionJournal(parsed)) throw new Error("invalid transaction journal snapshot");
+      latest = parsed;
+    } catch (error) {
+      // A process can die in the middle of the final append. A complete
+      // earlier snapshot is safe to use; corruption in any earlier line is
+      // not safe to guess through.
+      if (index === lastNonEmpty) break;
+      throw new CoreError("TRANSACTION_JOURNAL_CORRUPT", `Transaction journal ${journalPath} is corrupt`, true, { cause: error });
+    }
+  }
+  if (latest === undefined) throw new CoreError("TRANSACTION_JOURNAL_CORRUPT", `Transaction journal ${journalPath} has no complete snapshot`, true);
+  return latest;
+}
+
+function isTransactionJournal(value: unknown): value is RepositoryTransactionJournal {
+  if (value === null || typeof value !== "object") return false;
+  const record = value as Partial<RepositoryTransactionJournal>;
+  if (record.schema_version !== 1 || typeof record.id !== "string" || typeof record.project_id !== "string" || typeof record.owner !== "string") return false;
+  if (typeof record.expected_revision !== "number" || typeof record.staging_directory !== "string" || typeof record.transaction_directory !== "string" || !Array.isArray(record.entries) || !["prepared", "applying", "committed"].includes(record.phase ?? "")) return false;
+  try {
+    normalizeRepositoryPath(record.staging_directory);
+    normalizeRepositoryPath(record.transaction_directory);
+  } catch {
+    return false;
+  }
+  return record.entries.every((entry) => {
+    if (entry === null || typeof entry !== "object") return false;
+    const item = entry as Partial<RepositoryTransactionJournalEntry>;
+    try {
+      normalizeRepositoryPath(item.relative_path ?? "");
+      normalizeRepositoryPath(item.target_path ?? "");
+      normalizeRepositoryPath(item.backup_path ?? "");
+      if (item.staged_path !== undefined) normalizeRepositoryPath(item.staged_path);
+    } catch {
+      return false;
+    }
+    return (item.action === "write" || item.action === "remove")
+      && typeof item.relative_path === "string"
+      && typeof item.target_path === "string"
+      && typeof item.backup_path === "string"
+      && item.original !== undefined
+      && item.expected !== undefined
+      && typeof item.phase === "string"
+      && typeof item.backup_created === "boolean"
+      && typeof item.installed === "boolean"
+      && isTargetSnapshot(item.original)
+      && isTargetSnapshot(item.expected);
+  });
+}
+
+function isTargetSnapshot(value: unknown): value is RepositoryTargetSnapshot {
+  if (value === null || typeof value !== "object") return false;
+  const snapshot = value as Partial<RepositoryTargetSnapshot>;
+  if (!["missing", "file", "directory", "other"].includes(snapshot.kind ?? "")) return false;
+  if (snapshot.kind === "file") return typeof snapshot.hash === "string" && typeof snapshot.size === "number";
+  return snapshot.hash === undefined && (snapshot.size === undefined || typeof snapshot.size === "number");
+}
+
+async function inspectTarget(targetPath: string): Promise<RepositoryTargetSnapshot> {
+  let targetStat;
+  try {
+    targetStat = await stat(targetPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
+    throw error;
+  }
+  if (targetStat.isFile()) {
+    const content = await readFile(targetPath);
+    return { kind: "file", hash: contentHash(content), size: content.byteLength };
+  }
+  if (targetStat.isDirectory()) return { kind: "directory", size: targetStat.size };
+  return { kind: "other", size: targetStat.size };
+}
+
+function snapshotForContent(content: Uint8Array | string): RepositoryTargetSnapshot {
+  const bytes = typeof content === "string" ? Buffer.from(content, "utf8") : Buffer.from(content);
+  return { kind: "file", hash: contentHash(bytes), size: bytes.byteLength };
+}
+
+function snapshotsEqual(left: RepositoryTargetSnapshot, right: RepositoryTargetSnapshot): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind !== "file") return true;
+  return left.hash === right.hash && left.size === right.size;
+}
+
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await stat(targetPath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function removePath(targetPath: string): Promise<void> {
+  await rm(targetPath, { recursive: true, force: true });
+}
+
+async function syncDirectory(directoryPath: string): Promise<void> {
+  try {
+    const handle = await open(directoryPath, "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (!( ["EISDIR", "EINVAL", "ENOTSUP", "EPERM", "EBUSY"] as string[]).includes(code ?? "")) throw error;
+  }
+}
+
+function lockRecord(owner: string, leaseMs: number, createdAt = new Date().toISOString()): LockRecord {
+  const now = new Date().toISOString();
+  return {
+    schema_version: 1,
+    owner,
+    pid: process.pid,
+    created_at: createdAt,
+    heartbeat_at: now,
+    lease_expires_at: new Date(Date.now() + leaseMs).toISOString(),
+  };
+}
+
+async function readLockRecord(lockFile: string): Promise<LockRecord> {
+  const raw = await readFile(lockFile, "utf8");
+  return readLockRecordFromContent(raw, lockFile);
+}
+
+function readLockRecordFromContent(raw: string, lockFile: string): LockRecord {
+  const lines = raw.split(/\r?\n/u);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (line.length === 0) continue;
+    try {
+      const parsed = JSON.parse(line) as Partial<LockRecord>;
+      if (parsed.schema_version === 1 && typeof parsed.owner === "string" && parsed.owner.length > 0 && typeof parsed.lease_expires_at === "string") {
+        return parsed as LockRecord;
+      }
+    } catch {
+      // A partially appended final line is ignored in favour of the last
+      // complete heartbeat snapshot.
+    }
+  }
+  throw new CoreError("REPOSITORY_LOCK_CORRUPT", `Lock file ${lockFile} is corrupt`, true);
+}
+
+interface ExpiredLockTakeover {
+  readonly lock_file: string;
+  readonly displaced_file: string;
+  readonly previous_owner: string;
+  readonly occurred_at: string;
+}
+
+async function acquireLockFile(
+  lockFile: string,
+  owner: string,
+  options: Required<RepositoryLockOptions>,
+  onStaleTakeover?: (event: ExpiredLockTakeover) => Promise<void>,
+): Promise<void> {
+  await mkdir(path.dirname(lockFile), { recursive: true });
+  const deadline = Date.now() + Math.max(1, options.timeout_ms);
+  while (true) {
+    try {
+      const handle = await open(lockFile, "wx");
+      try {
+        await handle.writeFile(`${JSON.stringify(lockRecord(owner, options.lease_ms))}\n`, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await syncDirectory(path.dirname(lockFile));
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let current: LockRecord | undefined;
+      try {
+        current = await readLockRecord(lockFile);
+      } catch (readError) {
+        if ((readError as NodeJS.ErrnoException).code === "ENOENT") continue;
+      }
+      if (current !== undefined && Date.parse(current.lease_expires_at) <= Date.now()) {
+        const takeover = await takeOverExpiredLock(lockFile, current);
+        if (takeover !== undefined) {
+          try {
+            await onStaleTakeover?.(takeover);
+          } catch (takeoverError) {
+            // Restore the displaced lease when no contender has claimed the
+            // lock. Otherwise retain it as evidence instead of deleting a
+            // lock whose takeover could not be audited.
+            if (!(await pathExists(lockFile))) {
+              await rename(takeover.displaced_file, lockFile).catch(() => undefined);
+            }
+            throw takeoverError;
+          }
+          // Once the audit record is durable, stale-file cleanup is best
+          // effort. A cleanup failure must not turn a recorded takeover back
+          // into an ordinary acquisition or delete its remaining evidence.
+          await rm(takeover.displaced_file, { force: true }).catch(() => undefined);
           continue;
         }
-        if (Date.now() >= deadline) throw new CoreError("REPOSITORY_LOCK_TIMEOUT", `Could not acquire project lock for ${this.projectIdValue}`, true);
-        await new Promise((resolve) => setTimeout(resolve, 25));
       }
+      if (Date.now() >= deadline) throw new CoreError("REPOSITORY_LOCK_TIMEOUT", `Could not acquire lock ${lockFile}`, true);
+      await new Promise((resolve) => setTimeout(resolve, Math.max(1, options.poll_ms)));
     }
-    try {
-      return await work();
-    } finally {
-      try {
-        const raw = await readFile(this.lockFile, "utf8");
-        if ((JSON.parse(raw) as { owner?: unknown }).owner === owner) await unlink(this.lockFile);
-      } catch {
-        // A failed cleanup is recoverable through stale-lock detection.
-      }
+  }
+}
+
+async function takeOverExpiredLock(lockFile: string, expected: LockRecord): Promise<ExpiredLockTakeover | undefined> {
+  let latest: LockRecord;
+  try {
+    latest = await readLockRecord(lockFile);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    return undefined;
+  }
+  if (latest.owner !== expected.owner || Date.parse(latest.lease_expires_at) > Date.now()) return undefined;
+  const displaced = `${lockFile}.${randomUUID()}.stale`;
+  try {
+    await rename(lockFile, displaced);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if ((error as NodeJS.ErrnoException).code === "EPERM" || (error as NodeJS.ErrnoException).code === "EACCES") return undefined;
+    throw error;
+  }
+  try {
+    const moved = await readLockRecord(displaced);
+    if (moved.owner !== expected.owner || Date.parse(moved.lease_expires_at) > Date.now()) {
+      if (!(await pathExists(lockFile))) await rename(displaced, lockFile);
+      return undefined;
     }
+    return {
+      lock_file: lockFile,
+      displaced_file: displaced,
+      previous_owner: moved.owner,
+      occurred_at: new Date().toISOString(),
+    };
+  } catch (error) {
+    // Never delete a displaced lock whose owner token we cannot verify.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function refreshLockFile(lockFile: string, owner: string, leaseMs: number): Promise<void> {
+  const handle = await open(lockFile, "r+");
+  try {
+    const raw = await handle.readFile("utf8");
+    const current = await readLockRecordFromContent(raw, lockFile);
+    if (current.owner !== owner) throw new CoreError("REPOSITORY_LOCK_LOST", `Lock owner changed for ${lockFile}`, true);
+    const position = (await handle.stat()).size;
+    await handle.write(`${JSON.stringify(lockRecord(owner, leaseMs, current.created_at))}\n`, position, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function releaseLockFile(lockFile: string, owner: string): Promise<void> {
+  try {
+    const current = await readLockRecord(lockFile);
+    if (current.owner !== owner) return;
+    await rm(lockFile, { force: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    // A corrupt/replaced lock is intentionally left for the next owner to
+    // inspect; cleanup must never delete another owner's lock.
   }
 }
 
@@ -1488,6 +2357,17 @@ function normalizeRepositoryPath(value: string): string {
   return normalized;
 }
 
+function assertTransactionTargetPath(relativePath: string): void {
+  if (relativePath === ".workspace"
+    || relativePath === ".workspace/recovery-ledger.jsonl"
+    || relativePath.startsWith(".workspace/recovery-ledger.jsonl/")
+    || relativePath === ".workspace/transactions"
+    || relativePath.startsWith(".workspace/transactions/")
+    || relativePath.startsWith(".workspace/.staging-")) {
+    throw new CoreError("REPOSITORY_PATH_INVALID", `Repository path is reserved for transaction recovery: ${relativePath}`, true);
+  }
+}
+
 async function writeStagedFile(filePath: string, content: Uint8Array | string): Promise<void> {
   const handle = await open(filePath, "w");
   try {
@@ -1498,16 +2378,18 @@ async function writeStagedFile(filePath: string, content: Uint8Array | string): 
   }
 }
 
-async function moveToBackup(targetPath: string): Promise<string | undefined> {
+async function moveToBackup(targetPath: string, backupPath: string): Promise<boolean> {
   try {
     await stat(targetPath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
-  const backupPath = `${targetPath}.${randomUUID()}.bak`;
+  await mkdir(path.dirname(backupPath), { recursive: true });
   await renameWithRetry(targetPath, backupPath);
-  return backupPath;
+  await syncDirectory(path.dirname(targetPath));
+  await syncDirectory(path.dirname(backupPath));
+  return true;
 }
 
 async function renameWithRetry(source: string, target: string): Promise<void> {

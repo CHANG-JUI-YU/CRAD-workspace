@@ -1,3 +1,4 @@
+import { CoreError } from "@st-workspace/core";
 import { AgentRegistry, type AgentDefinition, type RoutedKind } from "./agent-registry.js";
 
 export interface AgentResolution {
@@ -69,16 +70,19 @@ export class AgentRouter {
 
   resolve(request: string, requestedAgent?: string): AgentResolution {
     const explicit = requestedAgent ?? request.match(/(?:^|\s)@([a-z][a-z0-9-]*)/iu)?.[1];
-    const explicitDefinition = this.registry.resolve(explicit);
-    if (explicit !== undefined && explicitDefinition !== undefined) {
+    if (explicit !== undefined) {
+      const explicitDefinition = this.registry.resolve(explicit);
+      if (explicitDefinition === undefined) {
+        throw new CoreError("AGENT_UNKNOWN", `Unknown agent: ${explicit}`, true, { requested_agent: explicit });
+      }
       const kind = kindForAgent(explicitDefinition, request);
       /* c8 ignore next -- AgentRegistry requires at least one intent. */
       return { agent_id: explicitDefinition.id, agent_role: explicitDefinition.role, kind, intent: explicitDefinition.intents[0] ?? "route", explicit: true, fallback: false };
     }
-  const kind = classifyIntent(request);
-  const selected = specialistFor(kind, request, this.registry);
-  /* c8 ignore next -- AgentRegistry requires at least one intent. */
-  return { agent_id: selected.id, agent_role: selected.role, kind, intent: selected.intents[0] ?? "route", explicit: explicit !== undefined, fallback: explicit !== undefined };
+    const kind = classifyIntent(request);
+    const selected = specialistFor(kind, request, this.registry);
+    /* c8 ignore next -- AgentRegistry requires at least one intent. */
+    return { agent_id: selected.id, agent_role: selected.role, kind, intent: selected.intents[0] ?? "route", explicit: false, fallback: false };
   }
 
   registryView(): AgentRegistry {

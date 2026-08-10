@@ -6,7 +6,6 @@ import {
   publishedCardExportPath,
   publishedCardPngExportPath,
   type BuildRecord,
-  type IssueSeverity,
   type OperationRecord,
   type ProjectRepository,
   type PublishRecord,
@@ -29,14 +28,6 @@ function now(): string {
 
 function updateOperation(operation: OperationRecord, patch: Partial<OperationRecord>): OperationRecord {
   return { ...operation, ...patch, updated_at: now() };
-}
-
-function severityRank(value: IssueSeverity): number {
-  return { info: 0, warning: 1, error: 2, critical: 3 }[value];
-}
-
-function blockingSeverityRank(value: IssueSeverity | "none"): number {
-  return value === "none" ? Number.POSITIVE_INFINITY : severityRank(value);
 }
 
 export class BuildService {
@@ -129,39 +120,18 @@ export class BuildService {
     const canonicalIr = compiled.json;
     const hash = compiled.content_hash;
     const qualityPolicy = createQualityPolicySnapshot(initial.quality_profile, actor, now());
-    const blockingIssues = initial.issues.filter((issue) => issue.status === "open" && artifactIds.includes(issue.artifact_id) && severityRank(issue.effective_severity) >= blockingSeverityRank(initial.quality_profile.blocking_severity));
     const isPublish = /publish|release|發布|發佈|上線/iu.test(request);
-    const diagnostics = blockingIssues.map((issue) => `${issue.code}: ${issue.message}`);
     const build: BuildRecord = {
       id: internalId("build"),
       operation_id: operationId,
-      status: diagnostics.length > 0 ? "failed" : isPublish ? "built" : "previewed",
+      status: isPublish ? "built" : "previewed",
       artifact_ids: artifactIds,
       canonical_ir: canonicalIr,
       content_hash: hash,
-      diagnostics,
+      diagnostics: [],
       created_at: now(),
       quality_policy_snapshot: qualityPolicy,
     };
-    if (diagnostics.length > 0 && isPublish) {
-      const state = await this.repository.read();
-      await this.repository.commit(initial.revision, (current) => ({
-        ...current,
-        builds: [...current.builds, build],
-        operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "blocked", result_summary: `發布被阻擋：${diagnostics.length} 個 blocking issue。`, question: "請先處理 blocking issue，再重新發布。", progress: [...item.progress, { item_id: build.id, status: "blocked", message: "publish validation failed" }] }) : item),
-        audit: [...current.audit, {
-          id: internalId("audit"),
-          operation_id: operationId,
-          event: "publish.blocked",
-          actor,
-          occurred_at: now(),
-          project_revision: current.revision + 1,
-          details: { build_id: build.id, artifact_ids: artifactIds, diagnostics },
-        }],
-      }));
-      return { build_id: build.id, status: "blocked", summary: `發布被阻擋：${diagnostics.length} 個 blocking issue。` };
-    }
-
     const publish: PublishRecord | undefined = isPublish ? {
       id: internalId("publish"),
       operation_id: operationId,

@@ -2,6 +2,7 @@ import {
   CoreError,
   createQualityPolicySnapshot,
   internalId,
+  type IssueOverride,
   type IssueRecord,
   type IssueSeverity,
   type OperationRecord,
@@ -17,6 +18,22 @@ export interface ReviewExecutionResult {
   issue_ids: string[];
   status: "completed" | "needs_input" | "blocked";
   summary: string;
+}
+
+export type IssueUpdateAction = "resolve" | "ignore" | "override";
+
+export interface IssueUpdateInput {
+  readonly issue_id: string;
+  readonly action: IssueUpdateAction;
+  readonly reason: string;
+  readonly severity?: IssueSeverity;
+}
+
+export interface IssueUpdateResult {
+  readonly issue_id: string;
+  readonly action: IssueUpdateAction;
+  readonly status: "completed";
+  readonly summary: string;
 }
 
 function now(): string {
@@ -43,6 +60,21 @@ function findingEvidence(finding: ReviewFinding): string[] {
   return finding.evidence.map((evidence) => [evidence.source, evidence.excerpt, evidence.path?.join(".")].filter((value): value is string => value !== undefined && value.length > 0).join(" — "));
 }
 
+function policyBaselineForProfile(profile: Parameters<typeof createQualityPolicySnapshot>[0], issue: IssueRecord): IssueSeverity {
+  return profile.overrides[issue.code] ?? profile.overrides[issue.id] ?? issue.severity;
+}
+
+function issueOverrideInvalidated(profile: Parameters<typeof createQualityPolicySnapshot>[0], issue: IssueRecord): boolean {
+  return issue.override !== undefined && severityRank(policyBaselineForProfile(profile, issue)) > severityRank(issue.override.against_effective_severity);
+}
+
+function effectiveSeverityForProfile(profile: Parameters<typeof createQualityPolicySnapshot>[0], issue: IssueRecord): IssueSeverity {
+  const baseline = policyBaselineForProfile(profile, issue);
+  if (issue.override === undefined || issueOverrideInvalidated(profile, issue)) return baseline;
+  const target = issue.override.severity ?? issue.effective_severity;
+  return severityRank(target) < severityRank(baseline) ? target : baseline;
+}
+
 function targetKindMatches(artifactKind: string, requestedKind: string): boolean {
   const aliases: Record<string, string> = { greetings: "greeting", world: "world_lore", character_card: "character" };
   return artifactKind === requestedKind || artifactKind === aliases[requestedKind] || aliases[artifactKind] === requestedKind;
@@ -60,27 +92,144 @@ export class ReviewService {
     const base = qualityProfileForLevel(level, overrides);
     const snapshot = policySnapshot(base, actor, capturedAt);
     const profile = { ...base, policy_snapshot: snapshot };
+    const invalidatedIssueOverrides = initial.issues
+      .filter((issue) => issue.status === "open" && issueOverrideInvalidated(profile, issue) && issue.override !== undefined)
+      .map((issue) => ({ issue, policy_baseline: policyBaselineForProfile(profile, issue) }));
+    const invalidatedIssueIds = new Set(invalidatedIssueOverrides.map((item) => item.issue.id));
+    const preservedIssueOverrideIds = initial.issues.filter((issue) => issue.status === "open" && issue.override !== undefined && !invalidatedIssueIds.has(issue.id)).map((issue) => issue.id);
     const summary = `Quality profile set to ${level}.`;
     await this.repository.commit(initial.revision, (current) => ({
       ...current,
       quality_profile: profile,
+      issues: current.issues.map((issue) => {
+        const invalidated = invalidatedIssueOverrides.find((item) => item.issue.id === issue.id);
+        if (invalidated === undefined) {
+          return issue.override === undefined ? issue : { ...issue, effective_severity: effectiveSeverityForProfile(profile, issue), updated_at: capturedAt };
+        }
+        const { override: _discarded, ...withoutOverride } = issue;
+        return { ...withoutOverride, effective_severity: invalidated.policy_baseline, updated_at: capturedAt };
+      }),
       operations: current.operations.map((item) => item.id === operationId
         ? updateOperation(item, { status: "completed", result_summary: summary, progress: [...item.progress, { item_id: snapshot.id, status: "completed", message: summary }] })
         : item),
-      audit: [...current.audit, {
-        id: internalId("audit"),
-        operation_id: operationId,
-        event: "quality.profile.updated",
-        actor,
-        occurred_at: capturedAt,
-        project_revision: current.revision + 1,
-        details: { level, blocking_severity: profile.blocking_severity, overrides: profile.overrides, policy_snapshot: snapshot },
-      }],
+      audit: [
+        ...current.audit,
+        ...invalidatedIssueOverrides.map(({ issue, policy_baseline }) => ({
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "review.issue.override.invalidated",
+          actor,
+          occurred_at: capturedAt,
+          project_revision: current.revision + 1,
+          details: {
+            issue_id: issue.id,
+            reason: "Quality policy baseline became stricter than the saved issue override baseline.",
+            against_effective_severity: issue.override!.against_effective_severity,
+            policy_effective_severity: policy_baseline,
+            policy_snapshot: snapshot,
+          },
+        })),
+        {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "quality.profile.updated",
+          actor,
+          occurred_at: capturedAt,
+          project_revision: current.revision + 1,
+          details: {
+            level,
+            blocking_severity: profile.blocking_severity,
+            overrides: profile.overrides,
+            policy_snapshot: snapshot,
+            preserved_issue_override_ids: preservedIssueOverrideIds,
+            invalidated_issue_override_ids: invalidatedIssueOverrides.map((item) => item.issue.id),
+          },
+        },
+      ],
     }));
     return { status: "completed", summary };
   }
 
-  async review(operationId: string, request: string, actor: string): Promise<ReviewExecutionResult> {
+  /** Resolve, ignore, or explicitly override one recorded issue. */
+  async updateIssue(operationId: string, input: IssueUpdateInput, operator: string, auditActor = operator): Promise<IssueUpdateResult> {
+    const reason = input.reason.trim();
+    if (reason.length === 0) throw new CoreError("ISSUE_ACTION_REASON_REQUIRED", "Issue actions require a non-empty reason.", true);
+    if (input.action === "override" && input.severity === undefined) {
+      throw new CoreError("ISSUE_OVERRIDE_SEVERITY_REQUIRED", "An override action requires a target severity.", true);
+    }
+    const initial = await this.repository.read();
+    const operation = initial.operations.find((item) => item.id === operationId);
+    if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
+    const issue = initial.issues.find((item) => item.id === input.issue_id);
+    if (issue === undefined) throw new CoreError("ISSUE_NOT_FOUND", `Issue ${input.issue_id} does not exist`, true);
+    if ((input.action === "ignore" || input.action === "override") && issue.overridable !== true) {
+      throw new CoreError("ISSUE_NOT_OVERRIDABLE", `Issue ${input.issue_id} is not marked overridable and cannot be ${input.action === "ignore" ? "ignored" : "overridden"}.`, true);
+    }
+    if (issue.status !== "open") {
+      throw new CoreError("ISSUE_NOT_OPEN", `Issue ${input.issue_id} is already ${issue.status}.`, true);
+    }
+    const againstEffectiveSeverity = policyBaselineForProfile(initial.quality_profile, issue);
+    const effectiveSeverity = input.action === "override" && input.severity !== undefined
+      ? input.severity
+      : effectiveSeverityForProfile(initial.quality_profile, issue);
+    const currentPolicyEffectiveSeverity = effectiveSeverityForProfile(initial.quality_profile, issue);
+    if (input.action === "override" && input.severity !== undefined && severityRank(input.severity) >= severityRank(currentPolicyEffectiveSeverity)) {
+      throw new CoreError("ISSUE_OVERRIDE_SEVERITY_ESCALATION", "An issue override can only downgrade the current issue severity.", true);
+    }
+    const nextStatus = input.action === "resolve" ? "resolved" : input.action === "ignore" ? "ignored" : issue.status;
+    const summary = input.action === "override"
+      ? `Issue ${issue.id} effective severity overridden to ${input.severity}.`
+      : `Issue ${issue.id} marked ${nextStatus}.`;
+    const occurredAt = now();
+    await this.repository.commit(initial.revision, (current) => {
+      const issueOverride: IssueOverride | undefined = input.action === "override" && input.severity !== undefined
+        ? {
+          by: operator,
+          reason,
+          timestamp: occurredAt,
+          against_effective_severity: againstEffectiveSeverity,
+          severity: input.severity,
+          policy_snapshot: createQualityPolicySnapshot(current.quality_profile, auditActor, occurredAt),
+        }
+        : issue.override;
+      return {
+        ...current,
+        issues: current.issues.map((candidate) => candidate.id !== issue.id ? candidate : {
+          ...candidate,
+          status: nextStatus,
+          effective_severity: effectiveSeverity,
+          ...(issueOverride === undefined ? {} : { override: issueOverride }),
+          updated_at: occurredAt,
+        }),
+        operations: current.operations.map((item) => item.id === operationId
+          ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: issue.id, status: "completed", message: summary }], result_summary: summary })
+          : item),
+        audit: [...current.audit, {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "review.issue.updated",
+          actor: auditActor,
+          occurred_at: occurredAt,
+          project_revision: current.revision + 1,
+          details: {
+            issue_id: issue.id,
+            action: input.action,
+            reason,
+            operator,
+            agent_id: operator,
+            overridable: issue.overridable === true,
+            original_severity: issue.severity,
+            against_effective_severity: againstEffectiveSeverity,
+            effective_severity: effectiveSeverity,
+            ...(issueOverride === undefined ? {} : { override_scope: "issue", override: issueOverride }),
+          },
+        }],
+      };
+    });
+    return { issue_id: issue.id, action: input.action, status: "completed", summary };
+  }
+
+  async review(operationId: string, request: string, actor: string, auditActor = actor): Promise<ReviewExecutionResult> {
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -139,7 +288,7 @@ export class ReviewService {
       code: issue.code,
       configured_severity: issue.effective_severity,
       against_effective_severity: issue.against_effective_severity ?? issue.severity,
-      actor,
+      actor: auditActor,
       occurred_at: capturedAt,
     }));
     const summary = reviewStatus === "passed" ? "審查通過，沒有發現問題。" : `審查完成：${issues.length} 個問題，最高嚴重度為 ${highest}。`;
@@ -160,7 +309,7 @@ export class ReviewService {
         id: internalId("audit"),
         operation_id: operationId,
         event: "artifact.reviewed",
-        actor,
+        actor: auditActor,
         occurred_at: now(),
         project_revision: current.revision + 1,
         details: {
@@ -176,6 +325,7 @@ export class ReviewService {
             configured_severity: issue.effective_severity,
             against_effective_severity: issue.against_effective_severity,
           })),
+          agent_id: actor,
         },
       }],
     }));
@@ -183,7 +333,7 @@ export class ReviewService {
   }
 
   /** Apply a model-produced review proposal to the same review/issue ledger used by rule-based review. */
-  async applyProposal(operationId: string, proposal: { target: { kind: string; name: string; id?: string | undefined }; findings: ReviewFinding[]; summary: string }, actor: string): Promise<ReviewExecutionResult> {
+  async applyProposal(operationId: string, proposal: { target: { kind: string; name: string; id?: string | undefined }; findings: ReviewFinding[]; summary: string }, actor: string, auditActor = actor): Promise<ReviewExecutionResult> {
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -236,7 +386,7 @@ export class ReviewService {
       code: issue.code,
       configured_severity: issue.effective_severity,
       against_effective_severity: issue.against_effective_severity ?? issue.severity,
-      actor,
+      actor: auditActor,
       occurred_at: capturedAt,
     }));
     const summary = proposal.summary;
@@ -253,7 +403,7 @@ export class ReviewService {
         ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: review.id, status: "completed", message: "Review proposal applied." }, ...issues.map((issue) => ({ item_id: issue.id, status: "completed" as const, message: "Review finding recorded.", artifact_id: target.id }))], result_summary: summary })
         : item),
       audit: [...current.audit, {
-        id: internalId("audit"), operation_id: operationId, event: "review.proposal.applied", actor, occurred_at: now(), project_revision: current.revision + 1,
+        id: internalId("audit"), operation_id: operationId, event: "review.proposal.applied", actor: auditActor, occurred_at: now(), project_revision: current.revision + 1,
         details: {
           artifact_id: target.id,
           artifact_revision: target.revision,
@@ -268,6 +418,7 @@ export class ReviewService {
             configured_severity: issue.effective_severity,
             against_effective_severity: issue.against_effective_severity,
           })),
+          agent_id: actor,
         },
       }],
     }));
@@ -287,28 +438,58 @@ export class ReviewService {
       }));
       return { issue_ids: [], status: "completed", summary };
     }
-    const changed = openIssues.filter((issue) => (initial.quality_profile.overrides[issue.code] ?? issue.severity) !== issue.effective_severity);
+    const invalidatedIssueOverrides = openIssues
+      .filter((issue) => issueOverrideInvalidated(initial.quality_profile, issue) && issue.override !== undefined)
+      .map((issue) => ({ issue, policy_baseline: policyBaselineForProfile(initial.quality_profile, issue) }));
+    const invalidatedIssueIds = new Set(invalidatedIssueOverrides.map((item) => item.issue.id));
+    const changed = openIssues.filter((issue) => effectiveSeverityForProfile(initial.quality_profile, issue) !== issue.effective_severity);
     const state = await this.repository.read();
     const summary = `已重新評估 ${openIssues.length} 個問題，${changed.length} 個有效嚴重度已更新。`;
     await this.repository.commit(state.revision, (current) => ({
       ...current,
-      issues: current.issues.map((issue) => issue.status !== "open" ? issue : {
-        ...issue,
-        effective_severity: current.quality_profile.overrides[issue.code] ?? issue.severity,
-        updated_at: now(),
+      issues: current.issues.map((issue) => {
+        if (issue.status !== "open") return issue;
+        const invalidated = invalidatedIssueOverrides.find((item) => item.issue.id === issue.id);
+        if (invalidated !== undefined) {
+          const { override: _discarded, ...withoutOverride } = issue;
+          return { ...withoutOverride, effective_severity: invalidated.policy_baseline, updated_at: now() };
+        }
+        return { ...issue, effective_severity: effectiveSeverityForProfile(current.quality_profile, issue), updated_at: now() };
       }),
       operations: current.operations.map((item) => item.id === operationId
         ? updateOperation(item, { status: "completed", progress: [...item.progress, ...changed.map((issue) => ({ item_id: issue.id, status: "completed" as const, message: "issue effective severity 已重新評估" }))], result_summary: summary })
         : item),
-      audit: [...current.audit, {
-        id: internalId("audit"),
-        operation_id: operationId,
-        event: "review.reevaluated",
-        actor,
-        occurred_at: now(),
-        project_revision: current.revision + 1,
-        details: { issue_ids: openIssues.map((issue) => issue.id), changed_issue_ids: changed.map((issue) => issue.id) },
-      }],
+      audit: [
+        ...current.audit,
+        ...invalidatedIssueOverrides.map(({ issue, policy_baseline }) => ({
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "review.issue.override.invalidated",
+          actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: {
+            issue_id: issue.id,
+            reason: "Quality policy baseline became stricter than the saved issue override baseline.",
+            against_effective_severity: issue.override!.against_effective_severity,
+            policy_effective_severity: policy_baseline,
+          },
+        })),
+        {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "review.reevaluated",
+          actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: {
+            issue_ids: openIssues.map((issue) => issue.id),
+            changed_issue_ids: changed.map((issue) => issue.id),
+            preserved_issue_override_ids: openIssues.filter((issue) => issue.override !== undefined && !invalidatedIssueIds.has(issue.id)).map((issue) => issue.id),
+            invalidated_issue_override_ids: invalidatedIssueOverrides.map((item) => item.issue.id),
+          },
+        },
+      ],
     }));
     return { issue_ids: openIssues.map((issue) => issue.id), status: "completed", summary };
   }

@@ -145,7 +145,7 @@ function withConversionProvenance(
 export class ConversionService {
   constructor(private readonly repository: ProjectRepository) {}
 
-  async materialize(operationId: string, proposal: ConversionProposal, actor: string): Promise<ConversionExecutionResult> {
+  async materialize(operationId: string, proposal: ConversionProposal, actor: string, auditActor = actor): Promise<ConversionExecutionResult> {
     const parsed = conversionProposalValueSchema.safeParse(proposal);
     if (!parsed.success) throw new CoreError("CONVERSION_SCHEMA_INVALID", parsed.error.message, true);
     const initial = await this.repository.read();
@@ -230,7 +230,7 @@ export class ConversionService {
           id: internalId("audit"),
           operation_id: operationId,
           event: "conversion.materialized",
-          actor,
+          actor: auditActor,
           occurred_at: now(),
           project_revision: current.revision + 1,
           details: {
@@ -242,6 +242,7 @@ export class ConversionService {
             mapping_digest: mappingDigest,
             unmapped: parsed.data.unmapped,
             expected_loss: parsed.data.mappings.map((mapping) => ({ source: mapping.source, target: mapping.target, expected_loss: mapping.expected_loss })),
+            agent_id: actor,
           },
         }],
       };

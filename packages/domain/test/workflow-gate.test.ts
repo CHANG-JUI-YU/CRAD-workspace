@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MemoryProjectRepository, contentHash, createProjectState, type ArtifactRecord, type OperationRecord } from "@st-workspace/core";
+import { MemoryProjectRepository, contentHash, createProjectState, qualityProfileForLevel, type ArtifactRecord, type IssueSeverity, type OperationRecord } from "@st-workspace/core";
 import { AuthoringService, validateWorkflow } from "../src/index.js";
 
 const now = new Date().toISOString();
@@ -29,6 +29,43 @@ describe("workflow gates and editable publish", () => {
       reviews: [{ id: "review-1", artifact_id: target.id, artifact_revision: target.revision, reviewer: "critic", status: "passed", issue_ids: [], created_at: now }],
     }));
     expect(validateWorkflow(await repository.read(), "publish").ok).toBe(true);
+  });
+
+  it("uses current quality policy and issue status instead of review.status", async () => {
+    const repository = new MemoryProjectRepository("quality-policy");
+    const target = artifact("character-quality", "character:demo", "character", "Demo", character());
+    const review = { id: "review-quality", artifact_id: target.id, artifact_revision: target.revision, reviewer: "character-critic", status: "partial" as const, issue_ids: ["issue-quality"], created_at: now };
+    const issue = { id: "issue-quality", artifact_id: target.id, review_id: review.id, code: "FINDING_STYLE", message: "Style needs a decision.", severity: "warning" as const, effective_severity: "warning" as const, against_effective_severity: "warning" as const, overridable: true, status: "open" as const, created_at: now, updated_at: now };
+    const base = { ...(await repository.read()), project_status: "ready" as const, interview: { ...(await repository.read()).interview, status: "complete" as const }, artifacts: [target], reviews: [review], issues: [issue], operations: [operation("op-quality")] };
+    const severityMatrix: Array<{ level: "none" | "light" | "normal" | "strict"; blocks: readonly IssueSeverity[] }> = [
+      { level: "none", blocks: [] },
+      { level: "light", blocks: ["critical"] },
+      { level: "normal", blocks: ["error", "critical"] },
+      { level: "strict", blocks: ["warning", "error", "critical"] },
+    ];
+    for (const { level, blocks } of severityMatrix) {
+      for (const severity of ["info", "warning", "error", "critical"] as const) {
+        const currentIssue = { ...issue, severity, effective_severity: severity, against_effective_severity: severity };
+        expect(validateWorkflow({ ...base, quality_profile: qualityProfileForLevel(level), issues: [currentIssue] }, "publish").ok).toBe(!blocks.includes(severity));
+      }
+    }
+    expect(validateWorkflow({ ...base, quality_profile: qualityProfileForLevel("normal", { FINDING_STYLE: "info" }) }, "publish").ok).toBe(true);
+    expect(validateWorkflow({ ...base, quality_profile: qualityProfileForLevel("strict"), issues: [{ ...issue, status: "resolved" }] }, "publish").ok).toBe(true);
+  });
+
+  it("keeps an issue-scoped override isolated while global overrides remain shared", async () => {
+    const repository = new MemoryProjectRepository("issue-scope-gate");
+    const target = artifact("character-scope", "character:scope", "character", "Scope", character("scope"));
+    const review = { id: "review-scope", artifact_id: target.id, artifact_revision: target.revision, reviewer: "critic", status: "partial" as const, issue_ids: ["issue-one", "issue-two"], created_at: now };
+    const issueOne = { id: "issue-one", artifact_id: target.id, review_id: review.id, code: "FINDING_STYLE", message: "One", severity: "error" as const, effective_severity: "info" as const, against_effective_severity: "error" as const, overridable: true, override: { by: "director", reason: "Only this issue is accepted.", timestamp: now, against_effective_severity: "error" as const, severity: "info" as const }, status: "open" as const, created_at: now, updated_at: now };
+    const issueTwo = { id: "issue-two", artifact_id: target.id, review_id: review.id, code: "FINDING_STYLE", message: "Two", severity: "error" as const, effective_severity: "error" as const, against_effective_severity: "error" as const, overridable: true, status: "open" as const, created_at: now, updated_at: now };
+    const base = { ...(await repository.read()), project_status: "ready" as const, interview: { ...(await repository.read()).interview, status: "complete" as const }, artifacts: [target], reviews: [review], issues: [issueOne, issueTwo], operations: [operation("op-scope")] };
+    expect(validateWorkflow({ ...base, issues: [issueOne] }, "publish").ok).toBe(true);
+    expect(validateWorkflow(base, "publish").ok).toBe(false);
+    const strictGlobalWarning = qualityProfileForLevel("strict", { FINDING_STYLE: "warning" });
+    expect(validateWorkflow({ ...base, issues: [issueOne], quality_profile: strictGlobalWarning }, "publish").ok).toBe(true);
+    expect(validateWorkflow({ ...base, issues: [issueTwo], quality_profile: strictGlobalWarning }, "publish").ok).toBe(false);
+    expect(validateWorkflow({ ...base, quality_profile: strictGlobalWarning }, "publish").ok).toBe(false);
   });
 
   it("blocks a reviewed wardrobe revision when its Markdown count is invalid", async () => {

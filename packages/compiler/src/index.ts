@@ -21,6 +21,7 @@ import { generatePluginContributions } from "@st-workspace/plugins";
 export interface NormalizedProject {
   project: Ccv3Project;
   latestArtifacts: ArtifactRecord[];
+  diagnostics: CompilerDiagnostic[];
   mode_selection?: CardModeSelection;
 }
 
@@ -28,6 +29,12 @@ export type CardModeSelection = "zhuji" | "palette" | "both";
 
 export interface CompileOptions {
   mode_selection?: CardModeSelection;
+}
+
+export interface CompilerDiagnostic {
+  code: string;
+  severity: "warning" | "error";
+  message: string;
 }
 
 export interface AvailableCardModes {
@@ -48,6 +55,7 @@ export interface CompileResult {
   json: string;
   png: Buffer;
   content_hash: string;
+  diagnostics: CompilerDiagnostic[];
   plugin_contributions: PluginContribution[];
   plugin_trace: PluginBuildTrace;
 }
@@ -72,7 +80,6 @@ interface ArtifactParts {
 
 interface ModeProjection {
   artifact: ArtifactRecord;
-  parsed: Record<string, unknown>;
   characterId: string;
   mode: "zhuji" | "palette";
   module: string;
@@ -186,12 +193,50 @@ function yamlModeProjection(artifact: ArtifactRecord): Omit<ModeProjection, "art
     if (content === undefined) return undefined;
     text = [`title: ${yamlScalar(title.value)}`, ...dedentYamlBlock(lines, content.index, moduleEnd, content.indent)].join("\n").trim();
   }
-  return { parsed: {}, characterId, mode: modeName, module: moduleName, title: yamlScalar(title.value), text };
+  return { characterId, mode: modeName, module: moduleName, title: yamlScalar(title.value), text };
 }
 
-function yamlBlueprintDisplayNames(content: string): Map<string, string> {
+interface BlueprintCharacterDescriptor {
+  id: string;
+  displayName?: string;
+  label?: string;
+}
+
+interface BlueprintDescriptor {
+  characters: BlueprintCharacterDescriptor[];
+  primaryCharacterId?: string;
+}
+
+function blueprintCharacterDescriptor(value: unknown): BlueprintCharacterDescriptor | undefined {
+  const character = recordValue(value);
+  if (character === undefined) return undefined;
+  const id = textValue(character.id) ?? textValue(character.character_id);
+  if (id === undefined) return undefined;
+  const displayName = textValue(character.display_name);
+  const label = textValue(character.label);
+  return {
+    id,
+    ...(displayName === undefined ? {} : { displayName }),
+    ...(label === undefined ? {} : { label }),
+  };
+}
+
+function jsonBlueprintDescriptor(content: string): BlueprintDescriptor | undefined {
+  const parsed = parseJson(content);
+  if (parsed === undefined) return undefined;
+  const characters = Array.isArray(parsed.characters)
+    ? parsed.characters.map(blueprintCharacterDescriptor).filter((item): item is BlueprintCharacterDescriptor => item !== undefined)
+    : [];
+  const primaryCharacterId = textValue(parsed.primary_character_id);
+  if (characters.length === 0 && primaryCharacterId === undefined) return undefined;
+  return { characters, ...(primaryCharacterId === undefined ? {} : { primaryCharacterId }) };
+}
+
+function yamlBlueprintDescriptor(content: string): BlueprintDescriptor | undefined {
   const lines = content.replaceAll("\r", "").split("\n");
-  const names = new Map<string, string>();
+  const characters: BlueprintCharacterDescriptor[] = [];
+  const primaryField = lines.find((line) => /^\s*primary_character_id\s*:\s*(.+)$/u.test(line));
+  const primaryCharacterId = primaryField?.match(/^\s*primary_character_id\s*:\s*(.+)$/u)?.[1];
   for (let index = 0; index < lines.length; index += 1) {
     const character = lines[index]?.match(/^(\s*)-\s+character_id\s*:\s*(.+)$/u);
     if (character === null || character === undefined) continue;
@@ -203,12 +248,26 @@ function yamlBlueprintDisplayNames(content: string): Map<string, string> {
       const display = line.match(/^\s+display_name\s*:\s*(.+)$/u);
       if (display !== null && display !== undefined) {
         const displayName = yamlScalar(display[1] ?? "");
-        if (characterId.length > 0 && displayName.length > 0) names.set(characterId, displayName);
+        if (characterId.length > 0) characters.push(displayName.length > 0 ? { id: characterId, displayName } : { id: characterId });
         break;
       }
     }
+    if (!characters.some((item) => item.id === characterId)) characters.push({ id: characterId });
   }
-  return names;
+  if (characters.length === 0 && primaryCharacterId === undefined) return undefined;
+  return {
+    characters,
+    ...(primaryCharacterId === undefined ? {} : { primaryCharacterId: yamlScalar(primaryCharacterId) }),
+  };
+}
+
+function blueprintDescriptor(artifacts: readonly ArtifactRecord[]): BlueprintDescriptor | undefined {
+  const blueprintArtifacts = artifacts.filter((artifact) => artifact.kind === "blueprint");
+  for (const artifact of [...blueprintArtifacts].reverse()) {
+    const descriptor = jsonBlueprintDescriptor(artifact.content) ?? yamlBlueprintDescriptor(artifact.content);
+    if (descriptor !== undefined) return descriptor;
+  }
+  return undefined;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {
@@ -227,6 +286,12 @@ function latestArtifacts(artifacts: readonly ArtifactRecord[]): ArtifactRecord[]
   const latestByKey = new Map<string, ArtifactRecord>();
   for (const artifact of artifacts) latestByKey.set(artifact.key, artifact);
   return [...latestByKey.values()].sort((left, right) => left.key.localeCompare(right.key));
+}
+
+function latestArtifactsInSourceOrder(artifacts: readonly ArtifactRecord[]): ArtifactRecord[] {
+  const latestByKey = new Map<string, ArtifactRecord>();
+  for (const artifact of artifacts) latestByKey.set(artifact.key, artifact);
+  return [...latestByKey.values()];
 }
 
 export function availableCardModes(artifacts: readonly ArtifactRecord[]): AvailableCardModes {
@@ -260,11 +325,12 @@ function characterDisplayNames(artifacts: readonly ArtifactRecord[]): Map<string
       const id = textValue(document?.id);
       const displayName = textValue(document?.display_name);
       if (id !== undefined && displayName !== undefined) names.set(id, displayName);
-      continue;
     }
-    if (artifact.kind === "blueprint") {
-      for (const [id, displayName] of yamlBlueprintDisplayNames(artifact.content)) names.set(id, displayName);
-    }
+  }
+  const blueprint = blueprintDescriptor(artifacts);
+  for (const character of blueprint?.characters ?? []) {
+    const blueprintName = character.displayName ?? character.label;
+    if (blueprintName !== undefined && !names.has(character.id)) names.set(character.id, blueprintName);
   }
   return names;
 }
@@ -281,16 +347,52 @@ function joinText(values: Array<string | undefined>): string | undefined {
   return result.length === 0 ? undefined : result.join("\n\n");
 }
 
-function flattenText(value: unknown, ignoredKeys = new Set(["extensions", "provenance", "compile", "schema_version", "mode", "kind", "character_id", "id", "title"])): string[] {
-  const text = textValue(value);
-  if (text !== undefined) return [text];
-  if (Array.isArray(value)) return value.flatMap((item) => flattenText(item, ignoredKeys));
-  const record = recordValue(value);
-  if (record === undefined) return [];
-  return Object.keys(record)
-    .sort((left, right) => left.localeCompare(right))
-    .filter((key) => !ignoredKeys.has(key))
-    .flatMap((key) => flattenText(record[key], ignoredKeys));
+function markdownHeading(level: number, label: string): string {
+  return `${"#".repeat(Math.min(Math.max(level, 1), 6))} ${label.replaceAll(/[\r\n]+/gu, " ").trim()}`;
+}
+
+function markdownScalar(value: unknown): string {
+  if (typeof value === "string") return value.trim().length === 0 ? "\"\"" : value.trim();
+  if (value === null) return "null";
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+function appendSemanticMarkdown(lines: string[], value: unknown, label: string | undefined, level: number): void {
+  if (value === null || typeof value !== "object") {
+    if (label === undefined) {
+      lines.push(markdownScalar(value));
+    } else {
+      lines.push(markdownHeading(level, label), markdownScalar(value));
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    if (label !== undefined) lines.push(markdownHeading(level, label));
+    value.forEach((item, index) => {
+      if (item === null || typeof item !== "object") {
+        lines.push(`${index + 1}. ${markdownScalar(item)}`);
+        return;
+      }
+      lines.push(`${index + 1}.`);
+      appendSemanticMarkdown(lines, item, undefined, level + 1);
+    });
+    return;
+  }
+
+  if (label !== undefined) lines.push(markdownHeading(level, label));
+  for (const [key, child] of Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))) {
+    appendSemanticMarkdown(lines, child, key, level + 1);
+  }
+}
+
+function semanticModeMarkdown(title: string, data: unknown, content: string | undefined, sections: unknown): string {
+  const lines = [markdownHeading(1, title)];
+  if (content !== undefined) appendSemanticMarkdown(lines, content, "content", 2);
+  if (sections !== undefined) appendSemanticMarkdown(lines, sections, "sections", 2);
+  if (data !== undefined) appendSemanticMarkdown(lines, data, "data", 2);
+  return lines.join("\n\n").trim();
 }
 
 function entry(id: string, name: string, content: string, keys: string[] = [], insertionOrder = 10): Ccv3LoreEntry {
@@ -310,11 +412,13 @@ function modeProjection(artifact: ArtifactRecord): ModeProjection | undefined {
   const moduleName = textValue(module?.module);
   if (module === undefined || characterId === undefined || moduleName === undefined || mode !== artifact.kind) return undefined;
   const title = textValue(module.title) ?? `${mode}/${moduleName}`;
-  const rawText = artifact.kind === "palette"
-    ? [textValue(module.content), ...flattenText(module.sections)]
-    : flattenText(module.data);
-  const text = joinText(rawText) ?? title;
-  return { artifact, parsed, characterId, mode, module: moduleName, title, text };
+  const text = semanticModeMarkdown(
+    title,
+    artifact.kind === "zhuji" ? module.data : undefined,
+    artifact.kind === "palette" ? textValue(module.content) : undefined,
+    artifact.kind === "palette" ? module.sections : undefined,
+  );
+  return { artifact, characterId, mode, module: moduleName, title, text };
 }
 
 function relationshipEntry(artifact: ArtifactRecord, parsed: Record<string, unknown>, names: ReadonlyMap<string, string>): Ccv3LoreEntry[] {
@@ -553,13 +657,47 @@ function characterIdsForArtifact(artifact: ArtifactRecord): string[] {
   return [];
 }
 
-function primaryCharacterIdFor(artifacts: readonly ArtifactRecord[]): string | undefined {
-  const characterIds = artifacts
-    .filter((artifact) => artifact.kind === "character")
-    .flatMap(characterIdsForArtifact)
-    .sort((left, right) => left.localeCompare(right));
-  if (characterIds[0] !== undefined) return characterIds[0];
-  return [...new Set(artifacts.flatMap(characterIdsForArtifact))].sort((left, right) => left.localeCompare(right))[0];
+function primaryCharacterIdFor(
+  artifacts: readonly ArtifactRecord[],
+  sourceOrderedArtifacts: readonly ArtifactRecord[] = artifacts,
+): { id: string | undefined; diagnostics: CompilerDiagnostic[] } {
+  const blueprint = blueprintDescriptor(artifacts);
+  const rosterIds = [...new Set((blueprint?.characters ?? []).map((character) => character.id))];
+  const sourceCharacterIds = [...new Set(sourceOrderedArtifacts.flatMap(characterIdsForArtifact))];
+  const knownCharacterIds = new Set([...rosterIds, ...sourceCharacterIds]);
+  const fallback = rosterIds[0] ?? sourceCharacterIds[0];
+  const explicitPrimary = blueprint?.primaryCharacterId;
+  if (explicitPrimary !== undefined) {
+    if (knownCharacterIds.has(explicitPrimary)) return { id: explicitPrimary, diagnostics: [] };
+    return {
+      id: fallback,
+      diagnostics: [{
+        code: "PRIMARY_CHARACTER_ID_INVALID",
+        severity: "warning",
+        message: `Blueprint primary_character_id "${explicitPrimary}" is not a known character; using ${fallback === undefined ? "no primary character" : `deterministic fallback ${fallback}`}.`,
+      }],
+    };
+  }
+
+  if (fallback !== undefined && rosterIds[0] !== undefined) {
+    return {
+      id: fallback,
+      diagnostics: [{
+        code: "PRIMARY_CHARACTER_ID_FALLBACK",
+        severity: "warning",
+        message: `Blueprint has no explicit primary_character_id; using roster order (${fallback}) for the primary character.`,
+      }],
+    };
+  }
+
+  return {
+    id: fallback,
+    diagnostics: fallback === undefined ? [] : [{
+      code: "PRIMARY_CHARACTER_ID_FALLBACK",
+      severity: "warning",
+      message: `No explicit primary_character_id or Blueprint roster was found; using source artifact order (${fallback}) for the primary character.`,
+    }],
+  };
 }
 
 function factEntry(fact: FactRecord, index: number): Ccv3LoreEntry {
@@ -569,7 +707,13 @@ function factEntry(fact: FactRecord, index: number): Ccv3LoreEntry {
 }
 
 function projectMetadata(latestArtifacts: readonly ArtifactRecord[], primaryCharacterId: string | undefined, modeSelection?: CardModeSelection): Record<string, unknown> {
-  const ids = [...new Set(latestArtifacts.flatMap(characterIdsForArtifact))].sort((left, right) => left.localeCompare(right));
+  const blueprint = blueprintDescriptor(latestArtifacts);
+  const artifactIds = new Set(latestArtifacts.flatMap(characterIdsForArtifact));
+  const rosterIds = (blueprint?.characters ?? []).map((character) => character.id);
+  const ids = [
+    ...rosterIds,
+    ...[...artifactIds].filter((id) => !rosterIds.includes(id)).sort((left, right) => left.localeCompare(right)),
+  ];
   const names = characterDisplayNames(latestArtifacts);
   const modeArtifacts = latestArtifacts.flatMap((artifact) => {
     const mode = modeProjection(artifact);
@@ -604,9 +748,11 @@ function projectMetadata(latestArtifacts: readonly ArtifactRecord[], primaryChar
 
 export function normalizeProject(state: ProjectState, options: CompileOptions = {}): NormalizedProject {
   const latest = latestArtifacts(state.artifacts);
+  const sourceOrdered = latestArtifactsInSourceOrder(state.artifacts);
   const available = availableCardModes(latest);
   const modeSelection = resolvedModeSelection(available, options.mode_selection);
-  const primaryCharacterId = primaryCharacterIdFor(latest);
+  const primarySelection = primaryCharacterIdFor(latest, sourceOrdered);
+  const primaryCharacterId = primarySelection.id;
   const names = characterDisplayNames(latest);
   const title = textValue(state.project_name) ?? state.project_id;
   const parts = latest.map((artifact) => artifactEntries(artifact, names, modeSelection));
@@ -634,7 +780,12 @@ export function normalizeProject(state: ProjectState, options: CompileOptions = 
     artifact_ids: artifactIds,
     artifact_revisions: artifactRevisions,
   };
-  return { project, latestArtifacts: latest, ...(modeSelection === undefined ? {} : { mode_selection: modeSelection }) };
+  return {
+    project,
+    latestArtifacts: latest,
+    diagnostics: primarySelection.diagnostics,
+    ...(modeSelection === undefined ? {} : { mode_selection: modeSelection }),
+  };
 }
 
 function pluginArtifacts(normalized: NormalizedProject): Array<{ artifact: ArtifactRecord; proposal: Extract<TemplateProposalValue, { kind: "plugin" }> }> {
@@ -668,7 +819,7 @@ export function compileProject(state: ProjectState, options: CompileOptions = {}
       contribution_revision: contributions[index]!.artifact_revision,
     })),
   };
-  return { normalized, card, json, png, content_hash, plugin_contributions: contributions, plugin_trace: pluginTrace };
+  return { normalized, card, json, png, content_hash, diagnostics: normalized.diagnostics, plugin_contributions: contributions, plugin_trace: pluginTrace };
 }
 
 /**

@@ -207,15 +207,36 @@ function reportMissingReferences(state: ProjectState, artifacts: ArtifactRecord[
 function reportReviews(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[]): void {
   const reviewable = artifacts.filter((artifact) => contentKinds.has(artifact.kind));
   for (const artifact of reviewable) {
-    const passed = state.reviews.some((review) => review.artifact_id === artifact.id && review.artifact_revision === artifact.revision && review.status === "passed");
-    if (!passed) {
+    const reviewed = state.reviews.some((review) => review.artifact_id === artifact.id && review.artifact_revision === artifact.revision);
+    if (!reviewed) {
       add(diagnostics, {
         code: "ARTIFACT_REVIEW_REQUIRED",
-        message: `${artifact.name} must have a passed review for revision ${artifact.revision.slice(0, 12)} before publishing.`,
+        message: `${artifact.name} must have a completed review for revision ${artifact.revision.slice(0, 12)} before publishing.`,
         severity: "error",
         artifact_ids: [artifact.id],
       });
     }
+  }
+}
+
+function currentEffectiveSeverity(state: ProjectState, issue: ProjectState["issues"][number]): IssueSeverity {
+  const baseline = state.quality_profile.overrides[issue.code] ?? state.quality_profile.overrides[issue.id] ?? issue.severity;
+  const override = issue.override;
+  if (override === undefined || severityRank(baseline) > severityRank(override.against_effective_severity)) return baseline;
+  const target = override.severity ?? issue.effective_severity;
+  return severityRank(target) < severityRank(baseline) ? target : baseline;
+}
+
+function reportBlockingIssues(state: ProjectState, content: ArtifactRecord[], diagnostics: WorkflowDiagnostic[]): void {
+  const artifactIds = new Set(content.map((artifact) => artifact.id));
+  const blockingIssues = state.issues.filter((issue) => issue.status === "open" && artifactIds.has(issue.artifact_id) && severityRank(currentEffectiveSeverity(state, issue)) >= blockingRank(state.quality_profile.blocking_severity));
+  if (blockingIssues.length > 0) {
+    add(diagnostics, {
+      code: "PUBLISH_BLOCKING_ISSUES",
+      message: `${blockingIssues.length} blocking review issue(s) remain open.`,
+      severity: "error",
+      artifact_ids: [...new Set(blockingIssues.map((issue) => issue.artifact_id))],
+    });
   }
 }
 
@@ -446,40 +467,35 @@ function reportDerivedLinks(state: ProjectState, artifacts: ArtifactRecord[], di
 
 export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase): WorkflowGateResult {
   const diagnostics: WorkflowDiagnostic[] = [];
-  if (!managedProject(state)) return { ok: true, diagnostics };
-  const pendingPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "needs_input");
-  if (pendingPrecheck !== undefined) {
-    add(diagnostics, {
-      code: "BLUEPRINT_PRECHECK_REQUIRED",
-      message: "The blueprint precheck still needs a short user confirmation before authoring or publishing can continue.",
-      severity: "error",
-    });
+  const managed = managedProject(state);
+  if (managed) {
+    const pendingPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "needs_input");
+    if (pendingPrecheck !== undefined) {
+      add(diagnostics, {
+        code: "BLUEPRINT_PRECHECK_REQUIRED",
+        message: "The blueprint precheck still needs a short user confirmation before authoring or publishing can continue.",
+        severity: "error",
+      });
+    }
   }
   if (phase === "draft") return { ok: diagnostics.length === 0, diagnostics };
-  if (state.project_status === "interviewing" || state.interview.status === "active") {
-    add(diagnostics, { code: "INTERVIEW_REQUIRED", message: "The project interview must be complete before publishing.", severity: "error" });
-  }
   const artifacts = latestArtifacts(state);
   const content = artifacts.filter((artifact) => contentKinds.has(artifact.kind));
-  if (content.length === 0) add(diagnostics, { code: "PUBLISH_NO_CONTENT", message: "Publish requires at least one character, world, greeting, relationship, module, or plugin artifact.", severity: "error" });
-  if (state.interview.flow === "world" && !artifacts.some((artifact) => artifact.kind === "world_lore")) {
-    add(diagnostics, { code: "REQUIRED_WORLD_ARTIFACT_MISSING", message: "The world interview path requires at least one world-lore artifact before publishing.", severity: "error" });
+  if (managed) {
+    if (state.project_status === "interviewing" || state.interview.status === "active") {
+      add(diagnostics, { code: "INTERVIEW_REQUIRED", message: "The project interview must be complete before publishing.", severity: "error" });
+    }
+    if (content.length === 0) add(diagnostics, { code: "PUBLISH_NO_CONTENT", message: "Publish requires at least one character, world, greeting, relationship, module, or plugin artifact.", severity: "error" });
+    if (state.interview.flow === "world" && !artifacts.some((artifact) => artifact.kind === "world_lore")) {
+      add(diagnostics, { code: "REQUIRED_WORLD_ARTIFACT_MISSING", message: "The world interview path requires at least one world-lore artifact before publishing.", severity: "error" });
+    }
+    reportReviews(state, artifacts, diagnostics);
   }
-  reportReviews(state, artifacts, diagnostics);
   reportWardrobe(artifacts, diagnostics);
   reportSourceResearch(state, artifacts, diagnostics);
   reportMissingReferences(state, artifacts, diagnostics);
   reportFacts(state, diagnostics);
   reportDerivedLinks(state, artifacts, diagnostics);
-  const artifactIds = new Set(content.map((artifact) => artifact.id));
-  const blockingIssues = state.issues.filter((issue) => issue.status === "open" && artifactIds.has(issue.artifact_id) && severityRank(issue.effective_severity) >= blockingRank(state.quality_profile.blocking_severity));
-  if (blockingIssues.length > 0) {
-    add(diagnostics, {
-      code: "PUBLISH_BLOCKING_ISSUES",
-      message: `${blockingIssues.length} blocking review issue(s) remain open.`,
-      severity: "error",
-      artifact_ids: [...new Set(blockingIssues.map((issue) => issue.artifact_id))],
-    });
-  }
+  reportBlockingIssues(state, content, diagnostics);
   return { ok: diagnostics.length === 0, diagnostics };
 }

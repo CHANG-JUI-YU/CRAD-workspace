@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MemoryProjectRepository, contentHash, type FactRecord, type SourceRecord } from "@st-workspace/core";
+import { MemoryProjectRepository, contentHash, type FactRecord, type OperationRecord, type SourceRecord } from "@st-workspace/core";
 import { WorkspaceRuntime } from "../src/index.js";
 
 const palette = {
@@ -174,12 +174,16 @@ describe("runtime template boundary", () => {
     expect(new Set(state.fact_review_decisions.map((decision) => decision.reviewer_identity))).toEqual(new Set(["fact-reviewer-1", "fact-reviewer-2"]));
     expect(state.fact_review_runs[0]?.candidate_occurrence_ids).toHaveLength(2);
     expect(state.fact_review_runs[0]?.status).toBe("completed");
+    expect(state.fact_review_runs[0]?.created_by).toBe("fact-reviewer-1");
+    expect(state.audit.find((event) => event.event === "fact.review.run.created")).toMatchObject({ actor: "user", details: { agent_id: "fact-reviewer-1" } });
+    expect(state.audit.find((event) => event.event === "fact.review.batch.applied")).toMatchObject({ actor: "user", details: { agent_id: "fact-reviewer-1", reviewer_identity: "fact-reviewer-1" } });
+    expect(state.artifacts.filter((artifact) => artifact.kind === "fact_review").map((artifact) => artifact.created_by)).toEqual(["fact-reviewer-1", "fact-reviewer-2"]);
   });
 
   it("routes review template findings into the formal review ledger", async () => {
     const repository = new MemoryProjectRepository("demo");
     const runtime = new WorkspaceRuntime(repository);
-    await runtime.submitTemplateProposal(palette, { actor: "palette-creator", attachments: [] });
+    await runtime.submitTemplateProposal(palette, { actor: "opencode", attachments: [] });
     const stateBefore = await repository.read();
     const target = stateBefore.artifacts[0]!;
     const result = await runtime.submitTemplateProposal({
@@ -187,12 +191,41 @@ describe("runtime template boundary", () => {
       target: { kind: "palette", name: target.name, id: target.id },
       findings: [{ id: "content", severity: "warning", summary: "Add a concrete example.", evidence: [{ source: "palette module", excerpt: "A calm character." }], overridable: true }],
       summary: "Palette review recorded.",
-    }, { actor: "palette-critic", attachments: [] });
+    }, { actor: "opencode", attachments: [] });
     expect(result.status).toBe("completed");
     const state = await repository.read();
     expect(state.reviews).toHaveLength(1);
     expect(state.issues[0]).toMatchObject({ artifact_id: target.id, overridable: true, evidence: ["palette module — A calm character."] });
+    expect(target.created_by).toBe("palette-creator");
+    expect(state.reviews[0]?.reviewer).toBe("character-critic");
+    expect(state.audit.find((event) => event.event === "template.created")).toMatchObject({ actor: "opencode", details: { agent_id: "palette-creator" } });
+    expect(state.audit.find((event) => event.event === "review.proposal.applied")).toMatchObject({ actor: "opencode", details: { agent_id: "character-critic" } });
     expect(state.artifacts.some((artifact) => artifact.kind === "review")).toBe(true);
+  });
+
+  it("uses the trusted router identity for typed submissions and rejects invalid capabilities", async () => {
+    const repository = new MemoryProjectRepository("agent-boundary");
+    const runtime = new WorkspaceRuntime(repository);
+    await expect(runtime.submitTemplateProposal(palette, { actor: "opencode", attachments: [] }, { agent: "character-critic" })).rejects.toMatchObject({ code: "AGENT_CAPABILITY_DENIED" });
+    await expect(runtime.submitTemplateProposal(palette, { actor: "opencode", attachments: [] }, { agent: "zhuji-creator" })).rejects.toMatchObject({ code: "AGENT_CAPABILITY_DENIED" });
+    await expect(runtime.submitTemplateProposal({ kind: "plugin", plugin_id: "official.mvu-zod", source: { plugin_id: "official.mvu-zod", variables: [{ id: "value", label: "Value", kind: "string", default: "" }] } }, { actor: "opencode", attachments: [] }, { agent: "html-creator" })).rejects.toMatchObject({ code: "AGENT_CAPABILITY_DENIED" });
+    await expect(runtime.submitTemplateProposal(palette, { actor: "opencode", attachments: [] }, { agent: "missing-agent" })).rejects.toMatchObject({ code: "AGENT_UNKNOWN" });
+  });
+
+  it("routes issue actions through Director while retaining the session actor in the audit trail", async () => {
+    const repository = new MemoryProjectRepository("issue-agent-boundary");
+    const timestamp = new Date().toISOString();
+    const issue = { id: "issue-agent", artifact_id: "artifact", review_id: "review", code: "FINDING_STYLE", message: "Style", severity: "error" as const, effective_severity: "error" as const, against_effective_severity: "error" as const, overridable: true, status: "open" as const, created_at: timestamp, updated_at: timestamp };
+    const operation = { id: "op-existing", kind: "review" as const, request: "review", actor: "test", status: "completed" as const, created_at: timestamp, updated_at: timestamp, progress: [] } satisfies OperationRecord;
+    await repository.commit(0, (state) => ({ ...state, issues: [issue], operations: [operation] }));
+    const runtime = new WorkspaceRuntime(repository);
+    await expect(runtime.updateIssue({ issue_id: issue.id, action: "override", severity: "warning", reason: "Creator cannot decide quality policy." }, { actor: "session-user", attachments: [] }, { agent: "palette-creator" })).rejects.toMatchObject({ code: "AGENT_CAPABILITY_DENIED" });
+    const result = await runtime.updateIssue({ issue_id: issue.id, action: "override", severity: "warning", reason: "Only Director may make this decision." }, { actor: "session-user", attachments: [] });
+    expect(result).toMatchObject({ status: "completed", agent_id: "director", agent_role: "orchestrator" });
+    const state = await repository.read();
+    expect(state.operations.at(-1)).toMatchObject({ actor: "session-user" });
+    expect(state.audit.at(-2)).toMatchObject({ event: "operation.created", actor: "session-user", details: { agent_id: "director" } });
+    expect(state.audit.at(-1)).toMatchObject({ event: "review.issue.updated", actor: "session-user", details: { operator: "director", agent_id: "director" } });
   });
 
   it("rejects a malformed proposal before creating an operation", async () => {

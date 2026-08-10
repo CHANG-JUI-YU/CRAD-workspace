@@ -81,6 +81,22 @@ export const toolDefinitions = [
     inputSchema: templateProposalMcpInputSchema,
   },
   {
+    name: "workspace_issue_update",
+    description: "Resolve, ignore, or override one review issue. Ignore and override are allowed only for overridable findings and every action needs a reason.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        issue_id: { type: "string" },
+        action: { type: "string", enum: ["resolve", "ignore", "override"] },
+        reason: { type: "string" },
+        severity: { type: "string", enum: ["critical", "error", "warning", "info"] },
+        agent: { type: "string", description: "Optional trusted execution agent; defaults to Director." },
+      },
+      required: ["issue_id", "action", "reason"],
+    },
+  },
+  {
     name: "workspace_authoring_context",
     description: "Read Blueprint, accepted and unresolved Facts, source records, and adaptation decisions for Creator authoring.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
@@ -240,6 +256,22 @@ function sourceSelectionValue(value: unknown): Array<{ candidate_id: string; dec
     return [{ candidate_id: candidate.candidate_id, decision: candidate.decision }];
   });
   return parsed.length === decisions.length ? parsed : undefined;
+}
+
+function issueUpdateValue(value: unknown): { issue_id: string; action: "resolve" | "ignore" | "override"; reason: string; severity?: "critical" | "error" | "warning" | "info"; agent?: string } | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const input = value as { issue_id?: unknown; action?: unknown; reason?: unknown; severity?: unknown; agent?: unknown };
+  if (typeof input.issue_id !== "string" || typeof input.reason !== "string") return undefined;
+  if (input.action !== "resolve" && input.action !== "ignore" && input.action !== "override") return undefined;
+  if (input.severity !== undefined && input.severity !== "critical" && input.severity !== "error" && input.severity !== "warning" && input.severity !== "info") return undefined;
+  if (input.agent !== undefined && typeof input.agent !== "string") return undefined;
+  return {
+    issue_id: input.issue_id,
+    action: input.action,
+    reason: input.reason,
+    ...(input.severity === undefined ? {} : { severity: input.severity }),
+    ...(input.agent === undefined ? {} : { agent: input.agent }),
+  };
 }
 
 function adaptationDecisionValue(value: unknown): Omit<AdaptationDecision, "id" | "created_at" | "created_by"> | undefined {
@@ -411,6 +443,17 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         json(response, 200, result);
         return;
       }
+      if (request.method === "POST" && url.pathname === "/workspace/issue") {
+        const parsed = await body(request);
+        const input = issueUpdateValue(parsed);
+        if (input === undefined) {
+          json(response, 400, { error: "ISSUE_UPDATE_REQUIRED" });
+          return;
+        }
+        const { agent, ...issue } = input;
+        json(response, 200, await (await getRuntime()).updateIssue(issue, { actor, attachments: [] }, agent === undefined ? {} : { agent }));
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/mcp") {
         const parsed = await body(request) as { id?: unknown; method?: unknown; params?: unknown };
         const id = parsed.id ?? null;
@@ -451,6 +494,17 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
           }
           if (params?.name === "workspace_template_submit") {
             const result = await (await getRuntime()).submitTemplateProposal(params.arguments, { actor, attachments: [] });
+            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
+            return;
+          }
+          if (params?.name === "workspace_issue_update") {
+            const input = issueUpdateValue(params.arguments);
+            if (input === undefined) {
+              json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "issue_id, action and reason are required" } });
+              return;
+            }
+            const { agent, ...issue } = input;
+            const result = await (await getRuntime()).updateIssue(issue, { actor, attachments: [] }, agent === undefined ? {} : { agent });
             json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
             return;
           }
@@ -552,7 +606,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       json(response, 404, { error: "NOT_FOUND" });
     } catch (error) {
       const errorCode = error !== null && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "";
-      const recoverableInput = error !== null && typeof error === "object" && "recoverable" in error && (error as { recoverable?: unknown }).recoverable === true && /^(?:INTERVIEW_|PROJECT_|REQUEST_)/u.test(errorCode);
+      const recoverableInput = error !== null && typeof error === "object" && "recoverable" in error && (error as { recoverable?: unknown }).recoverable === true && /^(?:AGENT_|INTERVIEW_|PROJECT_|REQUEST_|ISSUE_|TEMPLATE_|ZHUJI_)/u.test(errorCode);
       const details = error !== null && typeof error === "object" && "details" in error ? (error as { details?: unknown }).details : undefined;
       json(response, recoverableInput ? 400 : 500, { error: error instanceof Error ? error.message : String(error), ...(details === undefined ? {} : { details }) });
     }

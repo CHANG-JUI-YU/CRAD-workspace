@@ -299,7 +299,7 @@ export const importAnalysisProposalValueSchema = z
   })
   .strict();
 
-export const reviewSeveritySchema = z.enum(["error", "warning", "info"]);
+export const reviewSeveritySchema = z.enum(["critical", "error", "warning", "info"]);
 export const reviewEvidenceSchema = z
   .object({ source: text, excerpt: text.optional(), path: z.array(z.union([z.string(), z.number().int()])).optional() })
   .strict();
