@@ -320,11 +320,19 @@ export class ImportService {
       : `匯入完成${failedCount === 0 ? "" : `，${failedCount} 個附件失敗`}，已建立 ${imported.filter((item) => item.artifact !== undefined).length} 個角色 artifact${dryRun ? "（dry-run，未寫入）" : ""}。`;
     const status: "completed" | "needs_input" = imported.length === 0 ? "needs_input" : "completed";
     const state = await this.repository.read();
-    await this.repository.commit(state.revision, (current) => ({
-      ...current,
-      ...(current.project_status === "published" && !dryRun && imported.length > 0 ? { project_status: "ready" as const } : {}),
-      imports: [...current.imports, ...imported.map((item) => item.record), ...failedRecords],
-      ...(dryRun ? {} : { artifacts: [...current.artifacts, ...imported.flatMap((item) => item.artifact === undefined ? [] : [item.artifact])] }),
+    await this.repository.commit(state.revision, (current) => {
+      const existingByKeyHash = new Set(current.artifacts.filter((item) => imported.some((entry) => entry.artifact?.key === item.key)).map((item) => `${item.key}:${item.content_hash}`));
+      return {
+        ...current,
+        ...(current.project_status === "published" && !dryRun && imported.length > 0 ? { project_status: "ready" as const } : {}),
+        imports: [...current.imports, ...imported.map((item) => item.record), ...failedRecords],
+        ...(dryRun ? {} : {
+          artifacts: [
+            ...current.artifacts,
+            ...imported.flatMap((item) => item.artifact === undefined ? [] : [item.artifact])
+              .filter((artifact) => !existingByKeyHash.has(`${artifact.key}:${artifact.content_hash}`)),
+          ],
+        }),
       operations: current.operations.map((item) => item.id === operationId
         ? updateOperation(item, {
           status,
@@ -342,7 +350,8 @@ export class ImportService {
         project_revision: current.revision + 1,
         details: { import_ids: imported.map((item) => item.record.id), failed_count: failedCount },
       }],
-    }));
+    };
+    });
     return { ...(imported[0] === undefined ? {} : { import_id: imported[0].record.id }), ...(dryRun ? {} : imported[0]?.artifact === undefined ? {} : { artifact_id: imported[0].artifact.id }), status, summary };
   }
 }

@@ -100,7 +100,6 @@ agents:
     personality: card-import-analyst
     skills: [card-import-analysis]
     intents: [card-import, legacy-analysis]
-    read_only: true
   - id: world-lore-creator
     role: creator
     prompt: .agents/agents/world-lore-creator.md

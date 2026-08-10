@@ -341,20 +341,29 @@ export class SourceService {
           created_at: now(),
         };
         const state = await this.repository.read();
+        let ingestedInCommit = false;
         await this.repository.commit(state.revision, (current) => {
           const currentOperation = current.operations.find((item) => item.id === operationId);
           if (currentOperation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
           const currentCandidate = current.candidates.find((item) => item.id === candidate.id);
-          if (currentCandidate?.status === "ingested") {
-            return {
-              ...current,
-              operations: current.operations.map((item) => item.id === operationId
-                ? updateOperation(item, {
-                  progress: [...item.progress, { item_id: candidate.id, status: "completed", message: "來源已被並行處理入庫。" }],
-                })
-                : item),
-            };
+          if (currentCandidate === undefined || currentCandidate.status !== "approved") {
+            if (currentCandidate?.status === "ingested") {
+              return {
+                ...current,
+                operations: current.operations.map((item) => item.id === operationId
+                  ? updateOperation(item, {
+                    progress: [...item.progress, { item_id: candidate.id, status: "completed", message: "來源已被並行處理入庫。" }],
+                  })
+                  : item),
+              };
+            }
+            return current;
           }
+          const currentDomains = sourceResearchPolicy(current);
+          if ((currentCandidate.url !== undefined || currentCandidate.domain !== undefined) && !domainAllowed(candidateDomain(currentCandidate), currentDomains)) {
+            throw new CoreError("SOURCE_DOMAIN_NOT_ALLOWED", `Source domain ${candidateDomain(currentCandidate) ?? "unknown"} is outside the approved domain policy.`, true);
+          }
+          ingestedInCommit = true;
           return {
             ...current,
             sources: [...current.sources, source],
@@ -379,29 +388,37 @@ export class SourceService {
             }],
           };
         });
-        completed.push(candidate.id);
-        if (isOfficialCandidate(candidate)) officialCompleted.add(candidate.id);
+        if (ingestedInCommit) {
+          completed.push(candidate.id);
+          if (isOfficialCandidate(candidate)) officialCompleted.add(candidate.id);
+        }
       } catch (error) {
         const failure = error instanceof CoreError ? error : new CoreError("SOURCE_ACQUISITION_FAILED", error instanceof Error ? error.message : String(error), true);
         const state = await this.repository.read();
-        await this.repository.commit(state.revision, (current) => ({
-          ...current,
-          candidates: current.candidates.map((item) => item.id === candidate.id
-            ? { ...item, status: failure.code === "SOURCE_FETCH_BLOCKED" ? "blocked_external" : "failed", failure: { code: failure.code, message: failure.message } }
-            : item),
-          operations: current.operations.map((item) => item.id === operationId
-            ? updateOperation(item, { progress: [...item.progress, { item_id: candidate.id, status: "blocked", message: failure.message }] })
-            : item),
-          audit: [...current.audit, {
-            id: internalId("audit"),
-            operation_id: operationId,
-            event: "source.blocked",
-            actor: context.actor,
-            occurred_at: now(),
-            project_revision: current.revision + 1,
-            details: { candidate_id: candidate.id, code: failure.code },
-          }],
-        }));
+        const currentCandidate = state.candidates.find((item) => item.id === candidate.id);
+        if (currentCandidate?.status === "ingested") {
+          completed.push(candidate.id);
+          if (isOfficialCandidate(candidate)) officialCompleted.add(candidate.id);
+        } else if (currentCandidate?.status === "approved") {
+          await this.repository.commit(state.revision, (current) => ({
+            ...current,
+            candidates: current.candidates.map((item) => item.id === candidate.id
+              ? { ...item, status: failure.code === "SOURCE_FETCH_BLOCKED" ? "blocked_external" : "failed", failure: { code: failure.code, message: failure.message } }
+              : item),
+            operations: current.operations.map((item) => item.id === operationId
+              ? updateOperation(item, { progress: [...item.progress, { item_id: candidate.id, status: "blocked", message: failure.message }] })
+              : item),
+            audit: [...current.audit, {
+              id: internalId("audit"),
+              operation_id: operationId,
+              event: "source.blocked",
+              actor: context.actor,
+              occurred_at: now(),
+              project_revision: current.revision + 1,
+              details: { candidate_id: candidate.id, code: failure.code },
+            }],
+          }));
+        }
         blocked.push(candidate.id);
       }
     }

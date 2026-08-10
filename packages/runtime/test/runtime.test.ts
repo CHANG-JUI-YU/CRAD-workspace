@@ -791,4 +791,52 @@ describe("natural language runtime boundary", () => {
     expect(merged.characters?.[1]?.mode).toBe("zhuji");
     expect(merged.primary_character_id).toBe("character-1");
   });
+
+  it("resumes a pending authoring operation from a later natural-language answer", async () => {
+    const repository = new MemoryProjectRepository("runtime-resume-authoring");
+    const timestamp = new Date().toISOString();
+    await repository.commit(0, (state) => ({
+      ...state,
+      operations: [{ id: "op-pending-authoring", kind: "authoring", request: "建立角色", actor: "user", status: "needs_input" as const, created_at: timestamp, updated_at: timestamp, progress: [] }],
+    }));
+    const runtime = new WorkspaceRuntime(repository);
+    const result = await runtime.request("筆記：寫下雪乃的新設定", { actor: "user", attachments: [] });
+    expect(result.status).toBe("completed");
+    expect(result.operation_id).toBe("op-pending-authoring");
+    const state = await repository.read();
+    expect(state.operations.find((item) => item.id === "op-pending-authoring")?.status).toBe("completed");
+    expect(state.artifacts.some((artifact) => artifact.kind === "draft_note")).toBe(true);
+  });
+
+  it("lets the user skip a pending build choice without creating a new operation", async () => {
+    const repository = new MemoryProjectRepository("runtime-resume-build-skip");
+    const timestamp = new Date().toISOString();
+    await repository.commit(0, (state) => ({
+      ...state,
+      operations: [{ id: "op-pending-build", kind: "build", request: "Preview current card", actor: "user", status: "needs_input" as const, question: "請選擇要使用的打包模式（珠璣或調色盤）。", created_at: timestamp, updated_at: timestamp, progress: [] }],
+    }));
+    const runtime = new WorkspaceRuntime(repository);
+    const skipped = await runtime.request("先不要", { actor: "user", attachments: [] });
+    expect(skipped.status).toBe("completed");
+    expect(skipped.operation_id).toBe("op-pending-build");
+    expect(skipped.summary).toContain("已略過");
+    const state = await repository.read();
+    expect(state.operations.find((item) => item.id === "op-pending-build")?.status).toBe("completed");
+    expect(state.builds).toHaveLength(0);
+  });
+
+  it("resumes a pending knowledge refresh with the remaining sources", async () => {
+    const repository = new MemoryProjectRepository("runtime-resume-knowledge");
+    const timestamp = new Date().toISOString();
+    await repository.commit(0, (state) => ({
+      ...state,
+      sources: [{ id: "source-1", candidate_id: "candidate-1", title: "Official page", canonical_text: "Yukino is direct and calm.", original_hash: contentHash("hash"), revision: contentHash("rev"), media_type: "text/plain", created_at: timestamp }],
+      operations: [{ id: "op-pending-knowledge", kind: "knowledge", request: "整理知識", actor: "user", status: "needs_input" as const, created_at: timestamp, updated_at: timestamp, progress: [] }],
+    }));
+    const runtime = new WorkspaceRuntime(repository);
+    const result = await runtime.request("好，繼續吧", { actor: "user", attachments: [] });
+    expect(result.operation_id).toBe("op-pending-knowledge");
+    expect(result.status).toBe("completed");
+    expect((await repository.read()).operations.find((item) => item.id === "op-pending-knowledge")?.status).toBe("completed");
+  });
 });

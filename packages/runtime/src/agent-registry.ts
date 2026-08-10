@@ -40,7 +40,7 @@ export const AGENT_DEFINITIONS: readonly AgentDefinition[] = [
   definition("greetings-creator", "creator", ".agents/agents/greetings-creator.md", "greetings-creator", "greetings-creation", ["greeting-authoring"]),
   definition("greetings-critic", "critic", ".agents/agents/greetings-critic.md", "greetings-critic", "greetings-critique", ["greeting-review"], { read_only: true }),
   definition("mode-conversion", "converter", ".agents/agents/mode-conversion.md", "mode-conversion", "mode-conversion", ["mode-conversion"]),
-  definition("card-import-analyst", "importer", ".agents/agents/card-import-analyst.md", "card-import-analyst", "card-import-analysis", ["card-import", "legacy-analysis"], { read_only: true }),
+  definition("card-import-analyst", "importer", ".agents/agents/card-import-analyst.md", "card-import-analyst", "card-import-analysis", ["card-import", "legacy-analysis"]),
   definition("world-lore-creator", "creator", ".agents/agents/world-lore-creator.md", "world-lore-creator", "world-lore-creation", ["world-authoring"]),
   definition("world-lore-critic", "critic", ".agents/agents/world-lore-critic.md", "world-lore-critic", "world-lore-critique", ["world-review"], { read_only: true }),
   definition("mvu-creator", "creator", ".agents/agents/mvu-creator.md", "mvu-creator", "mvu-creation", ["plugin-authoring", "mvu"]),

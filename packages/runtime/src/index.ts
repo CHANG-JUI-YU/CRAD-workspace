@@ -1872,6 +1872,12 @@ export class WorkspaceRuntime {
     const resolution = this.agents.resolve(trimmed, options.agent);
     const kind = resolution.kind;
     if (kind === "status") return this.status();
+    if (kind === "authoring" || kind === "knowledge" || kind === "build" || kind === "import" || kind === "source") {
+      const definition = this.agents.registryView().get(resolution.agent_id);
+      if (definition?.read_only === true) {
+        throw new CoreError("AGENT_READ_ONLY", `Agent ${resolution.agent_id} is read-only and cannot execute ${kind} requests.`, true, { agent_id: resolution.agent_id, kind });
+      }
+    }
     const existing = await this.repository.read();
     const pendingBlueprintPrecheck = [...existing.blueprint_prechecks].reverse().find((item) => item.status === "needs_input");
     if (this.interviewRequired && pendingBlueprintPrecheck !== undefined) {
@@ -1891,34 +1897,9 @@ export class WorkspaceRuntime {
         : this.startInterview(trimmed, context);
     }
     const pending = [...existing.operations].reverse().find((operation) => operation.status === "needs_input");
-    if (pending?.kind === "source" && (context.attachments.length > 0 || /重試|retry|上傳|貼上|https?:\/\//iu.test(trimmed))) {
-      const resumed = await this.sources.resume(pending.id, trimmed, this.fetcher === undefined ? context : { ...context, fetcher: this.fetcher });
-      return { operation_id: pending.id, status: resumed.status, summary: resumed.summary, completed: resumed.completed, blocked: resumed.blocked };
-    }
-    const pendingBuildQuestion = pending?.kind === "build" && /模式|珠璣|調色盤|zhuji|palette/iu.test(pending.question ?? "");
-    if (pendingBuildQuestion && pending !== undefined) {
-      const pendingBuildMode = parseBuildModeSelection(trimmed);
-      if (pendingBuildMode !== undefined) {
-        const resumed = await this.build.run(pending.id, pending.request, context.actor, { mode_selection: pendingBuildMode });
-        const latest = await this.repository.read();
-        const finalOperation = latest.operations.find((item) => item.id === pending.id);
-        return {
-          operation_id: pending.id,
-          status: resumed.status,
-          summary: resumed.summary,
-          completed: resumed.build_id === undefined ? [] : [resumed.build_id],
-          blocked: resumed.status === "blocked" ? [pending.id] : [],
-          ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
-        };
-      }
-      return {
-        operation_id: pending.id,
-        status: "needs_input",
-        summary: pending.question ?? "請選擇本次打包要使用的模式：珠璣、調色盤，或兩者。",
-        completed: [],
-        blocked: [],
-        ...(pending.question === undefined ? {} : { question: pending.question }),
-      };
+    if (pending !== undefined) {
+      const resumed = await this.resumePendingIfAnswered(pending, trimmed, context, kind);
+      if (resumed !== undefined) return resumed;
     }
     const state = existing;
     if (kind === "authoring") this.ensureSourceAdaptationFactsReady(state);
@@ -2094,6 +2075,101 @@ export class WorkspaceRuntime {
       completed: state.sources.map((source) => source.id),
       blocked: state.candidates.filter((candidate) => candidate.status === "blocked_external" || candidate.status === "failed").map((candidate) => candidate.id),
     };
+  }
+
+  private async resumePendingIfAnswered(pending: OperationRecord, trimmed: string, context: WorkspaceContext, kind: string): Promise<RequestResult | undefined> {
+    if (pending.kind === "source" && (context.attachments.length > 0 || /重試|retry|上傳|貼上|https?:\/\//iu.test(trimmed))) {
+      const resumed = await this.sources.resume(pending.id, trimmed, this.fetcher === undefined ? context : { ...context, fetcher: this.fetcher });
+      return { operation_id: pending.id, status: resumed.status, summary: resumed.summary, completed: resumed.completed, blocked: resumed.blocked };
+    }
+    if (pending.kind === "build" && /模式|珠璣|調色盤|zhuji|palette/iu.test(pending.question ?? "")) {
+      const pendingBuildMode = parseBuildModeSelection(trimmed);
+      if (pendingBuildMode !== undefined) {
+        const resumed = await this.build.run(pending.id, pending.request, context.actor, { mode_selection: pendingBuildMode });
+        const latest = await this.repository.read();
+        const finalOperation = latest.operations.find((item) => item.id === pending.id);
+        return {
+          operation_id: pending.id,
+          status: resumed.status,
+          summary: resumed.summary,
+          completed: resumed.build_id === undefined ? [] : [resumed.build_id],
+          blocked: resumed.status === "blocked" ? [pending.id] : [],
+          ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+        };
+      }
+      if (/不需要|先不要|不用了|skip|defer|之後再|後續/iu.test(trimmed)) {
+        const latest = await this.repository.read();
+        await this.repository.commit(latest.revision, (current) => ({
+          ...current,
+          operations: current.operations.map((item) => item.id === pending.id ? { ...item, status: "completed", result_summary: "使用者略過本次打包。", updated_at: now() } : item),
+        }));
+        return { operation_id: pending.id, status: "completed", summary: "已略過本次打包。", completed: [], blocked: [] };
+      }
+      if (kind === "unknown") {
+        return {
+          operation_id: pending.id,
+          status: "needs_input",
+          summary: pending.question ?? "請選擇本次打包要使用的模式：珠璣、調色盤，或兩者。",
+          completed: [],
+          blocked: [],
+          ...(pending.question === undefined ? {} : { question: pending.question }),
+        };
+      }
+      return undefined;
+    }
+    if (kind === "unknown") {
+      if (pending.kind === "knowledge") {
+        const result = await this.knowledge.refresh(pending.id, trimmed, context.actor);
+        const latest = await this.repository.read();
+        const finalOperation = latest.operations.find((item) => item.id === pending.id);
+        return { operation_id: pending.id, status: result.status, summary: result.summary, completed: [...result.chunks, ...result.facts], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }) };
+      }
+      if (pending.kind === "authoring") {
+        const result = await this.authoring.create(pending.id, trimmed, "director", context.actor);
+        const latest = await this.repository.read();
+        const finalOperation = latest.operations.find((item) => item.id === pending.id);
+        return {
+          operation_id: pending.id,
+          status: result.status,
+          summary: result.summary,
+          completed: result.artifact_id === undefined ? [] : [result.artifact_id],
+          blocked: [],
+          ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+          agent_id: "director",
+          agent_role: "orchestrator",
+        };
+      }
+      if (pending.kind === "review") {
+        const result = /重新評估|re-?evaluate|quality profile/iu.test(trimmed)
+          ? await this.review.reevaluate(pending.id, context.actor)
+          : await this.review.review(pending.id, trimmed, "fact-reviewer-1", context.actor);
+        const latest = await this.repository.read();
+        const finalOperation = latest.operations.find((item) => item.id === pending.id);
+        return {
+          operation_id: pending.id,
+          status: result.status,
+          summary: result.summary,
+          completed: result.review_id === undefined ? [] : [result.review_id],
+          blocked: result.status === "blocked" ? [pending.id] : [],
+          ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+        };
+      }
+      if (pending.kind === "import" && context.attachments.length > 0) {
+        const result = await this.importer.run(pending.id, trimmed, context.actor, context.attachments);
+        const latest = await this.repository.read();
+        const finalOperation = latest.operations.find((item) => item.id === pending.id);
+        return {
+          operation_id: pending.id,
+          status: result.status,
+          summary: result.summary,
+          completed: result.import_id === undefined ? [] : [result.import_id],
+          blocked: [],
+          ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+          ...(result.artifact_id === undefined ? {} : { artifact_id: result.artifact_id }),
+        };
+      }
+    }
+    return undefined;
   }
 
   private async ensureBlueprintAuthoringReady(kind: "zhuji" | "palette", characterId: string, module: string): Promise<void> {

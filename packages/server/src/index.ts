@@ -12,6 +12,7 @@ export interface WorkspaceServerOptions {
   worker?: WorkspaceWorker;
   workerOptions?: WorkspaceWorkerOptions;
   autoStartWorker?: boolean;
+  authToken?: string;
 }
 
 export interface WorkspaceServer extends Server {
@@ -202,9 +203,45 @@ class RequestBodyError extends Error {
   }
 }
 
+class RequestJsonError extends Error {
+  readonly code = "REQUEST_INVALID_JSON";
+  readonly recoverable = true;
+
+  constructor() {
+    super("Request body is not valid JSON");
+    this.name = "RequestJsonError";
+  }
+}
+
+class RequestTooLargeError extends Error {
+  readonly code = "REQUEST_TOO_LARGE";
+  readonly recoverable = true;
+
+  constructor() {
+    super("Request body exceeds the 10 MiB limit");
+    this.name = "RequestTooLargeError";
+  }
+}
+
+const MAX_BODY_BYTES = 10 * 1024 * 1024;
+
+const base64Pattern = /^[A-Za-z0-9+/]*={0,2}$/u;
+
 async function body(request: IncomingMessage): Promise<unknown> {
+  const declaredLength = Number(request.headers["content-length"]);
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) throw new RequestTooLargeError();
   const chunks: Buffer[] = [];
-  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  let total = 0;
+  let tooLarge = false;
+  for await (const chunk of request) {
+    total += chunk.length;
+    if (total > MAX_BODY_BYTES) {
+      tooLarge = true;
+      continue;
+    }
+    chunks.push(Buffer.from(chunk));
+  }
+  if (tooLarge) throw new RequestTooLargeError();
   if (chunks.length === 0) return {};
   let text: string;
   try {
@@ -212,7 +249,11 @@ async function body(request: IncomingMessage): Promise<unknown> {
   } catch {
     throw new RequestBodyError();
   }
-  return JSON.parse(text) as unknown;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new RequestJsonError();
+  }
 }
 
 function attachmentsFrom(value: unknown): SourceAttachment[] {
@@ -221,7 +262,10 @@ function attachmentsFrom(value: unknown): SourceAttachment[] {
     if (item === null || typeof item !== "object") return [];
     const candidate = item as { name?: unknown; content_base64?: unknown; media_type?: unknown };
     if (typeof candidate.name !== "string" || typeof candidate.content_base64 !== "string") return [];
-    return [{ name: candidate.name, content: new Uint8Array(Buffer.from(candidate.content_base64, "base64")), ...(typeof candidate.media_type === "string" ? { media_type: candidate.media_type } : {}) }];
+    if (!base64Pattern.test(candidate.content_base64)) return [];
+    const decoded = Buffer.from(candidate.content_base64, "base64");
+    if (decoded.byteLength === 0) return [];
+    return [{ name: candidate.name, content: new Uint8Array(decoded), ...(typeof candidate.media_type === "string" ? { media_type: candidate.media_type } : {}) }];
   });
 }
 
@@ -333,6 +377,10 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://localhost");
+      if (options.authToken !== undefined && request.headers.authorization !== `Bearer ${options.authToken}`) {
+        json(response, 401, { error: "UNAUTHORIZED" });
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/") {
         response.statusCode = 200;
         response.setHeader("content-type", "text/html; charset=utf-8");
@@ -610,8 +658,8 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
             }
             const requestedAgent = agentValue(params.arguments);
             const result: RequestResult = options.projectManager === undefined
-              ? await (await getAgentAdapter()).request({ request: requestText, context: { actor, attachments: [] }, ...(requestedAgent === undefined ? {} : { agent: requestedAgent }) })
-              : await options.projectManager.request(requestText, { actor, attachments: [] }, requestedAgent === undefined ? {} : { agent: requestedAgent });
+              ? await (await getAgentAdapter()).request({ request: requestText, context: { actor, attachments: attachmentsFrom(params.arguments) }, ...(requestedAgent === undefined ? {} : { agent: requestedAgent }) })
+              : await options.projectManager.request(requestText, { actor, attachments: attachmentsFrom(params.arguments) }, requestedAgent === undefined ? {} : { agent: requestedAgent });
             json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
             return;
           }
@@ -626,14 +674,18 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       const errorCode = error !== null && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "";
       const recoverableInput = error !== null && typeof error === "object" && "recoverable" in error && (error as { recoverable?: unknown }).recoverable === true && /^(?:AGENT_|INTERVIEW_|PROJECT_|REQUEST_|ISSUE_|TEMPLATE_|ZHUJI_)/u.test(errorCode);
       const details = error !== null && typeof error === "object" && "details" in error ? (error as { details?: unknown }).details : undefined;
-      json(response, recoverableInput ? 400 : 500, { error: error instanceof Error ? error.message : String(error), ...(details === undefined ? {} : { details }) });
+      if (new URL(request.url ?? "/", "http://localhost").pathname === "/mcp") {
+        json(response, 200, { jsonrpc: "2.0", id: null, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } });
+        return;
+      }
+      json(response, recoverableInput ? 400 : 500, { error: error instanceof Error ? error.message : String(error), ...(errorCode === "" ? {} : { code: errorCode }), ...(details === undefined ? {} : { details }) });
     }
   });
   server.once("close", () => worker.stop());
   return Object.assign(server, { workspaceWorker: worker });
 }
 
-export async function startWorkspaceServer(options: { port?: number; host?: string; projectRoot?: string; projectId?: string; actor?: string } = {}): Promise<Server> {
+export async function startWorkspaceServer(options: { port?: number; host?: string; projectRoot?: string; projectId?: string; actor?: string; authToken?: string } = {}): Promise<Server> {
   const projectRoot = options.projectRoot ?? process.env.ST_WORKSPACE_PROJECT_ROOT ?? "projects";
   const fetcher = new HttpSourceFetcher();
   // An explicitly supplied root is already a complete workspace selection;
@@ -647,8 +699,8 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
     : undefined;
   if (manager !== undefined) await manager.ensureRuntime();
   const serverOptions: WorkspaceServerOptions = manager !== undefined
-    ? { projectManager: manager, actor: options.actor ?? "server" }
-    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server" };
+    ? { projectManager: manager, actor: options.actor ?? "server", ...(options.authToken === undefined ? {} : { authToken: options.authToken }) }
+    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server", ...(options.authToken === undefined ? {} : { authToken: options.authToken }) };
   const server = createWorkspaceServer(serverOptions);
   await new Promise<void>((resolve) => server.listen(options.port ?? Number(process.env.ST_WORKSPACE_PORT ?? 8787), options.host ?? "127.0.0.1", resolve));
   return server;

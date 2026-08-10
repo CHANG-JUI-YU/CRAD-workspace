@@ -118,13 +118,18 @@ function templateName(value: Exclude<TemplateProposalValue, { kind: "zhuji" }>):
     case "world": return value.entries[0]?.id ?? "world";
     case "conversion": return `${value.character_id}-${value.source_mode}-to-${value.target_mode}`;
     case "import_analysis": return "import-analysis";
-    case "review": return `${value.target.kind}-${value.target.name}`;
+    case "review": return `${value.target.kind}-${value.target.id ?? value.target.name}`;
     case "source_research": return value.work_title ?? value.query.slice(0, 80);
     case "fact_curation": return value.topic ?? "facts";
     case "fact_review": return "fact-review";
     case "plugin": return value.plugin_id;
     case "director_routing": return value.phase;
   }
+}
+
+function keyName(value: Exclude<TemplateProposalValue, { kind: "zhuji" }>): string {
+  if (value.kind === "character") return value.document.id;
+  return templateName(value);
 }
 
 export class AuthoringService {
@@ -145,19 +150,10 @@ export class AuthoringService {
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
     const kind = templateArtifactKind(parsed.data.kind);
     const name = templateName(parsed.data);
-    const key = keyFor(kind, name);
+    const key = keyFor(kind, keyName(parsed.data));
     const content = parsed.data.kind === "wardrobe" ? parsed.data.content : canonicalJson(parsed.data);
     const hash = contentHash(content);
     const previous = [...initial.artifacts].reverse().find((artifact) => artifact.key === key);
-    if (previous?.content_hash === hash) {
-      await this.repository.commit(initial.revision, (current) => ({
-        ...current,
-        operations: current.operations.map((item) => item.id === operationId
-          ? updateOperation(item, { status: "completed", result_summary: `Template ${parsed.data.kind} is already stored.` })
-          : item),
-      }));
-      return { artifact_id: previous.id, artifact_key: key, status: "completed", summary: `Reused existing ${parsed.data.kind} template.` };
-    }
     const artifact: ArtifactRecord = {
       id: internalId("artifact"),
       key,
@@ -176,24 +172,37 @@ export class AuthoringService {
       ...blueprintBinding(initial),
     };
     const summary = `Stored ${parsed.data.kind} template ${name}.`;
-    const state = await this.repository.read();
-    await this.repository.commit(state.revision, (current) => ({
-      ...current,
-      ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
-      artifacts: [...current.artifacts, artifact],
-      operations: current.operations.map((item) => item.id === operationId
-        ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: artifact.id, status: "completed", message: `Validated ${parsed.data.kind} template.` }], result_summary: summary })
-        : item),
-      audit: [...current.audit, {
-        id: internalId("audit"),
-        operation_id: operationId,
-        event: "template.created",
-        actor: auditActor,
-        occurred_at: now(),
-        project_revision: current.revision + 1,
-        details: { artifact_id: artifact.id, key, template_kind: parsed.data.kind, artifact_kind: kind, based_on: previous?.revision, agent_id: actor },
-      }],
-    }));
+    let reusedId: string | undefined;
+    await this.repository.commit(initial.revision, (current) => {
+      const currentPrevious = [...current.artifacts].reverse().find((item) => item.key === key);
+      if (currentPrevious?.content_hash === hash) {
+        reusedId = currentPrevious.id;
+        return {
+          ...current,
+          operations: current.operations.map((item) => item.id === operationId
+            ? updateOperation(item, { status: "completed", result_summary: `Template ${parsed.data.kind} is already stored.` })
+            : item),
+        };
+      }
+      return {
+        ...current,
+        ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
+        artifacts: [...current.artifacts, artifact],
+        operations: current.operations.map((item) => item.id === operationId
+          ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: artifact.id, status: "completed", message: `Validated ${parsed.data.kind} template.` }], result_summary: summary })
+          : item),
+        audit: [...current.audit, {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "template.created",
+          actor: auditActor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: { artifact_id: artifact.id, key, template_kind: parsed.data.kind, artifact_kind: kind, based_on: previous?.revision, agent_id: actor },
+        }],
+      };
+    });
+    if (reusedId !== undefined) return { artifact_id: reusedId, artifact_key: key, status: "completed", summary: `Reused existing ${parsed.data.kind} template.` };
     return { artifact_id: artifact.id, artifact_key: key, status: "completed", summary };
   }
 
@@ -213,15 +222,6 @@ export class AuthoringService {
     const content = canonicalJson(parsed.data);
     const hash = contentHash(content);
     const previous = [...initial.artifacts].reverse().find((artifact) => artifact.key === key);
-    if (previous?.content_hash === hash) {
-      await this.repository.commit(initial.revision, (current) => ({
-        ...current,
-        operations: current.operations.map((item) => item.id === operationId
-          ? updateOperation(item, { status: "completed", result_summary: "珠璣模組內容未變更，沿用既有 revision。" })
-          : item),
-      }));
-      return { artifact_id: previous.id, artifact_key: key, status: "completed", summary: "珠璣模組內容未變更，沿用既有 revision。" };
-    }
     const artifact: ArtifactRecord = {
       id: internalId("artifact"),
       key,
@@ -240,24 +240,37 @@ export class AuthoringService {
       ...blueprintBinding(initial),
     };
     const summary = `已建立珠璣模組「${name}」revision ${artifact.revision.slice(0, 12)}。`;
-    const state = await this.repository.read();
-    await this.repository.commit(state.revision, (current) => ({
-      ...current,
-      ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
-      artifacts: [...current.artifacts, artifact],
-      operations: current.operations.map((item) => item.id === operationId
-        ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: artifact.id, status: "completed", message: "珠璣結構通過 Schema 驗證並建立 revision" }], result_summary: summary })
-        : item),
-      audit: [...current.audit, {
-        id: internalId("audit"),
-        operation_id: operationId,
-        event: "zhuji.created",
-        actor: auditActor,
-        occurred_at: now(),
-        project_revision: current.revision + 1,
-        details: { artifact_id: artifact.id, key, kind: "zhuji", character_id: parsed.data.character_id, module: module.module, revision: artifact.revision, based_on: previous?.revision, agent_id: actor },
-      }],
-    }));
+    let reusedId: string | undefined;
+    await this.repository.commit(initial.revision, (current) => {
+      const currentPrevious = [...current.artifacts].reverse().find((item) => item.key === key);
+      if (currentPrevious?.content_hash === hash) {
+        reusedId = currentPrevious.id;
+        return {
+          ...current,
+          operations: current.operations.map((item) => item.id === operationId
+            ? updateOperation(item, { status: "completed", result_summary: "珠璣模組內容未變更，沿用既有 revision。" })
+            : item),
+        };
+      }
+      return {
+        ...current,
+        ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
+        artifacts: [...current.artifacts, artifact],
+        operations: current.operations.map((item) => item.id === operationId
+          ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: artifact.id, status: "completed", message: "珠璣結構通過 Schema 驗證並建立 revision" }], result_summary: summary })
+          : item),
+        audit: [...current.audit, {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "zhuji.created",
+          actor: auditActor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: { artifact_id: artifact.id, key, kind: "zhuji", character_id: parsed.data.character_id, module: module.module, revision: artifact.revision, based_on: previous?.revision, agent_id: actor },
+        }],
+      };
+    });
+    if (reusedId !== undefined) return { artifact_id: reusedId, artifact_key: key, status: "completed", summary: "珠璣模組內容未變更，沿用既有 revision。" };
     return { artifact_id: artifact.id, artifact_key: key, status: "completed", summary };
   }
 
@@ -325,15 +338,6 @@ export class AuthoringService {
     }
     const hash = contentHash(content);
     const previous = [...initial.artifacts].reverse().find((artifact) => artifact.key === key);
-    if (previous?.content_hash === hash) {
-      await this.repository.commit(initial.revision, (current) => ({
-        ...current,
-        operations: current.operations.map((item) => item.id === operationId
-          ? updateOperation(item, { status: "completed", result_summary: "內容未變更，沿用既有 artifact revision。" })
-          : item),
-      }));
-      return { artifact_id: previous.id, artifact_key: key, status: "completed", summary: "內容未變更，沿用既有 artifact revision。" };
-    }
     const artifact: ArtifactRecord = {
       id: internalId("artifact"),
       key,
@@ -352,24 +356,37 @@ export class AuthoringService {
       ...blueprintBinding(initial),
     };
     const summary = `已建立 ${kind} artifact「${name}」revision ${artifact.revision.slice(0, 12)}。`;
-    const state = await this.repository.read();
-    await this.repository.commit(state.revision, (current) => ({
-      ...current,
-      ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
-      artifacts: [...current.artifacts, artifact],
-      operations: current.operations.map((item) => item.id === operationId
-        ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: artifact.id, status: "completed", message: "artifact revision 已建立" }], result_summary: summary })
-        : item),
-      audit: [...current.audit, {
-        id: internalId("audit"),
-        operation_id: operationId,
-        event: "artifact.created",
-        actor: auditActor,
-        occurred_at: now(),
-        project_revision: current.revision + 1,
-        details: { artifact_id: artifact.id, key, kind, revision: artifact.revision, based_on: previous?.revision, agent_id: actor },
-      }],
-    }));
+    let reusedId: string | undefined;
+    await this.repository.commit(initial.revision, (current) => {
+      const currentPrevious = [...current.artifacts].reverse().find((item) => item.key === key);
+      if (currentPrevious?.content_hash === hash) {
+        reusedId = currentPrevious.id;
+        return {
+          ...current,
+          operations: current.operations.map((item) => item.id === operationId
+            ? updateOperation(item, { status: "completed", result_summary: "內容未變更，沿用既有 artifact revision。" })
+            : item),
+        };
+      }
+      return {
+        ...current,
+        ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
+        artifacts: [...current.artifacts, artifact],
+        operations: current.operations.map((item) => item.id === operationId
+          ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: artifact.id, status: "completed", message: "artifact revision 已建立" }], result_summary: summary })
+          : item),
+        audit: [...current.audit, {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "artifact.created",
+          actor: auditActor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: { artifact_id: artifact.id, key, kind, revision: artifact.revision, based_on: previous?.revision, agent_id: actor },
+        }],
+      };
+    });
+    if (reusedId !== undefined) return { artifact_id: reusedId, artifact_key: key, status: "completed", summary: "內容未變更，沿用既有 artifact revision。" };
     return { artifact_id: artifact.id, artifact_key: key, status: "completed", summary };
   }
 }

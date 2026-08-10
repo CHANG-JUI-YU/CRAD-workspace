@@ -106,4 +106,10 @@ describe("high-level agent compatibility layer", () => {
     expect((await repository.read()).audit.find((event) => event.event === "operation.created")?.details).toMatchObject({ agent_id: "director" });
     expect(adapter.list().find((agent) => agent.id === "director")).toMatchObject({ role: "orchestrator", prompt: ".agents/agents/director.md" });
   });
+
+  it("routes refresh-intent import requests to the import analyst before the knowledge curator", () => {
+    const router = new AgentRouter();
+    expect(router.resolve("Refresh imported cards")).toMatchObject({ agent_id: "card-import-analyst", kind: "import" });
+    expect(router.resolve("Refresh knowledge")).toMatchObject({ agent_id: "fact-curator", kind: "knowledge" });
+  });
 });

@@ -48,8 +48,8 @@ export function classifyIntent(request: string): RoutedKind {
   if (matches(request, /source|來源|檔案|資料來源|網頁|候選|搜尋|找來源|官方|\b(?:research|search|fetch)\b/iu)) return "source";
   if (matches(request, /\b(?:build|preview|publish|release)\b|建置|預覽|發布|發佈|上線/iu)) return "build";
   if (matches(request, /\b(?:review|quality|issue|critic)\b|審查|檢查|品質|問題清單/iu)) return "review";
+  if (matches(request, /\b(?:import|imported|legacy)\b|匯入|舊卡/iu)) return "import";
   if (matches(request, /\b(?:knowledge|fact|evidence|refresh)\b|知識|事實|證據|整理/iu)) return "knowledge";
-  if (matches(request, /\b(?:import|legacy)\b|匯入|舊卡/iu)) return "import";
   if (matches(request, /\b(?:author|character|relationship|world|lore|greeting|blueprint|zhuji|palette|wardrobe|plugin|conversion|mode-conversion)\b|角色|人物|二創|同人|原作改編|關係|世界|開場白|藍圖|珠璣|調色盤|衣櫃|衣橱|服裝清單|插件|轉換|建立產物/iu)) return "authoring";
   if (matches(request, /\bstatus\b|狀態|目前|進度|現況/iu)) return "status";
   return "unknown";

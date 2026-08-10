@@ -36,6 +36,8 @@ export interface IssueUpdateResult {
   readonly summary: string;
 }
 
+const TECHNICAL_ARTIFACT_KINDS = new Set(["review", "source_research", "fact_curation", "fact_review"]);
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -499,9 +501,10 @@ export class ReviewService {
   private pickTarget(artifacts: Awaited<ReturnType<ProjectRepository["read"]>>["artifacts"], request: string) {
     const named = request.match(/(?:審查|review|檢查|inspect)\s*[:：]?\s*([^\n，,。；;]+)/iu)?.[1]?.trim();
     if (named !== undefined && named.length > 0) {
-      const target = [...artifacts].reverse().find((artifact) => artifact.name.toLocaleLowerCase().includes(named.toLocaleLowerCase()) || artifact.key.toLocaleLowerCase().includes(named.toLocaleLowerCase()));
+      const target = [...artifacts].reverse().find((artifact) => !TECHNICAL_ARTIFACT_KINDS.has(artifact.kind)
+        && (artifact.name.toLocaleLowerCase().includes(named.toLocaleLowerCase()) || artifact.key.toLocaleLowerCase().includes(named.toLocaleLowerCase())));
       if (target !== undefined) return target;
     }
-    return [...artifacts].reverse()[0];
+    return [...artifacts].reverse().find((artifact) => !TECHNICAL_ARTIFACT_KINDS.has(artifact.kind)) ?? [...artifacts].reverse()[0];
   }
 }

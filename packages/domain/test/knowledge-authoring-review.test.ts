@@ -577,4 +577,34 @@ describe("knowledge, authoring and review services", () => {
     expect(result.status).toBe("completed");
     expect(result.chunks.length).toBeGreaterThan(0);
   });
+
+  it("keys character artifacts by document id so renames do not create new keys", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-c1", "authoring"), operation("op-c2", "authoring")] }));
+    const service = new AuthoringService(repository);
+    const first = await service.createTemplate("op-c1", { kind: "character", document: { schema_version: 1, id: "yukino", display_name: "雪乃", summary: "A calm character." } }, "writer");
+    expect(first.artifact_key).toBe("character:yukino");
+    const second = await service.createTemplate("op-c2", { kind: "character", document: { schema_version: 1, id: "yukino", display_name: "雪乃改", summary: "A calm character." } }, "writer");
+    expect(second.artifact_key).toBe("character:yukino");
+    const state = await repository.read();
+    expect(state.artifacts.filter((item) => item.key === "character:yukino")).toHaveLength(2);
+  });
+
+  it("does not let a review target its own review artifact", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({ ...state, quality_profile: { blocking_severity: "error", overrides: { CONTENT_TOO_SHORT: "info", PLACEHOLDER_REMAINS: "info" } }, operations: [operation("op-author", "authoring")] }));
+    const authoring = await new AuthoringService(repository).createTemplate("op-author", { kind: "character", document: { schema_version: 1, id: "yukino", display_name: "Yukino", summary: "A complete character document with enough content." } }, "writer");
+    expect(authoring.artifact_id).toBeDefined();
+    await repository.commit((await repository.read()).revision, (state) => ({ ...state, operations: [...state.operations, operation("op-review-1", "review"), operation("op-review-2", "review")] }));
+    const service = new ReviewService(repository);
+    const first = await service.review("op-review-1", "Review current character", "reviewer");
+    expect(first.status).toBe("completed");
+    const characterArtifact = (await repository.read()).artifacts.find((item) => item.kind === "character")!;
+    const second = await service.review("op-review-2", "Review current character", "reviewer");
+    expect(second.status).toBe("completed");
+    const state = await repository.read();
+    const secondReview = state.reviews.at(-1)!;
+    expect(secondReview.artifact_id).toBe(characterArtifact.id);
+    expect(state.artifacts.find((item) => item.kind === "review")?.id).not.toBe(secondReview.artifact_id);
+  });
 });

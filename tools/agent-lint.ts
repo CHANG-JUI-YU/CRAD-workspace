@@ -11,6 +11,7 @@ const registryPath = path.join(agentsRoot, "registry.yaml");
 const aliasesPath = path.join(agentsRoot, "aliases.yaml");
 const openCodeConfigPath = path.join(root, "opencode.jsonc");
 const templateSourcePath = path.join(root, "packages", "core", "src", "templates.ts");
+const agentRegistrySourcePath = path.join(root, "packages", "runtime", "src", "agent-registry.ts");
 
 const failures: string[] = [];
 
@@ -38,15 +39,37 @@ function registryIds(value: string): string[] {
   });
 }
 
-function registryEntries(value: string): Array<{ id: string; prompt?: string; personality?: string; skills: string[] }> {
+function registryEntries(value: string): Array<{ id: string; prompt?: string; personality?: string; skills: string[]; readOnly: boolean }> {
   return value.split(/\n(?=\s+- id:)/u).flatMap((block) => {
     const id = block.match(/^\s+- id:\s*([a-z0-9-]+)\s*$/imu)?.[1]?.toLocaleLowerCase();
     if (id === undefined) return [];
     const prompt = block.match(/^\s+prompt:\s*(\S+)\s*$/imu)?.[1];
     const personality = block.match(/^\s+personality:\s*([a-z0-9-]+)\s*$/imu)?.[1];
     const skills = block.match(/^\s+skills:\s*\[([^\]]*)\]\s*$/imu)?.[1]?.split(",").map((item) => item.trim()).filter((item) => item.length > 0) ?? [];
-    return [{ id, prompt, personality, skills }];
+    const readOnly = /^\s+read_only:\s*true\s*$/imu.test(block);
+    return [{ id, prompt, personality, skills, readOnly }];
   });
+}
+
+function tsDefinitionBlocks(value: string): Array<{ id: string; readOnly: boolean }> {
+  const start = value.indexOf("AGENT_DEFINITIONS");
+  const end = value.indexOf("AGENT_ALIASES", start);
+  if (start < 0 || end < 0) return [];
+  return value.slice(start, end).split(/^\s*definition\("/um).slice(1).flatMap((chunk) => {
+    const id = chunk.match(/^([a-z0-9-]+)/u)?.[1];
+    return id === undefined ? [] : [{ id, readOnly: /read_only:\s*true/u.test(chunk) }];
+  });
+}
+
+function tsAliasEntries(value: string): Array<[string, string]> {
+  const start = value.indexOf("AGENT_ALIASES");
+  const end = value.indexOf("};", start);
+  if (start < 0 || end < 0) return [];
+  const output: Array<[string, string]> = [];
+  for (const match of value.slice(start, end).matchAll(/"?([a-z0-9-]+)"?\s*:\s*"([a-z0-9-]+)"/gu)) {
+    output.push([match[1]!.toLocaleLowerCase(), match[2]!.toLocaleLowerCase()]);
+  }
+  return output;
 }
 
 function aliases(value: string): Array<[string, string]> {
@@ -61,7 +84,7 @@ function field(value: string, name: string): string | undefined {
 }
 
 async function main(): Promise<void> {
-  for (const required of [registryPath, aliasesPath, promptsRoot, personalitiesRoot, skillsRoot, runtimeInstructionsPath, openCodeConfigPath, templateSourcePath]) {
+  for (const required of [registryPath, aliasesPath, promptsRoot, personalitiesRoot, skillsRoot, runtimeInstructionsPath, openCodeConfigPath, templateSourcePath, agentRegistrySourcePath]) {
     if (!(await exists(required))) failures.push("missing " + path.relative(root, required));
   }
   if (failures.length > 0) throw new Error(failures.join("\n"));
@@ -71,6 +94,7 @@ async function main(): Promise<void> {
   const openCodeConfig = await text(openCodeConfigPath);
   const templateSource = await text(templateSourcePath);
   const runtimeInstructions = await text(runtimeInstructionsPath);
+  const registrySource = await text(agentRegistrySourcePath);
   const directorStart = openCodeConfig.indexOf('"director": {');
   const nextAgentStart = directorStart >= 0 ? openCodeConfig.indexOf('"source-researcher": {', directorStart) : -1;
   const directorConfig = directorStart >= 0 && nextAgentStart > directorStart ? openCodeConfig.slice(directorStart, nextAgentStart) : "";
@@ -110,6 +134,29 @@ async function main(): Promise<void> {
   const aliasEntries = aliases(aliasText);
   for (const [alias, target] of aliasEntries) {
     if (!ids.includes(target)) failures.push("alias " + alias + " targets unknown agent " + target);
+  }
+
+  const tsDefinitions = tsDefinitionBlocks(registrySource);
+  const tsIds = tsDefinitions.map((item) => item.id);
+  for (const id of ids) {
+    if (!tsIds.includes(id)) failures.push("registry agent " + id + " is missing from the TypeScript agent registry");
+  }
+  for (const item of tsDefinitions) {
+    if (!ids.includes(item.id)) failures.push("TypeScript agent " + item.id + " is missing from .agents/registry.yaml");
+  }
+  const tsReadOnly = new Map(tsDefinitions.map((item) => [item.id, item.readOnly]));
+  for (const entry of entries) {
+    const tsFlag = tsReadOnly.get(entry.id);
+    if (tsFlag !== undefined && tsFlag !== entry.readOnly) failures.push("agent " + entry.id + " has inconsistent read_only between registry.yaml and the TypeScript registry");
+  }
+  const tsAliases = tsAliasEntries(registrySource);
+  const tsAliasPairs = new Set(tsAliases.map(([alias, target]) => alias + " -> " + target));
+  const yamlAliasPairs = new Set(aliasEntries.map(([alias, target]) => alias + " -> " + target));
+  for (const [alias, target] of aliasEntries) {
+    if (!tsAliasPairs.has(alias + " -> " + target)) failures.push("alias " + alias + " -> " + target + " is missing from the TypeScript alias map");
+  }
+  for (const [alias, target] of tsAliases) {
+    if (!yamlAliasPairs.has(alias + " -> " + target)) failures.push("TypeScript alias " + alias + " -> " + target + " is missing from .agents/aliases.yaml");
   }
 
   const promptFiles = (await readdir(promptsRoot)).filter((file) => file.endsWith(".md")).sort();

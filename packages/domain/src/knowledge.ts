@@ -339,71 +339,78 @@ export class KnowledgeService {
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
-    const knownSourceIds = new Set(initial.knowledge_chunks.map((chunk) => chunk.source_id));
-    const sources = initial.sources.filter((source) => !knownSourceIds.has(source.id));
-    if (sources.length === 0) {
-      const summary = "No new sources are available for knowledge refresh.";
-      await this.repository.commit(initial.revision, (current) => ({
-        ...current,
-        operations: current.operations.map((item) => item.id === operationId
-          ? updateOperation(item, { status: "needs_input", question: "請先加入至少一個來源，再重新整理知識。", result_summary: summary })
-          : item),
-      }));
-      return { chunks: [], facts: [], status: "needs_input", summary };
-    }
-
-    const chunks: KnowledgeChunk[] = [];
-    const facts: FactRecord[] = [];
-    const existingFactKeys = new Set(initial.facts.map((fact) => factKey(fact)));
-    const batchKeys = new Map<string, number>();
-    for (const source of sources) {
-      splitIntoChunks(source.canonical_text).forEach((text, ordinal) => {
-        chunks.push({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), created_at: now() });
-      });
-      for (const statement of sentenceCandidates(source.canonical_text)) {
-        const candidate = factFromSentence(source, statement, actor);
-        const key = factKey(candidate);
-        const batchIndex = batchKeys.get(key);
-        if (batchIndex !== undefined && facts[batchIndex] !== undefined) {
-          facts[batchIndex] = mergeFactEvidence(facts[batchIndex], candidate);
-          continue;
-        }
-        if (existingFactKeys.has(key)) continue;
-        existingFactKeys.add(key);
-        batchKeys.set(key, facts.length);
-        facts.push(candidate);
+    const summary = "Extracted 0 knowledge chunks and 0 structured fact candidates.";
+    let needsInput = false;
+    let committedSummary = summary;
+    let committedChunks: string[] = [];
+    let committedFacts: string[] = [];
+    await this.repository.commit(initial.revision, (current) => {
+      const currentKnownSourceIds = new Set(current.knowledge_chunks.map((chunk) => chunk.source_id));
+      const currentSources = current.sources.filter((source) => !currentKnownSourceIds.has(source.id));
+      if (currentSources.length === 0) {
+        needsInput = true;
+        committedSummary = "No new sources are available for knowledge refresh.";
+        return {
+          ...current,
+          operations: current.operations.map((item) => item.id === operationId
+            ? updateOperation(item, { status: "needs_input", question: "請先加入至少一個來源，再重新整理知識。", result_summary: committedSummary })
+            : item),
+        };
       }
-    }
-
-    const summary = `Extracted ${chunks.length} knowledge chunks and ${facts.length} structured fact candidates.`;
-    const state = await this.repository.read();
-    await this.repository.commit(state.revision, (current) => ({
-      ...current,
-      ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
-      knowledge_chunks: [...current.knowledge_chunks, ...chunks],
-      facts: [...current.facts, ...facts],
-      operations: current.operations.map((item) => item.id === operationId
-        ? updateOperation(item, {
-          status: "completed",
-          progress: [
-            ...item.progress,
-            ...chunks.map((chunk) => ({ item_id: chunk.id, status: "completed" as const, message: "Knowledge chunk created.", source_id: chunk.source_id })),
-            ...facts.map((fact) => ({ item_id: fact.id, status: "completed" as const, message: "Structured fact candidate created." })),
-          ],
-          result_summary: summary,
-        })
-        : item),
-      audit: [...current.audit, {
-        id: internalId("audit"),
-        operation_id: operationId,
-        event: "knowledge.refreshed",
-        actor,
-        occurred_at: now(),
-        project_revision: current.revision + 1,
-        details: { source_ids: sources.map((source) => source.id), chunk_count: chunks.length, fact_count: facts.length, structured: true },
-      }],
-    }));
-    return { chunks: chunks.map((chunk) => chunk.id), facts: facts.map((fact) => fact.id), status: "completed", summary };
+      const chunks: KnowledgeChunk[] = [];
+      const facts: FactRecord[] = [];
+      const existingFactKeys = new Set(current.facts.map((fact) => factKey(fact)));
+      const batchKeys = new Map<string, number>();
+      for (const source of currentSources) {
+        splitIntoChunks(source.canonical_text).forEach((text, ordinal) => {
+          chunks.push({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), created_at: now() });
+        });
+        for (const statement of sentenceCandidates(source.canonical_text)) {
+          const candidate = factFromSentence(source, statement, actor);
+          const key = factKey(candidate);
+          const batchIndex = batchKeys.get(key);
+          if (batchIndex !== undefined && facts[batchIndex] !== undefined) {
+            facts[batchIndex] = mergeFactEvidence(facts[batchIndex], candidate);
+            continue;
+          }
+          if (existingFactKeys.has(key)) continue;
+          existingFactKeys.add(key);
+          batchKeys.set(key, facts.length);
+          facts.push(candidate);
+        }
+      }
+      const batchSummary = `Extracted ${chunks.length} knowledge chunks and ${facts.length} structured fact candidates.`;
+      committedSummary = batchSummary;
+      committedChunks = chunks.map((chunk) => chunk.id);
+      committedFacts = facts.map((fact) => fact.id);
+      return {
+        ...current,
+        ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
+        knowledge_chunks: [...current.knowledge_chunks, ...chunks],
+        facts: [...current.facts, ...facts],
+        operations: current.operations.map((item) => item.id === operationId
+          ? updateOperation(item, {
+            status: "completed",
+            progress: [
+              ...item.progress,
+              ...chunks.map((chunk) => ({ item_id: chunk.id, status: "completed" as const, message: "Knowledge chunk created.", source_id: chunk.source_id })),
+              ...facts.map((fact) => ({ item_id: fact.id, status: "completed" as const, message: "Structured fact candidate created." })),
+            ],
+            result_summary: batchSummary,
+          })
+          : item),
+        audit: [...current.audit, {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "knowledge.refreshed",
+          actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: { source_ids: currentSources.map((source) => source.id), chunk_count: chunks.length, fact_count: facts.length, structured: true },
+        }],
+      };
+    });
+    return { chunks: needsInput ? [] : committedChunks, facts: needsInput ? [] : committedFacts, status: needsInput ? "needs_input" : "completed", summary: committedSummary };
   }
 
   async applyCuration(operationId: string, claims: FactClaim[], actor: string, auditActor = actor): Promise<KnowledgeExecutionResult> {

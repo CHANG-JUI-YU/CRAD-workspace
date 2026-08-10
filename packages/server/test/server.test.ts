@@ -92,7 +92,8 @@ describe("runtime-facing server contract", () => {
       const unknownMethod = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "nope" }) });
       expect(JSON.stringify(await unknownMethod.json())).toContain("method not found");
       const badJson = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "not-json" });
-      expect(badJson.status).toBe(500);
+      expect(badJson.status).toBe(200);
+      expect(JSON.stringify(await badJson.json())).toContain("-32603");
       const invalidUtf8 = Buffer.from([0x7b, 0x22, 0x61, 0x6e, 0x73, 0x77, 0x65, 0x72, 0x22, 0x3a, 0x22, 0xc3, 0x28, 0x22, 0x7d]);
       const invalidEncoding = await fetch(`${base}/workspace/interview/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: invalidUtf8 });
       expect(invalidEncoding.status).toBe(400);
@@ -174,6 +175,60 @@ describe("runtime-facing server contract", () => {
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects malformed JSON and oversized bodies as client errors", async () => {
+    const server = createWorkspaceServer({ runtime: new WorkspaceRuntime(new MemoryProjectRepository("demo")), actor: "test" });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("server did not bind");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const malformed = await fetch(`${base}/workspace/request`, { method: "POST", headers: { "content-type": "application/json" }, body: "{not-json" });
+      expect(malformed.status).toBe(400);
+      expect(await malformed.json()).toMatchObject({ error: "Request body is not valid JSON", code: "REQUEST_INVALID_JSON" });
+      const oversized = await fetch(`${base}/workspace/request`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: "x".repeat(11 * 1024 * 1024) }) });
+      expect(oversized.status).toBe(400);
+      expect(await oversized.json()).toMatchObject({ error: "Request body exceeds the 10 MiB limit", code: "REQUEST_TOO_LARGE" });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  });
+
+  it("ignores attachments whose base64 payload is not strict base64", async () => {
+    const server = createWorkspaceServer({ runtime: new WorkspaceRuntime(new MemoryProjectRepository("demo")), actor: "test" });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("server did not bind");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const response = await fetch(`${base}/workspace/request`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: "status", attachments: [{ name: "bad", content_base64: "not-base64!" }, { name: "empty", content_base64: "" }] }) });
+      expect(response.status).toBe(200);
+      expect((await response.json() as { status: string }).status).toBe("completed");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  });
+
+  it("requires the bearer token when authentication is enabled", async () => {
+    const server = createWorkspaceServer({ runtime: new WorkspaceRuntime(new MemoryProjectRepository("demo")), actor: "test", authToken: "secret-token" });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("server did not bind");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const denied = await fetch(`${base}/workspace/status`);
+      expect(denied.status).toBe(401);
+      expect(await denied.json()).toMatchObject({ error: "UNAUTHORIZED" });
+      const wrong = await fetch(`${base}/workspace/status`, { headers: { authorization: "Bearer wrong" } });
+      expect(wrong.status).toBe(401);
+      const accepted = await fetch(`${base}/workspace/status`, { headers: { authorization: "Bearer secret-token" } });
+      expect(accepted.status).toBe(200);
+      const mcpAccepted = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer secret-token" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "workspace_status", arguments: {} } }) });
+      expect(mcpAccepted.status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
   });
 });
