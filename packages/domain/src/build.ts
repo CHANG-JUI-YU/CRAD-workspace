@@ -1,5 +1,6 @@
 import {
   canonicalJson,
+  contentHash,
   CoreError,
   createQualityPolicySnapshot,
   internalId,
@@ -126,6 +127,10 @@ export class BuildService {
     const artifactIds = latest.map((artifact) => artifact.id);
     const canonicalIr = compiled.json;
     const hash = compiled.content_hash;
+    const jsonBlobRef = { hash, size: Buffer.byteLength(canonicalIr, "utf8") };
+    const pngBlobRef = { hash: contentHash(compiled.png), size: compiled.png.byteLength };
+    await this.repository.writeBlob(jsonBlobRef.hash, Buffer.from(canonicalIr, "utf8"));
+    await this.repository.writeBlob(pngBlobRef.hash, compiled.png);
     const diagnostics = compiled.diagnostics.map((item) => `${item.code}: ${item.message}`);
     const errorDiagnostics = compiled.diagnostics.filter((item) => item.severity === "error");
     const qualityPolicy = createQualityPolicySnapshot(initial.quality_profile, actor, now());
@@ -135,7 +140,7 @@ export class BuildService {
       operation_id: operationId,
       status: errorDiagnostics.length > 0 ? "failed" : (isPublish ? "built" : "previewed"),
       artifact_ids: artifactIds,
-      canonical_ir: canonicalIr,
+      canonical_ir_ref: jsonBlobRef,
       content_hash: hash,
       diagnostics,
       created_at: now(),
@@ -170,9 +175,9 @@ export class BuildService {
       id: internalId("publish"),
       operation_id: operationId,
       artifact_ids: artifactIds,
-      content: canonicalIr,
+      content_ref: jsonBlobRef,
       content_hash: hash,
-      png_base64: compiled.png.toString("base64"),
+      png_ref: pngBlobRef,
       export_json_path: publishedCardExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection),
       export_png_path: publishedCardPngExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection),
       created_at: now(),

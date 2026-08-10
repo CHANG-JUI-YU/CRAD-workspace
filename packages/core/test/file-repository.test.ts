@@ -229,4 +229,34 @@ describe("file project repository", () => {
     await expect(readFile(path.join(root, "demo", ".workspace", "artifacts", "review", "report.md"), "utf8")).rejects.toThrow();
     expect(await readFile(path.join(root, "demo", "exports", "Demo-珠璣角色卡.json"), "utf8")).toContain("published");
   });
+
+  it("stores build and publish payloads in content-addressed blobs without inflating state", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-blobs-"));
+    temporaryRoots.push(root);
+    const repository = new FileProjectRepository(root, "demo", { layout: "project", materialize: true });
+    const payload = JSON.stringify({ spec: "chara_card_v3", spec_version: "1.1", big: "x".repeat(64 * 1024) });
+    const payloadHash = contentHash(payload);
+    const pngPayload = Buffer.from("fake png bytes");
+    const pngHash = contentHash(pngPayload);
+    await repository.writeBlob(payloadHash, Buffer.from(payload, "utf8"));
+    await repository.writeBlob(pngHash, pngPayload);
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_name: "Blob",
+      project_slug: "blob",
+      project_status: "ready",
+      builds: [{ id: "build-1", operation_id: "op", status: "built", artifact_ids: [], canonical_ir_ref: { hash: payloadHash, size: payload.length }, content_hash: payloadHash, diagnostics: [], created_at: new Date().toISOString() }],
+      publishes: [{ id: "publish-1", operation_id: "op", artifact_ids: [], content_ref: { hash: payloadHash, size: payload.length }, png_ref: { hash: pngHash, size: pngPayload.byteLength }, content_hash: payloadHash, created_at: new Date().toISOString() }],
+    }));
+
+    const reopened = new FileProjectRepository(root, "demo", { layout: "project", materialize: true });
+    expect(new TextDecoder().decode(await reopened.readBlob(payloadHash))).toBe(payload);
+    expect(await reopened.readBlob(pngHash)).toEqual(pngPayload);
+    expect(await reopened.readBlob("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")).toBeUndefined();
+
+    const stateRaw = await readFile(path.join(root, "demo", ".workspace", "state.json"), "utf8");
+    expect(stateRaw).not.toContain("chara_card_v3");
+    expect(await readFile(path.join(root, "demo", ".workspace", "workflow.json"), "utf8")).not.toContain("chara_card_v3");
+    expect(await readFile(path.join(root, "demo", ".workspace", "blobs", payloadHash), "utf8")).toBe(payload);
+  });
 });

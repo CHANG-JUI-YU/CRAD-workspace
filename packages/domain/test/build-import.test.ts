@@ -36,6 +36,13 @@ function operation(id: string, kind: OperationRecord["kind"]): OperationRecord {
   return { id, kind, request: kind, status: "running", created_at: timestamp, updated_at: timestamp, progress: [] };
 }
 
+async function blobJson(repository: MemoryProjectRepository, hash: string | undefined): Promise<Record<string, unknown>> {
+  if (hash === undefined) return {};
+  const bytes = await repository.readBlob(hash);
+  if (bytes === undefined) return {};
+  return JSON.parse(new TextDecoder("utf-8").decode(bytes)) as Record<string, unknown>;
+}
+
 function artifact(operationId: string, content: string): ArtifactRecord {
   const hash = contentHash(content);
   return { id: "artifact-1", key: "character:yukino", kind: "character", name: "Yukino", content, media_type: "text/markdown", content_hash: hash, revision: hash, status: "draft", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), created_by: "writer", operation_id: operationId };
@@ -110,6 +117,14 @@ describe("build, publish and import", () => {
     const state = await repository.read();
     expect(state.publishes).toHaveLength(1);
     expect(state.publishes[0]?.content_hash).toBe(state.builds[1]?.content_hash);
+    expect(state.publishes[0]?.content).toBeUndefined();
+    expect(state.publishes[0]?.png_base64).toBeUndefined();
+    expect(state.publishes[0]?.content_ref?.hash).toBe(state.publishes[0]?.content_hash);
+    const jsonBlob = await repository.readBlob(state.publishes[0]!.content_ref!.hash);
+    expect(jsonBlob).toBeDefined();
+    expect(JSON.parse(new TextDecoder().decode(jsonBlob)) as { spec?: string }).toMatchObject({ spec: "chara_card_v3" });
+    const pngBlob = await repository.readBlob(state.publishes[0]!.png_ref!.hash);
+    expect(pngBlob).toBeDefined();
     expect(state.project_status).toBe("published");
   });
 
@@ -143,7 +158,9 @@ describe("build, publish and import", () => {
     expect(selected.mode_selection).toBe("zhuji");
     const afterSelection = await repository.read();
     expect(afterSelection.builds).toHaveLength(1);
-    const builtCard = JSON.parse(afterSelection.builds[0]?.canonical_ir ?? "{}") as { data?: { character_book?: { entries?: Array<{ name: string }> } } };
+    expect(afterSelection.builds[0]?.canonical_ir).toBeUndefined();
+    expect(afterSelection.builds[0]?.canonical_ir_ref?.hash).toBe(afterSelection.builds[0]?.content_hash);
+    const builtCard = await blobJson(repository, afterSelection.builds[0]?.canonical_ir_ref?.hash) as { data?: { character_book?: { entries?: Array<{ name: string }> } } };
     expect(builtCard.data?.character_book?.entries?.map((entry) => entry.name)).toEqual(["demo_外觀"]);
     expect(afterSelection.operations.find((item) => item.id === "op-mode-1")?.status).toBe("completed");
 
@@ -283,7 +300,9 @@ describe("build, publish and import", () => {
     expect(result.mode_selection).toBe("zhuji");
     const state = await repository.read();
     expect(state.builds[0]?.artifact_ids).toEqual(["zhuji-appearance"]);
-    expect(state.builds[0]?.canonical_ir).not.toContain("Palette");
+    expect(state.builds[0]?.canonical_ir).toBeUndefined();
+    const zhujiCard = await blobJson(repository, state.builds[0]?.canonical_ir_ref?.hash) as { data?: { character_book?: { entries?: Array<{ name: string }> } } };
+    expect(JSON.stringify(zhujiCard)).not.toContain("Palette");
     expect(state.operations.find((item) => item.id === "op-mixed-zhuji")?.status).toBe("completed");
   });
 
@@ -342,7 +361,7 @@ describe("build, publish and import", () => {
     expect(result.mode_selection).toBe("both");
     const state = await repository.read();
     expect(state.builds[0]?.artifact_ids).toEqual(["palette-basic", "zhuji-appearance"]);
-    const builtCard = JSON.parse(state.builds[0]?.canonical_ir ?? "{}") as { data?: { character_book?: { entries?: Array<{ name: string }> } } };
+    const builtCard = await blobJson(repository, state.builds[0]?.canonical_ir_ref?.hash) as { data?: { character_book?: { entries?: Array<{ name: string }> } } };
     expect(builtCard.data?.character_book?.entries?.map((entry) => entry.name)).toEqual(["demo_基本資訊", "demo_外觀"]);
   });
 

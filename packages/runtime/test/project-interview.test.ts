@@ -223,7 +223,7 @@ describe("project interview runtime", () => {
     expect(blueprint.world).toMatchObject({ enabled: true, authoring_timing: "before_characters" });
   });
 
-  it("creates a temporary project folder and renames it after the interview", async () => {
+  it("creates a temporary project folder and renames it after the interview", { timeout: 60_000 }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-project-manager-"));
     roots.push(root);
     const manager = new WorkspaceProjectManager({

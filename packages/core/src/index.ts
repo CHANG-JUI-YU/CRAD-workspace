@@ -5,6 +5,7 @@ import path from "node:path";
 import { z } from "zod";
 import { createInterviewState, type InterviewFlow, type InterviewState } from "./interview.js";
 import type { AdaptationDecision } from "./authoring-context.js";
+import { FileBlobStore, MemoryBlobStore, type BlobStore } from "./blob-store.js";
 
 export type OperationStatus =
   | "created"
@@ -344,12 +345,19 @@ export interface IssueRecord {
   updated_at: string;
 }
 
+export interface ContentBlobReference {
+  hash: string;
+  size: number;
+}
+
 export interface BuildRecord {
   id: string;
   operation_id: string;
   status: "previewed" | "built" | "failed";
   artifact_ids: string[];
-  canonical_ir: string;
+  /** Deprecated: the compiled card JSON is stored as an immutable blob since V3.11. */
+  canonical_ir?: string;
+  canonical_ir_ref?: ContentBlobReference;
   content_hash: string;
   diagnostics: string[];
   created_at: string;
@@ -360,10 +368,13 @@ export interface PublishRecord {
   id: string;
   operation_id: string;
   artifact_ids: string[];
-  content: string;
+  /** Deprecated: the compiled card JSON is stored as an immutable blob since V3.11. */
+  content?: string;
+  content_ref?: ContentBlobReference;
   content_hash: string;
-  /** PNG bytes are kept with the ledger so materialization can recover them atomically. */
+  /** Deprecated: PNG bytes are stored as an immutable blob since V3.11. */
   png_base64?: string;
+  png_ref?: ContentBlobReference;
   export_json_path?: string;
   export_png_path?: string;
   created_at: string;
@@ -682,12 +693,18 @@ const qualityProfileSchema = z.object({
   override_audit: z.array(qualityOverrideAuditSchema).default([]),
 }).strict();
 
+const blobReferenceSchema = z.object({
+  hash: z.string().regex(/^[a-f0-9]{64}$/u),
+  size: z.number().int().nonnegative(),
+}).strict();
+
 const buildSchema = z.object({
   id: z.string().min(1),
   operation_id: z.string().min(1),
   status: z.enum(["previewed", "built", "failed"]),
   artifact_ids: z.array(z.string().min(1)),
-  canonical_ir: z.string().min(1),
+  canonical_ir: z.string().min(1).optional(),
+  canonical_ir_ref: blobReferenceSchema.optional(),
   content_hash: z.string().regex(/^[a-f0-9]{64}$/u),
   diagnostics: z.array(z.string()),
   created_at: z.string().datetime({ offset: true }),
@@ -733,9 +750,11 @@ const publishSchema = z.object({
   id: z.string().min(1),
   operation_id: z.string().min(1),
   artifact_ids: z.array(z.string().min(1)),
-  content: z.string().min(1),
+  content: z.string().min(1).optional(),
+  content_ref: blobReferenceSchema.optional(),
   content_hash: z.string().regex(/^[a-f0-9]{64}$/u),
   png_base64: z.string().min(1).optional(),
+  png_ref: blobReferenceSchema.optional(),
   export_json_path: z.string().min(1).optional(),
   export_png_path: z.string().min(1).optional(),
   created_at: z.string().datetime({ offset: true }),
@@ -1020,6 +1039,8 @@ export interface ProjectRepository {
   read(): Promise<ProjectState>;
   transaction<T>(expectedRevision: number, work: RepositoryTransactionWork<T>): Promise<RepositoryTransactionCommit<T>>;
   commit(expectedRevision: number, mutate: (state: ProjectState) => ProjectState, writeSet?: RepositoryWriteSet): Promise<ProjectState>;
+  readBlob(hash: string): Promise<Uint8Array | undefined>;
+  writeBlob(hash: string, content: Uint8Array): Promise<void>;
 }
 
 /** A file path relative to the project directory, committed with the state. */
@@ -1173,9 +1194,18 @@ const DEFAULT_LOCK_OPTIONS: Required<RepositoryLockOptions> = {
 export class MemoryProjectRepository implements ProjectRepository {
   private state: ProjectState;
   private queue: Promise<void> = Promise.resolve();
+  private readonly blobs = new MemoryBlobStore();
 
   constructor(projectId: string, initial?: ProjectState) {
     this.state = validateState(cloneState(initial ?? createProjectState(projectId)));
+  }
+
+  async readBlob(hash: string): Promise<Uint8Array | undefined> {
+    return this.blobs.get(hash);
+  }
+
+  async writeBlob(hash: string, content: Uint8Array): Promise<void> {
+    await this.blobs.put(hash, content);
   }
 
   async read(): Promise<ProjectState> {
@@ -1218,6 +1248,7 @@ export class FileProjectRepository implements ProjectRepository {
   private readonly lockOptions: Required<RepositoryLockOptions>;
   private failureInjection: RepositoryFailureInjection | undefined;
   private activeLock: LockLeaseContext | undefined;
+  private blobs: BlobStore;
 
   constructor(projectRoot: string, projectId: string, options: FileProjectRepositoryOptions = {}) {
     this.projectRoot = projectRoot;
@@ -1228,6 +1259,7 @@ export class FileProjectRepository implements ProjectRepository {
     this.failureInjection = options.failure_injection;
     this.stateFile = this.stateFileFor(projectId);
     this.lockFile = this.lockFileFor(projectId);
+    this.blobs = new FileBlobStore(path.join(this.projectRoot, projectId, ".workspace", "blobs"));
   }
 
   get projectId(): string {
@@ -1264,9 +1296,18 @@ export class FileProjectRepository implements ProjectRepository {
       this.projectIdValue = normalized;
       this.stateFile = this.stateFileFor(normalized);
       this.lockFile = this.lockFileFor(normalized);
+      this.blobs = new FileBlobStore(path.join(this.projectRoot, normalized, ".workspace", "blobs"));
     });
     this.queue = run.then(() => undefined, () => undefined);
     await run;
+  }
+
+  async readBlob(hash: string): Promise<Uint8Array | undefined> {
+    return this.blobs.get(hash);
+  }
+
+  async writeBlob(hash: string, content: Uint8Array): Promise<void> {
+    await this.blobs.put(hash, content);
   }
 
   private stateFileFor(projectId: string): string {
@@ -1883,11 +1924,13 @@ export class FileProjectRepository implements ProjectRepository {
     }
     const latestPublish = state.publishes.at(-1);
     if (latestPublish !== undefined) {
-      const publishedContent = latestPublish.content.endsWith("\n") ? latestPublish.content : `${latestPublish.content}\n`;
-      files.push({
-        path: latestPublish.export_json_path ?? publishedCardExportPath(state.project_name, state.project_id, state.artifacts),
-        content: publishedContent,
-      });
+      if (latestPublish.content !== undefined) {
+        const publishedContent = latestPublish.content.endsWith("\n") ? latestPublish.content : `${latestPublish.content}\n`;
+        files.push({
+          path: latestPublish.export_json_path ?? publishedCardExportPath(state.project_name, state.project_id, state.artifacts),
+          content: publishedContent,
+        });
+      }
       if (latestPublish.png_base64 !== undefined) {
         files.push({
           path: latestPublish.export_png_path ?? publishedCardPngExportPath(state.project_name, state.project_id, state.artifacts),
@@ -2251,7 +2294,10 @@ async function acquireLockFile(
       await syncDirectory(path.dirname(lockFile));
       return;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const lockError = error as NodeJS.ErrnoException;
+      // Windows can transiently raise EPERM when a lock file is being
+      // released or scanned; treat it like an existing file and retry.
+      if (lockError.code !== "EEXIST" && lockError.code !== "EPERM") throw error;
       let current: LockRecord | undefined;
       try {
         current = await readLockRecord(lockFile);
