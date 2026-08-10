@@ -78,12 +78,31 @@ export function parsePngChunks(input: Uint8Array, options: { maxFileBytes?: numb
   return chunks;
 }
 
+function isLatin1KeywordByte(byte: number): boolean {
+  return (byte >= 0x20 && byte <= 0x7e) || (byte >= 0xa1 && byte <= 0xff);
+}
+
+function validateTextKeyword(keyword: Uint8Array): void {
+  if (keyword.length < 1 || keyword.length > 79 || !keyword.every(isLatin1KeywordByte)) {
+    throw new PngFormatError("PNG_TEXT_KEYWORD_INVALID", "PNG tEXt keyword is invalid");
+  }
+  if (keyword[0] === 0x20 || keyword[keyword.length - 1] === 0x20) {
+    throw new PngFormatError("PNG_TEXT_KEYWORD_INVALID", "PNG tEXt keyword cannot start or end with a space");
+  }
+  for (let index = 1; index < keyword.length; index += 1) {
+    if (keyword[index] === 0x20 && keyword[index - 1] === 0x20) {
+      throw new PngFormatError("PNG_TEXT_KEYWORD_INVALID", "PNG tEXt keyword cannot contain consecutive spaces");
+    }
+  }
+}
+
 function encodeTextChunk(keyword: string, text: string): Buffer {
-  /* c8 ignore next -- callers provide fixed ASCII metadata keywords. */
-  if (!/^[\x20-\x7e]{1,79}$/u.test(keyword)) throw new PngFormatError("PNG_TEXT_KEYWORD_INVALID", "PNG tEXt keyword is invalid");
+  if ([...keyword].some((character) => (character.codePointAt(0) ?? 0) > 0xff)) throw new PngFormatError("PNG_TEXT_KEYWORD_INVALID", "PNG tEXt keyword is not Latin-1");
+  const keywordBuffer = Buffer.from(keyword, "latin1");
+  validateTextKeyword(keywordBuffer);
   /* c8 ignore next -- card metadata is base64, therefore always ASCII. */
   if ([...text].some((character) => (character.codePointAt(0) ?? 0) > 0x7f)) throw new PngFormatError("PNG_TEXT_NOT_ASCII", "PNG tEXt payload must be ASCII");
-  return Buffer.concat([Buffer.from(keyword, "ascii"), Buffer.from([0]), Buffer.from(text, "ascii")]);
+  return Buffer.concat([keywordBuffer, Buffer.from([0]), Buffer.from(text, "ascii")]);
 }
 
 function decodeTextChunk(data: Uint8Array): { keyword: string; text: string } {
@@ -92,18 +111,29 @@ function decodeTextChunk(data: Uint8Array): { keyword: string; text: string } {
   if (separator <= 0 || separator > 79) throw new PngFormatError("PNG_TEXT_INVALID", "PNG tEXt keyword separator is invalid");
   const keyword = buffer.subarray(0, separator);
   const text = buffer.subarray(separator + 1);
-  if (keyword.some((byte) => byte < 0x20 || byte > 0x7e) || text.some((byte) => byte > 0x7f)) throw new PngFormatError("PNG_TEXT_NOT_ASCII", "PNG tEXt is not ASCII");
-  return { keyword: keyword.toString("ascii"), text: text.toString("ascii") };
+  validateTextKeyword(keyword);
+  return { keyword: keyword.toString("latin1"), text: text.toString("latin1") };
 }
 
 function createBasePng(): Buffer {
+  const width = 512;
+  const height = 768;
   const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(1, 0);
-  ihdr.writeUInt32BE(1, 4);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
   ihdr[8] = 8;
   ihdr[9] = 6;
-  const scanline = Buffer.from([0, 0, 0, 0, 0]);
-  return Buffer.concat([pngSignature, encodePngChunk("IHDR", ihdr), encodePngChunk("IDAT", deflateSync(scanline)), encodePngChunk("IEND", Buffer.alloc(0))]);
+  const scanline = Buffer.alloc(1 + width * 4);
+  scanline[0] = 0;
+  for (let offset = 1; offset < scanline.length; offset += 4) {
+    scanline[offset] = 0xd8;
+    scanline[offset + 1] = 0xd8;
+    scanline[offset + 2] = 0xd8;
+    scanline[offset + 3] = 0xff;
+  }
+  const imageData = Buffer.alloc(scanline.length * height);
+  for (let row = 0; row < height; row += 1) scanline.copy(imageData, row * scanline.length);
+  return Buffer.concat([pngSignature, encodePngChunk("IHDR", ihdr), encodePngChunk("IDAT", deflateSync(imageData)), encodePngChunk("IEND", Buffer.alloc(0))]);
 }
 
 function base64Json(value: unknown): string {
@@ -122,8 +152,10 @@ export interface ReadPngMetadataResult {
 
 function decodeBase64Json(text: string): unknown {
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(text)) throw new PngFormatError("PNG_CARD_BASE64_INVALID", "Card metadata is not valid Base64");
+  const decoded = Buffer.from(text, "base64");
+  if (decoded.toString("base64") !== text) throw new PngFormatError("PNG_CARD_BASE64_INVALID", "Card metadata is not canonical Base64");
   try {
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(text, "base64"))) as unknown;
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(decoded)) as unknown;
   } catch {
     throw new PngFormatError("PNG_CARD_JSON_INVALID", "Card metadata is not valid UTF-8 JSON");
   }
