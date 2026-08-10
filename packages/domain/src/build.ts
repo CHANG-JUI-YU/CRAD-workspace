@@ -79,7 +79,8 @@ export class BuildService {
         if (selection === "both" || selection !== manifestMode) return false;
         return availableModes[manifestMode];
       }
-      return availableModes[selection === "both" ? "zhuji" : selection];
+      if (selection === "both") return availableModes.zhuji && availableModes.palette;
+      return availableModes[selection];
     };
     const modeSelection = options.mode_selection ?? (manifestMode !== undefined && availableModes[manifestMode] ? manifestMode : undefined);
     if (availableModes.zhuji && availableModes.palette && modeSelection === undefined) {
@@ -125,19 +126,46 @@ export class BuildService {
     const artifactIds = latest.map((artifact) => artifact.id);
     const canonicalIr = compiled.json;
     const hash = compiled.content_hash;
+    const diagnostics = compiled.diagnostics.map((item) => `${item.code}: ${item.message}`);
+    const errorDiagnostics = compiled.diagnostics.filter((item) => item.severity === "error");
     const qualityPolicy = createQualityPolicySnapshot(initial.quality_profile, actor, now());
     const isPublish = /publish|release|發布|發佈|上線/iu.test(request);
     const build: BuildRecord = {
       id: internalId("build"),
       operation_id: operationId,
-      status: isPublish ? "built" : "previewed",
+      status: errorDiagnostics.length > 0 ? "failed" : (isPublish ? "built" : "previewed"),
       artifact_ids: artifactIds,
       canonical_ir: canonicalIr,
       content_hash: hash,
-      diagnostics: [],
+      diagnostics,
       created_at: now(),
       quality_policy_snapshot: qualityPolicy,
     };
+    if (errorDiagnostics.length > 0) {
+      const summary = `Build failed: ${diagnostics.join(" ")}`;
+      await this.repository.commit(initial.revision, (current) => ({
+        ...current,
+        builds: [...current.builds, build],
+        operations: current.operations.map((item) => item.id === operationId
+          ? updateOperation(item, {
+              status: "blocked",
+              question: diagnostics.join(" "),
+              result_summary: summary,
+              progress: [...item.progress, { item_id: build.id, status: "blocked", message: "compiler diagnostics blocked build" }],
+            })
+          : item),
+        audit: [...current.audit, {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "build.failed",
+          actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: { build_id: build.id, artifact_ids: artifactIds, content_hash: hash, codes: errorDiagnostics.map((item) => item.code) },
+        }],
+      }));
+      return { build_id: build.id, ...(modeSelection === undefined ? {} : { mode_selection: modeSelection }), status: "blocked", summary };
+    }
     const publish: PublishRecord | undefined = isPublish ? {
       id: internalId("publish"),
       operation_id: operationId,
@@ -145,13 +173,14 @@ export class BuildService {
       content: canonicalIr,
       content_hash: hash,
       png_base64: compiled.png.toString("base64"),
-      export_json_path: publishedCardExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts),
-      export_png_path: publishedCardPngExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts),
+      export_json_path: publishedCardExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection),
+      export_png_path: publishedCardPngExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection),
       created_at: now(),
     } : undefined;
-    const summary = isPublish ? `發布完成，輸出 hash ${hash.slice(0, 12)}。` : `Preview 完成，輸出 hash ${hash.slice(0, 12)}。`;
-    const exportJsonPath = publishedCardExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts);
-    const exportPngPath = publishedCardPngExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts);
+    const warningCount = compiled.diagnostics.filter((item) => item.severity === "warning").length;
+    const summary = `${isPublish ? "發布完成" : "Preview 完成"}，輸出 hash ${hash.slice(0, 12)}。${warningCount > 0 ? `（含 ${warningCount} 個警告）` : ""}`;
+    const exportJsonPath = publishedCardExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection);
+    const exportPngPath = publishedCardPngExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection);
     const previousExportPaths = initial.publishes.flatMap((item) => [
       item.export_json_path,
       item.export_png_path,
@@ -185,7 +214,13 @@ export class BuildService {
         actor,
         occurred_at: now(),
         project_revision: current.revision + 1,
-        details: { build_id: build.id, publish_id: publish?.id, artifact_ids: artifactIds, content_hash: hash },
+        details: {
+          build_id: build.id,
+          publish_id: publish?.id,
+          artifact_ids: artifactIds,
+          content_hash: hash,
+          ...(compiled.diagnostics.length > 0 ? { diagnostics: compiled.diagnostics.map((item) => `${item.code}: ${item.message}`) } : {}),
+        },
       }],
     }), writeSet);
     return { build_id: build.id, ...(publish === undefined ? {} : { publish_id: publish.id }), ...(modeSelection === undefined ? {} : { mode_selection: modeSelection }), status: "completed", summary };
