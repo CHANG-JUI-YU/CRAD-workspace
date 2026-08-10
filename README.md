@@ -183,6 +183,17 @@ HTTP/MCP server 預設在 `http://127.0.0.1:8787`：
 - `POST /workspace/zhuji`：提交一個符合珠璣 Schema 的模組 proposal
 - `POST /mcp`：標準 JSON-RPC tools/list/tools/call；包含 `workspace_agents`、`workspace_zhuji_context`、`workspace_zhuji_submit`
 
+### Dashboard 使用
+
+啟動 HTTP server 後開啟 `http://127.0.0.1:8787/`，即可使用本機 Dashboard 工作台。
+頁面會讀取既有的 projects、status、agents 與 interview REST endpoint；自然語言
+request 只需要描述想完成的工作，訪談有選項時可直接點選 canonical value，也可輸入文字。
+
+Dashboard 會在每次操作期間顯示 loading 並暫停重複操作；失敗時會顯示 HTTP status、錯誤
+代碼/訊息與下一步，最近回應區則可展開原始 JSON。沒有 project manager 或沒有可切換專案
+時，仍可使用自然語言 request、狀態與 Agent 功能。Publish readiness、寫入型 review/fact
+流程、取消/重試 operation 與 Tavern verifier 目前只列為後續提供，不會在畫面上偽裝成可用。
+
 ## 設計邊界
 
 柔性只存在 runtime 邊界；進入 core 後仍會嚴格驗證 schema、身份、CAS、
