@@ -1178,6 +1178,120 @@ describe("natural language runtime boundary", () => {
     expect(typeof palette.ok).toBe("boolean");
     expect(palette.diagnostics.map((item) => item.code)).not.toContain("MODE_SELECTION_REQUIRED");
   });
+
+  describe("console cancel and dashboard contracts", () => {
+    function runningOperation(id: string, status: "running" | "needs_input" | "completed" = "running") {
+      const now = new Date().toISOString();
+      return { id, kind: "authoring" as const, request: `Draft note: Create character: ${id}.`, actor: "writer", status, created_at: now, updated_at: now, progress: [] };
+    }
+
+    it("rejects cancelling a missing operation", async () => {
+      const runtime = new WorkspaceRuntime(new MemoryProjectRepository("cancel-missing"));
+      await expect(runtime.cancelOperation("nope")).rejects.toMatchObject({ code: "OPERATION_NOT_FOUND" });
+    });
+
+    it("rejects cancelling a terminal operation without changing it", async () => {
+      const repository = new MemoryProjectRepository("cancel-terminal");
+      await repository.commit(0, (current) => ({ ...current, operations: [...current.operations, runningOperation("op-done", "completed")] }));
+      const runtime = new WorkspaceRuntime(repository);
+      await expect(runtime.cancelOperation("op-done")).rejects.toMatchObject({ code: "OPERATION_NOT_CANCELLABLE" });
+      const state = await repository.read();
+      expect(state.operations.find((item) => item.id === "op-done")?.status).toBe("completed");
+    });
+
+    it("cancels a running operation with an audited failed transition", async () => {
+      const repository = new MemoryProjectRepository("cancel-running");
+      const now = new Date().toISOString();
+      await repository.commit(0, (current) => ({
+        ...current,
+        operations: [...current.operations, { ...runningOperation("op-busy"), lease_owner: "worker", lease_token: "lease-1", lease_expires_at: new Date(Date.now() + 60_000).toISOString() }],
+      }));
+      const runtime = new WorkspaceRuntime(repository);
+      const result = await runtime.cancelOperation("op-busy", "console");
+      expect(result).toEqual({ operation_id: "op-busy", status: "cancelled", summary: "Operation cancelled." });
+      const state = await repository.read();
+      const after = state.operations.find((item) => item.id === "op-busy");
+      expect(after?.status).toBe("failed");
+      expect(after?.result_summary).toBe("The operation was cancelled from the workspace console");
+      expect(after?.lease_owner).toBeUndefined();
+      expect(after?.lease_token).toBeUndefined();
+      expect(state.audit.some((entry) => entry.operation_id === "op-busy" && entry.event === "operation.failed" && entry.details.code === "OPERATION_CANCELLED" && entry.details.recoverable === true)).toBe(true);
+    });
+
+    it("cancels a needs_input operation", async () => {
+      const repository = new MemoryProjectRepository("cancel-needs-input");
+      await repository.commit(0, (current) => ({ ...current, operations: [...current.operations, runningOperation("op-waiting", "needs_input")] }));
+      const runtime = new WorkspaceRuntime(repository);
+      await expect(runtime.cancelOperation("op-waiting")).resolves.toMatchObject({ status: "cancelled" });
+    });
+
+    it("exposes the pending precheck checks and derived issue views in the dashboard snapshot", async () => {
+      const repository = new MemoryProjectRepository("dashboard-contracts");
+      const now = new Date().toISOString();
+      const candidate = JSON.stringify({ kind: "blueprint", project_id: "dashboard-contracts", characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "zhuji" }] });
+      const precheck: BlueprintPrecheckRecord = {
+        id: "precheck-1",
+        schema_version: 1,
+        project_id: "dashboard-contracts",
+        operation_id: "op-interview",
+        collaboration_mode: "assisted",
+        candidate_blueprint: JSON.parse(candidate) as Record<string, unknown>,
+        candidate_blueprint_revision: contentHash(candidate),
+        checks: [
+          { subject_id: "demo", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "user_confirmed", user_answer: "pending confirmation" },
+          { subject_id: "demo", dimension: "background", uncertainty: "high", impact: "low", basis: "safe_extension", action: "preserve_explicit" },
+        ],
+        status: "needs_input",
+        created_at: now,
+        created_by: "director",
+      };
+      await repository.commit(0, (current) => ({
+        ...current,
+        blueprint_prechecks: [precheck],
+        issues: [
+          {
+            id: "issue-1",
+            artifact_id: "artifact-1",
+            review_id: "review-1",
+            code: "PLACEHOLDER_REMAINS",
+            message: "unfinished",
+            severity: "error" as const,
+            effective_severity: "error" as const,
+            status: "open" as const,
+            overridable: true,
+            created_at: now,
+            updated_at: now,
+          },
+          {
+            id: "issue-2",
+            artifact_id: "artifact-1",
+            review_id: "review-1",
+            code: "CONTENT_TOO_SHORT",
+            message: "too short",
+            severity: "warning" as const,
+            effective_severity: "warning" as const,
+            status: "ignored" as const,
+            overridable: true,
+            override: { by: "director", reason: "reviewed", timestamp: now, against_effective_severity: "warning", severity: "info" },
+            created_at: now,
+            updated_at: now,
+          },
+        ],
+      }));
+      const runtime = new WorkspaceRuntime(repository);
+      const snapshot = await runtime.dashboardSnapshot();
+      expect(snapshot.prechecks).toHaveLength(1);
+      expect(snapshot.prechecks[0]?.checks).toEqual([
+        expect.objectContaining({ subject_id: "demo", dimension: "character_core", action: "user_confirmed" }),
+        expect.objectContaining({ subject_id: "demo", dimension: "background", action: "preserve_explicit" }),
+      ]);
+      const open = snapshot.issues.find((item) => item.id === "issue-1");
+      expect(open).toMatchObject({ overridable: true });
+      expect(open?.override).toBeUndefined();
+      const ignored = snapshot.issues.find((item) => item.id === "issue-2");
+      expect(ignored).toMatchObject({ overridable: true, override: { severity: "info", against_effective_severity: "warning", reason: "reviewed", by: "director" } });
+    });
+  });
 });
 
 function makeTestPng(width: number, height: number, filter = 0): Buffer {

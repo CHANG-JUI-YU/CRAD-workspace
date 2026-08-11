@@ -66,7 +66,8 @@ describe("local Dashboard", () => {
       "專案修復",
       "Tavern 相容性",
       "逐項 issue 操作",
-      "標記確認",
+      "逐 code 覆寫",
+      "確認沿用",
       "角色圖像",
     ]) {
       expect(html).toContain(label);
@@ -120,12 +121,58 @@ describe("local Dashboard", () => {
       expect(quality.status).toBe("completed");
       const dataAfter = await (await fetch(`${base}/workspace/dashboard/data`)).json();
       expect(dataAfter.quality?.level).toBe("strict");
-      const failed = await (await fetch(`${base}/workspace/operation/fail`, {
+      const missing = await fetch(`${base}/workspace/operation/fail`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ operation_id: "missing-operation" }),
+      });
+      expect(missing.status).toBe(400);
+      expect((await missing.json()).error).toBe("OPERATION_NOT_FOUND");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  });
+
+  it("cancels only active operations through the console fail endpoint", async () => {
+    const repository = new MemoryProjectRepository("dashboard-cancel");
+    const now = new Date().toISOString();
+    await repository.commit(0, (current) => ({
+      ...current,
+      operations: [
+        ...current.operations,
+        { id: "op-running", kind: "authoring", request: "Draft note: Create character: Cancel. Personality: calm.", actor: "dashboard-test", status: "running", created_at: now, updated_at: now, progress: [] },
+        { id: "op-done", kind: "authoring", request: "Draft note: Create character: Done.", actor: "dashboard-test", status: "completed", created_at: now, updated_at: now, progress: [] },
+      ],
+    }));
+    const server = createWorkspaceServer({
+      runtime: new WorkspaceRuntime(repository),
+      actor: "dashboard-test",
+      autoStartWorker: false,
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("server did not bind");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const cancelled = await (await fetch(`${base}/workspace/operation/fail`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operation_id: "op-running" }),
       })).json();
-      expect(failed.status).toBe("cancelled");
+      expect(cancelled).toMatchObject({ operation_id: "op-running", status: "cancelled" });
+      const state = await repository.read();
+      const after = state.operations.find((item) => item.id === "op-running");
+      expect(after?.status).toBe("failed");
+      expect(state.audit.some((entry) => entry.operation_id === "op-running" && entry.event === "operation.failed" && entry.details.code === "OPERATION_CANCELLED")).toBe(true);
+      const terminal = await fetch(`${base}/workspace/operation/fail`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operation_id: "op-done" }),
+      });
+      expect(terminal.status).toBe(400);
+      expect((await terminal.json()).error).toBe("OPERATION_NOT_CANCELLABLE");
+      const stateAfter = await repository.read();
+      expect(stateAfter.operations.find((item) => item.id === "op-done")?.status).toBe("completed");
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }

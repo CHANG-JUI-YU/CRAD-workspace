@@ -385,6 +385,20 @@ export function dashboard(): string {
       <div class="form-actions">
         <button id="apply-quality" class="primary" type="button">套用品質設定</button>
       </div>
+      <div class="panel-heading">
+        <h3>逐 code 覆寫</h3>
+      </div>
+      <div class="form-actions">
+        <input id="quality-code" type="text" placeholder="issue code（如 PLACEHOLDER_REMAINS）" aria-label="issue code">
+        <select id="quality-severity" aria-label="覆寫嚴重度">
+          <option value="info">info</option>
+          <option value="warning">warning</option>
+          <option value="error">error</option>
+          <option value="critical">critical</option>
+        </select>
+        <button id="add-quality-override" type="button">新增覆寫</button>
+      </div>
+      <div id="quality-override-list" class="override-list"></div>
       <div id="quality-message" class="panel-message" aria-live="polite">尚未取得品質設定。</div>
       <div class="panel-heading">
         <h3>逐項 issue 操作</h3>
@@ -1204,48 +1218,99 @@ export function dashboard(): string {
           byId("prechecks-message").textContent = "目前沒有 Blueprint 預檢記錄。";
           return;
         }
-        byId("prechecks-message").textContent = "共 " + prechecks.length + " 筆預檢記錄。";
-        var latest = prechecks[prechecks.length - 1];
-        var checks = Array.isArray(latest.checks) ? latest.checks : [];
-        if (checks.length === 0) {
-          target.textContent = "最新預檢沒有檢查項目。";
-          return;
+        var pending = null;
+        for (var i = prechecks.length - 1; i >= 0; i -= 1) {
+          if (isRecord(prechecks[i]) && prechecks[i].status === "needs_input") {
+            pending = prechecks[i];
+            break;
+          }
         }
-        var rows = [];
-        var seen = {};
-        for (var i = 0; i < checks.length; i += 1) {
-          var check = checks[i];
-          if (!isRecord(check)) continue;
-          var subject = firstString(check, ["subject_id", "subject"]) || "?";
-          var dimension = firstString(check, ["dimension"]) || "?";
-          var uncertainty = firstString(check, ["uncertainty"]) || "?";
-          var impact = firstString(check, ["impact"]) || "?";
-          var basis = firstString(check, ["basis"]) || "?";
-          var action = firstString(check, ["action"]) || "?";
-          var key = subject + "\u0000" + dimension;
-          if (seen[key]) continue;
-          seen[key] = true;
-          var row = document.createElement("div");
-          row.className = "precheck-row";
-          var subjectCell = document.createElement("span");
-          subjectCell.textContent = subject;
-          var dimensionCell = document.createElement("span");
-          dimensionCell.textContent = dimension;
-          var statusCell = document.createElement("span");
-          statusCell.className = "status-badge " + statusClass(check.status || "active");
-          statusCell.textContent = check.status === "resolved" ? "已解決" : (check.status === "confirmed" ? "已確認" : "待處理");
-          var metaCell = document.createElement("span");
-          metaCell.textContent = "uncertainty: " + uncertainty + " / impact: " + impact + " / basis: " + basis + " / action: " + action;
-          row.append(subjectCell, dimensionCell, statusCell, metaCell);
+        var active = null;
+        if (pending !== null && Array.isArray(pending.checks)) {
+          for (var a = 0; a < pending.checks.length; a += 1) {
+            var item = pending.checks[a];
+            if (isRecord(item) && item.action === "user_confirmed" && (item.user_answer === undefined || item.user_answer === "pending confirmation")) {
+              active = item;
+              break;
+            }
+          }
+        }
+        byId("prechecks-message").textContent = "共 " + prechecks.length + " 筆預檢記錄；" + (active !== null ? "目前待確認 1 項。" : "歷史矩陣僅供瀏覽。");
+        if (active !== null) {
+          var card = document.createElement("div");
+          card.className = "precheck-active";
+          var heading = document.createElement("div");
+          heading.className = "precheck-active-heading";
+          heading.textContent = "目前待確認：" + (firstString(active, ["subject_id"]) || "?") + " × " + (firstString(active, ["dimension"]) || "?");
+          card.append(heading);
+          var detail = document.createElement("div");
+          var detailParts = [];
+          detailParts.push("原依據：" + (firstString(active, ["basis"]) || "?"));
+          detailParts.push("影響：" + (firstString(active, ["impact"]) || "?"));
+          detailParts.push("不確定性：" + (firstString(active, ["uncertainty"]) || "?"));
+          detail.textContent = detailParts.join(" · ");
+          card.append(detail);
+          var actions = document.createElement("span");
+          actions.className = "inline-actions";
           var confirm = document.createElement("button");
           confirm.type = "button";
-          confirm.textContent = "標記確認";
+          confirm.className = "primary";
+          confirm.textContent = "確認沿用";
           confirm.addEventListener("click", function () { submitInterviewAnswer("確認"); });
-          row.append(confirm);
-          rows.push(row);
+          actions.append(confirm);
+          var supplement = document.createElement("input");
+          supplement.type = "text";
+          supplement.placeholder = "補充內容（可選）…";
+          var submitSupplement = document.createElement("button");
+          submitSupplement.type = "button";
+          submitSupplement.textContent = "送出補充";
+          submitSupplement.addEventListener("click", function () {
+            var value = supplement.value.trim();
+            if (!value) {
+              localValidation("預檢補充", "補充內容不可為空。");
+              return;
+            }
+            submitInterviewAnswer(value);
+          });
+          actions.append(supplement, submitSupplement);
+          card.append(actions);
+          target.append(card);
         }
-        target.append.apply(target, rows);
-        if (rows.length === 0) target.textContent = "最新預檢沒有可顯示的檢查項目。";
+        var rows = [];
+        for (var p = 0; p < prechecks.length; p += 1) {
+          var precheck = prechecks[p];
+          if (!isRecord(precheck) || !Array.isArray(precheck.checks)) continue;
+          var statusLabel = precheck.status === "superseded" ? "已取代" : (precheck.status === "needs_input" ? "待處理" : "已記錄");
+          for (var c = 0; c < precheck.checks.length; c += 1) {
+            var check = precheck.checks[c];
+            if (!isRecord(check)) continue;
+            var row = document.createElement("div");
+            row.className = "precheck-row";
+            var subjectCell = document.createElement("span");
+            subjectCell.textContent = firstString(check, ["subject_id"]) || "?";
+            var dimensionCell = document.createElement("span");
+            dimensionCell.textContent = firstString(check, ["dimension"]) || "?";
+            var statusCell = document.createElement("span");
+            var answered = check.user_answer !== undefined && check.user_answer !== "pending confirmation";
+            statusCell.className = "status-badge " + (answered ? "ready" : (precheck.status === "needs_input" ? "active" : ""));
+            if (answered) statusCell.textContent = "已確認";
+            else if (check.action !== "user_confirmed") statusCell.textContent = "無需確認";
+            else statusCell.textContent = statusLabel;
+            var metaCell = document.createElement("span");
+            var metaParts = ["impact " + (firstString(check, ["impact"]) || "?"), "uncertainty " + (firstString(check, ["uncertainty"]) || "?")];
+            if (firstString(check, ["basis"])) metaParts.push("basis " + firstString(check, ["basis"]));
+            if (answered) metaParts.push("回答：" + check.user_answer);
+            metaCell.textContent = metaParts.join(" / ");
+            row.append(subjectCell, dimensionCell, statusCell, metaCell);
+            rows.push(row);
+          }
+        }
+        if (rows.length > 0) {
+          var history = document.createElement("div");
+          history.className = "precheck-history";
+          history.append.apply(history, rows);
+          target.append(history);
+        }
       }
 
       function renderReadiness(diagnostics) {
@@ -1340,6 +1405,9 @@ export function dashboard(): string {
 
       var cachedOperations = [];
       var OPERATION_FILTERS = { all: "", active: "created,resolving,running,partial", needs_input: "needs_input", failed: "failed", terminal: "completed,cancelled" };
+      var SEVERITY_RANK = { critical: 4, error: 3, warning: 2, info: 1 };
+      var SEVERITIES = ["critical", "error", "warning", "info"];
+      var currentOverrides = {};
 
       function operationMatchesFilter(operation, filter) {
         var states = OPERATION_FILTERS[filter] || "";
@@ -1361,6 +1429,12 @@ export function dashboard(): string {
             await loadDashboardData();
             return payload;
           });
+        };
+      }
+
+      function retryOperation(operationId) {
+        return function () {
+          postOperation("recover", operationId);
         };
       }
 
@@ -1401,6 +1475,10 @@ export function dashboard(): string {
             labelParts.push("lease " + operation.lease_owner + remainingText);
           }
           if ((operation.status === "running" || operation.status === "partial") && typeof operation.progress_count === "number") labelParts.push("progress " + operation.progress_count);
+          if ((operation.status === "running" || operation.status === "partial") && Array.isArray(operation.progress) && operation.progress.length > 0) {
+            var lastProgress = operation.progress[operation.progress.length - 1];
+            if (isRecord(lastProgress) && firstString(lastProgress, ["message"])) labelParts.push("step: " + firstString(lastProgress, ["message"]));
+          }
           if (operation.status === "needs_input" && operation.question) labelParts.push("問題: " + operation.question);
           if (operation.error_class === "recoverable") labelParts.push("可安全重試");
           if (operation.error_class === "fatal") labelParts.push("需人工重送");
@@ -1424,7 +1502,7 @@ export function dashboard(): string {
               var retry = document.createElement("button");
               retry.type = "button";
               retry.textContent = "重試";
-              retry.addEventListener("click", function () { postOperation("recover", operation.id); });
+              retry.addEventListener("click", retryOperation(operation.id));
               actions.append(retry);
             }
           } else if (status === "created" || status === "resolving" || status === "running" || status === "partial") {
@@ -1450,6 +1528,64 @@ export function dashboard(): string {
         byId("quality-level").value = level;
         byId("quality-message").textContent = "目前門檻： " + level + "（阻擋 " + (firstString(quality, ["blocking_severity"]) || "?") + " 以上）。";
         byId("quality-json").textContent = jsonText(quality);
+        currentOverrides = isRecord(quality.overrides) ? quality.overrides : {};
+        renderQualityOverrides();
+      }
+
+      function renderQualityOverrides() {
+        var target = byId("quality-override-list");
+        target.textContent = "";
+        var codes = Object.keys(currentOverrides);
+        if (codes.length === 0) {
+          target.textContent = "沒有逐 code 覆寫。";
+          return;
+        }
+        for (var i = 0; i < codes.length; i += 1) {
+          var code = codes[i];
+          var row = document.createElement("div");
+          row.className = "override-row";
+          var text = document.createElement("span");
+          text.textContent = code + " → " + currentOverrides[code];
+          var remove = document.createElement("button");
+          remove.type = "button";
+          remove.textContent = "移除";
+          remove.addEventListener("click", removeQualityOverride(code));
+          row.append(text, remove);
+          target.append(row);
+        }
+      }
+
+      function removeQualityOverride(code) {
+        return function () {
+          delete currentOverrides[code];
+          renderQualityOverrides();
+          void applyQuality();
+        };
+      }
+
+      function addQualityOverride() {
+        if (state.busy) return;
+        var code = byId("quality-code").value.trim();
+        if (!code) {
+          localValidation("品質覆寫", "請輸入 issue code。");
+          return;
+        }
+        currentOverrides[code] = byId("quality-severity").value;
+        byId("quality-code").value = "";
+        renderQualityOverrides();
+        void applyQuality();
+      }
+
+      function postIssueAction(issueId, action, reasonElement, severitySelect) {
+        return function () {
+          postIssue(issueId, action, reasonElement.value, severitySelect === null ? undefined : severitySelect.value);
+        };
+      }
+
+      function severityPreview(selectElement, previewElement, issueRecord) {
+        return function () {
+          previewElement.textContent = "effective " + (firstString(issueRecord, ["effective_severity"]) || "?") + " → " + selectElement.value;
+        };
       }
 
       function renderIssueList(snapshot) {
@@ -1467,34 +1603,70 @@ export function dashboard(): string {
           row.className = "issue-row";
           var badge = document.createElement("span");
           badge.className = "status-badge " + (issue.effective_severity === "error" || issue.effective_severity === "critical" ? "error" : "active");
-          badge.textContent = firstString(issue, ["severity"]) || "?";
+          badge.textContent = firstString(issue, ["effective_severity"]) || firstString(issue, ["severity"]) || "?";
           var text = document.createElement("span");
-          text.textContent = (firstString(issue, ["code"]) || "?") + "：" + (firstString(issue, ["message"]) || "") + (issue.status ? "（" + issue.status + "）" : "");
+          var issueText = (firstString(issue, ["code"]) || "?") + "：" + (firstString(issue, ["message"]) || "") + "（" + (firstString(issue, ["status"]) || "?") + "）";
+          if (issue.overridable) issueText += "〔可覆寫〕";
+          if (isRecord(issue.override)) {
+            issueText += " override→" + (firstString(issue.override, ["severity"]) || "?") + " by " + (firstString(issue.override, ["by"]) || "?") + "（" + (firstString(issue.override, ["reason"]) || "") + "）";
+          }
+          text.textContent = issueText;
           row.append(badge, text);
           var actions = document.createElement("span");
           actions.className = "inline-actions";
-          var resolve = document.createElement("button");
-          resolve.type = "button";
-          resolve.textContent = "已解決";
-          resolve.addEventListener("click", function () { postIssue(issue.id, "resolve"); });
-          var ignore = document.createElement("button");
-          ignore.type = "button";
-          ignore.textContent = "忽略";
-          ignore.addEventListener("click", function () { postIssue(issue.id, "ignore"); });
-          var override = document.createElement("button");
-          override.type = "button";
-          override.textContent = "覆寫";
-          override.addEventListener("click", function () { postIssue(issue.id, "override"); });
-          actions.append(resolve, ignore, override);
+          if (issue.status === "open") {
+            var reason = document.createElement("input");
+            reason.type = "text";
+            reason.placeholder = "原因（必填）…";
+            var resolve = document.createElement("button");
+            resolve.type = "button";
+            resolve.textContent = "已解決";
+            resolve.addEventListener("click", postIssueAction(issue.id, "resolve", reason, null));
+            actions.append(reason, resolve);
+            if (issue.overridable) {
+              var ignore = document.createElement("button");
+              ignore.type = "button";
+              ignore.textContent = "忽略";
+              ignore.addEventListener("click", postIssueAction(issue.id, "ignore", reason, null));
+              actions.append(ignore);
+              var effectiveRank = SEVERITY_RANK[issue.effective_severity] || 4;
+              var select = document.createElement("select");
+              select.setAttribute("aria-label", "覆寫目標嚴重度");
+              for (var s = 0; s < SEVERITIES.length; s += 1) {
+                if ((SEVERITY_RANK[SEVERITIES[s]] || 0) < effectiveRank) {
+                  var option = document.createElement("option");
+                  option.value = SEVERITIES[s];
+                  option.textContent = SEVERITIES[s];
+                  select.append(option);
+                }
+              }
+              var preview = document.createElement("span");
+              preview.className = "readiness-hint";
+              preview.textContent = "effective " + (firstString(issue, ["effective_severity"]) || "?") + " → " + select.value;
+              select.addEventListener("change", severityPreview(select, preview, issue));
+              var override = document.createElement("button");
+              override.type = "button";
+              override.textContent = "覆寫";
+              override.addEventListener("click", postIssueAction(issue.id, "override", reason, select));
+              actions.append(ignore, select, preview, override);
+            }
+          }
           row.append(actions);
           target.append(row);
         }
       }
 
-      function postIssue(issueId, action) {
+      function postIssue(issueId, action, reason, severity) {
         if (state.busy) return;
+        var reasonValue = typeof reason === "string" ? reason.trim() : "";
+        if (!reasonValue) {
+          localValidation("Issue 操作", "請填寫原因後再操作。");
+          return;
+        }
+        var body = { issue_id: issueId, action: action, reason: reasonValue };
+        if (severity !== undefined) body.severity = severity;
         void runTask("更新 issue", async function () {
-          var payload = await postJson("/workspace/issue", { issue_id: issueId, action: action, reason: "console action" });
+          var payload = await postJson("/workspace/issue", body);
           await refreshAfterAction();
           return payload;
         });
@@ -1555,6 +1727,12 @@ export function dashboard(): string {
         }
       }
 
+      function removeImage(imageId) {
+        return function () {
+          postImageRemove(imageId);
+        };
+      }
+
       function renderImageList(images) {
         var target = byId("image-list");
         target.textContent = "";
@@ -1580,7 +1758,7 @@ export function dashboard(): string {
           var removeButton = document.createElement("button");
           removeButton.className = "inline-button";
           removeButton.textContent = "移除";
-          removeButton.addEventListener("click", function () { postImageRemove(firstString(image, ["id"]) || ""); });
+          removeButton.addEventListener("click", removeImage(firstString(image, ["id"]) || ""));
           row.append(preview, text, removeButton);
           target.append(row);
         }
@@ -1772,8 +1950,11 @@ export function dashboard(): string {
       function applyQuality() {
         if (state.busy) return;
         var level = byId("quality-level").value;
+        var overrides = {};
+        var codes = Object.keys(currentOverrides);
+        for (var i = 0; i < codes.length; i += 1) overrides[codes[i]] = currentOverrides[codes[i]];
         void runTask("套用品質設定", async function () {
-          var payload = await postJson("/workspace/quality/profile", { level: level });
+          var payload = await postJson("/workspace/quality/profile", { level: level, overrides: overrides });
           await Promise.allSettled([loadDashboardData()]);
           return payload;
         });
@@ -1847,6 +2028,7 @@ export function dashboard(): string {
       });
       byId("repair-run").addEventListener("click", runRepair);
       byId("apply-quality").addEventListener("click", applyQuality);
+      byId("add-quality-override").addEventListener("click", addQualityOverride);
       byId("submit-image").addEventListener("click", submitImage);
       byId("refresh").addEventListener("click", function () { void refresh(); });
       byId("submit-request").addEventListener("click", submitRequest);

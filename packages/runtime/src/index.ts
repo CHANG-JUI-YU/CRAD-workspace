@@ -717,6 +717,26 @@ export interface DashboardOperationView {
   created_at: string;
   updated_at: string;
   progress_count: number;
+  progress?: Array<{ status: string; message: string }>;
+}
+
+export interface DashboardPrecheckCheckView {
+  subject_id: string;
+  dimension: string;
+  uncertainty: string;
+  impact: string;
+  basis: string;
+  action: string;
+  user_answer?: string;
+  intake_key?: string;
+}
+
+export interface DashboardPrecheckView {
+  id: string;
+  status: string;
+  candidate_blueprint_revision: string;
+  checks_count: number;
+  checks: DashboardPrecheckCheckView[];
 }
 
 export interface DashboardIssueView {
@@ -728,12 +748,15 @@ export interface DashboardIssueView {
   effective_severity: string;
   status: string;
   created_at: string;
+  updated_at?: string;
+  overridable: boolean;
+  override?: { severity?: string; against_effective_severity: string; reason: string; by: string; timestamp: string };
 }
 
 export interface DashboardSnapshot {
   project: DashboardProjectView;
   blueprint?: DashboardBlueprint;
-  prechecks: Array<{ id: string; status: string; candidate_blueprint_revision: string; checks_count: number }>;
+  prechecks: DashboardPrecheckView[];
   artifacts: DashboardArtifactView[];
   images: Array<{ id: string; character_id?: string; width: number; height: number; aspect_ratio?: string; source?: string; license?: string; created_at: string }>;
   facts: DashboardFactView[];
@@ -1259,6 +1282,41 @@ export class WorkspaceRuntime {
         details: { message, recoverable, ...(code === undefined ? {} : { code }) },
       }],
     }));
+  }
+
+  /** Cancel an operation from the console with a compare-and-set guard against terminal or already-owned operations. */
+  async cancelOperation(operationId: string, actor = "worker"): Promise<{ operation_id: string; status: "cancelled"; summary: string }> {
+    const state = await this.repository.read();
+    const latest = state.operations.find((item) => item.id === operationId);
+    if (latest === undefined) {
+      throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist.`, true);
+    }
+    const cancellable: ReadonlySet<string> = new Set(["created", "resolving", "running", "partial", "needs_input"]);
+    if (!cancellable.has(latest.status)) {
+      throw new CoreError("OPERATION_NOT_CANCELLABLE", `Operation ${operationId} is ${latest.status} and cannot be cancelled from the console.`, true);
+    }
+    await this.repository.commit(state.revision, (current) => {
+      const item = current.operations.find((entry) => entry.id === operationId);
+      if (item === undefined || !cancellable.has(item.status)) {
+        throw new CoreError("OPERATION_NOT_CANCELLABLE", `Operation ${operationId} changed state while cancelling; it is now ${item?.status ?? "gone"} and cannot be cancelled from the console.`, true);
+      }
+      return {
+        ...current,
+        operations: current.operations.map((entry) => entry.id === operationId
+          ? { ...stripLease(entry), status: "failed" as const, result_summary: "The operation was cancelled from the workspace console", updated_at: now() }
+          : entry),
+        audit: [...current.audit, {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "operation.failed",
+          actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: { message: "The operation was cancelled from the workspace console", recoverable: true, code: "OPERATION_CANCELLED" },
+        }],
+      };
+    });
+    return { operation_id: operationId, status: "cancelled", summary: "Operation cancelled." };
   }
 
   /* c8 ignore start -- recovery delegates to the same domain services covered by the runtime and worker tests. */
@@ -2458,7 +2516,22 @@ export class WorkspaceRuntime {
         answers_count: state.interview.answers.length,
       },
       ...(blueprint === undefined ? {} : { blueprint }),
-      prechecks: state.blueprint_prechecks.map((precheck) => ({ id: precheck.id, status: precheck.status, candidate_blueprint_revision: precheck.candidate_blueprint_revision, checks_count: precheck.checks.length })),
+      prechecks: state.blueprint_prechecks.map((precheck) => ({
+        id: precheck.id,
+        status: precheck.status,
+        candidate_blueprint_revision: precheck.candidate_blueprint_revision,
+        checks_count: precheck.checks.length,
+        checks: precheck.checks.map((check) => ({
+          subject_id: check.subject_id,
+          dimension: check.dimension,
+          uncertainty: check.uncertainty,
+          impact: check.impact,
+          basis: check.basis,
+          action: check.action,
+          ...(check.user_answer === undefined ? {} : { user_answer: check.user_answer }),
+          ...(check.intake_key === undefined ? {} : { intake_key: check.intake_key }),
+        })),
+      })),
       artifacts: state.artifacts.map((artifact) => ({
         id: artifact.id,
         key: artifact.key,
@@ -2525,18 +2598,33 @@ export class WorkspaceRuntime {
           created_at: operation.created_at,
           updated_at: operation.updated_at,
           progress_count: operation.progress.length,
+          ...(operation.progress.length === 0 ? {} : { progress: operation.progress.slice(-3).map((item) => ({ status: item.status, message: item.message })) }),
         }));
       })(),
-      issues: state.issues.map((issue) => ({
-        id: issue.id,
-        artifact_id: issue.artifact_id,
-        code: issue.code,
-        message: issue.message,
-        severity: issue.severity,
-        effective_severity: issue.effective_severity,
-        status: issue.status,
-        created_at: issue.created_at,
-      })),
+      issues: state.issues.map((issue) => {
+        const overrideRecord = issue.override === undefined ? undefined : issue.override;
+        return {
+          id: issue.id,
+          artifact_id: issue.artifact_id,
+          code: issue.code,
+          message: issue.message,
+          severity: issue.severity,
+          effective_severity: issue.effective_severity,
+          status: issue.status,
+          created_at: issue.created_at,
+          ...(issue.updated_at === undefined ? {} : { updated_at: issue.updated_at }),
+          overridable: issue.overridable === true,
+          ...(overrideRecord === undefined ? {} : {
+            override: {
+              ...(overrideRecord.severity === undefined ? {} : { severity: overrideRecord.severity }),
+              against_effective_severity: overrideRecord.against_effective_severity,
+              reason: overrideRecord.reason,
+              by: overrideRecord.by,
+              timestamp: overrideRecord.timestamp,
+            },
+          }),
+        };
+      }),
       reviews: state.reviews.map((review) => ({ id: review.id, artifact_id: review.artifact_id, artifact_revision: review.artifact_revision, reviewer: review.reviewer, status: review.status })),
       quality: { ...(state.quality_profile.level === undefined ? {} : { level: state.quality_profile.level }), blocking_severity: state.quality_profile.blocking_severity, overrides: state.quality_profile.overrides },
       review_runs: state.fact_review_runs.map((run) => ({ id: run.id, status: run.status, candidate_occurrence_ids: run.candidate_occurrence_ids })),

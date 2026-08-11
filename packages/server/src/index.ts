@@ -649,8 +649,15 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
           json(response, 400, { error: "OPERATION_ID_REQUIRED" });
           return;
         }
-        await (await getRuntime()).failOperation(operationId, new CoreError("OPERATION_CANCELLED", "The operation was cancelled from the workspace console", true), actor);
-        json(response, 200, { status: "cancelled", operation_id: operationId });
+        try {
+          json(response, 200, await (await getRuntime()).cancelOperation(operationId, actor));
+        } catch (error) {
+          if (error instanceof CoreError) {
+            json(response, 400, { error: error.code });
+            return;
+          }
+          throw error;
+        }
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/repair/run") {
