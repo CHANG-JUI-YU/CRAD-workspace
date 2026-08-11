@@ -1188,16 +1188,40 @@ export interface ProjectRepository {
   readBlob(hash: string): Promise<Uint8Array | undefined>;
   writeBlob(hash: string, content: Uint8Array): Promise<void>;
   inspectRepair(): Promise<RepairInspection>;
-  runRepair(): Promise<RepairReport>;
+  runRepair(planHash?: string): Promise<RepairReport>;
+}
+
+export interface RepairPlanItem {
+  /** Stable identifier for the item (hash of its source path). */
+  readonly id: string;
+  /** Path relative to the project directory. */
+  readonly source: string;
+  /** Archive target relative to the project directory. */
+  readonly target: string;
+  readonly kind: "legacy_file" | "orphan_backup";
+  readonly reason: string;
+  readonly recoverable: boolean;
 }
 
 export interface RepairInspection {
-  legacy_files: string[];
-  orphan_backups: string[];
+  /** Hash of the exact plan; runRepair only executes a confirmed plan hash. */
+  readonly plan_hash: string;
+  readonly items: RepairPlanItem[];
+}
+
+export interface RepairAction {
+  readonly id: string;
+  readonly source: string;
+  readonly target: string;
+  readonly kind: string;
+  readonly reason: string;
+  readonly recoverable: boolean;
+  readonly outcome: "archived" | "skipped" | "missing";
 }
 
 export interface RepairReport {
-  archived: string[];
+  readonly plan_hash: string;
+  readonly actions: RepairAction[];
 }
 
 /** A file path relative to the project directory, committed with the state. */
@@ -1366,11 +1390,16 @@ export class MemoryProjectRepository implements ProjectRepository {
   }
 
   async inspectRepair(): Promise<RepairInspection> {
-    return { legacy_files: [], orphan_backups: [] };
+    const emptyPlan: RepairInspection = { plan_hash: contentHash("[]"), items: [] };
+    return emptyPlan;
   }
 
-  async runRepair(): Promise<RepairReport> {
-    return { archived: [] };
+  async runRepair(planHash?: string): Promise<RepairReport> {
+    const inspection = await this.inspectRepair();
+    if (planHash !== undefined && planHash !== inspection.plan_hash) {
+      throw new CoreError("REPAIR_PLAN_STALE", "The repair plan changed since preview; run the preview again before repairing.", true);
+    }
+    return { plan_hash: inspection.plan_hash, actions: [] };
   }
 
   async read(): Promise<ProjectState> {
@@ -1476,41 +1505,116 @@ export class FileProjectRepository implements ProjectRepository {
   }
 
   async inspectRepair(): Promise<RepairInspection> {
-    if (this.layout !== "project") return { legacy_files: [], orphan_backups: [] };
-    const legacy_files: string[] = [];
+    if (this.layout !== "project") return { plan_hash: contentHash("[]"), items: [] };
+    const items: RepairPlanItem[] = [];
     const legacyStatePath = path.join(this.projectDirectory, "state.json");
     const proposalsPath = path.join(this.projectDirectory, "proposals");
-    const exportsPath = path.join(this.projectDirectory, "exports");
-    for (const entry of [legacyStatePath, proposalsPath, exportsPath]) {
+    for (const entry of [legacyStatePath, proposalsPath]) {
       try {
         await stat(entry);
-        legacy_files.push(path.basename(entry));
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        continue;
       }
+      items.push({
+        id: contentHash(entry).slice(0, 12),
+        source: path.basename(entry),
+        target: "",
+        kind: "legacy_file",
+        reason: entry === legacyStatePath
+          ? "專案根目錄的舊版 state.json 已由 .workspace/state.json 取代。"
+          : "專案根目錄的舊版 proposals/ 目錄已由 .workspace 資料結構取代。",
+        recoverable: true,
+      });
     }
-    const orphan_backups: string[] = [];
     const backupsPath = path.join(this.projectDirectory, ".workspace", "legacy-layout");
     try {
       const entries = await readdir(backupsPath, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.isDirectory()) orphan_backups.push(entry.name);
+        if (!entry.isDirectory()) continue;
+        let hasMarker = true;
+        try {
+          await stat(path.join(backupsPath, entry.name, "migration.json"));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          hasMarker = false;
+        }
+        if (hasMarker) continue;
+        items.push({
+          id: contentHash(entry.name).slice(0, 12),
+          source: path.join(".workspace", "legacy-layout", entry.name),
+          target: "",
+          kind: "orphan_backup",
+          reason: "備份目錄缺少 migration.json 標記，無法確認來源與完成狀態。",
+          recoverable: true,
+        });
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    return { legacy_files, orphan_backups };
+    const sources = items.map((item) => item.source);
+    const plan_hash = contentHash(sources.length === 0 ? "[]" : sources.join("\n"));
+    const migrationId = `repair-${contentHash(`repair:${this.projectIdValue}:${sources.join("\n")}`).slice(0, 12)}`;
+    return {
+      plan_hash,
+      items: items.map((item) => ({ ...item, target: path.join(".workspace", "legacy-layout", migrationId, path.basename(item.source)) })),
+    };
   }
 
-  async runRepair(): Promise<RepairReport> {
+  async runRepair(planHash?: string): Promise<RepairReport> {
     const inspection = await this.inspectRepair();
-    const archived: string[] = [];
-    if (inspection.legacy_files.length > 0) {
-      const state = await this.read();
-      await this.archiveExistingLegacyLayout(state);
-      for (const entry of inspection.legacy_files) archived.push(entry);
+    if (planHash !== undefined && planHash !== inspection.plan_hash) {
+      throw new CoreError("REPAIR_PLAN_STALE", "The repair plan changed since preview; run the preview again before repairing.", true);
     }
-    return { archived };
+    const actions: RepairAction[] = [];
+    for (const item of inspection.items) {
+      const source = path.join(this.projectDirectory, item.source);
+      const target = path.join(this.projectDirectory, item.target);
+      let exists = true;
+      try {
+        await stat(source);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        exists = false;
+      }
+      if (!exists) {
+        actions.push({ id: item.id, source: item.source, target: item.target, kind: item.kind, reason: item.reason, recoverable: item.recoverable, outcome: "missing" });
+        continue;
+      }
+      let alreadyArchived = true;
+      try {
+        await stat(target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        alreadyArchived = false;
+      }
+      if (alreadyArchived) {
+        actions.push({ id: item.id, source: item.source, target: item.target, kind: item.kind, reason: item.reason, recoverable: item.recoverable, outcome: "skipped" });
+        continue;
+      }
+      await mkdir(path.dirname(target), { recursive: true });
+      await renameWithRetry(source, target);
+      actions.push({ id: item.id, source: item.source, target: item.target, kind: item.kind, reason: item.reason, recoverable: item.recoverable, outcome: "archived" });
+    }
+    const archivedActions = actions.filter((action) => action.outcome === "archived");
+    const migrationDirectory = archivedActions.length === 0 ? undefined : path.dirname(path.join(this.projectDirectory, archivedActions[0]!.target));
+    if (migrationDirectory !== undefined) {
+      const migrationId = path.basename(migrationDirectory);
+      const markerPath = path.join(migrationDirectory, "migration.json");
+      try {
+        await stat(markerPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        await writeFile(markerPath, `${canonicalJson({
+          schema_version: 1,
+          migration_id: migrationId,
+          project_id: this.projectIdValue,
+          archived_entries: archivedActions.map((action) => action.source),
+          completed_at: new Date().toISOString(),
+        })}\n`, "utf8");
+      }
+    }
+    return { plan_hash: inspection.plan_hash, actions };
   }
 
   private stateFileFor(projectId: string): string {

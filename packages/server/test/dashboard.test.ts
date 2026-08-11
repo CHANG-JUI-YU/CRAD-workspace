@@ -69,6 +69,9 @@ describe("local Dashboard", () => {
       "逐 code 覆寫",
       "確認沿用",
       "角色圖像",
+      "計畫 hash",
+      "孤兒備份",
+      "已歸檔",
     ]) {
       expect(html).toContain(label);
     }
@@ -103,7 +106,7 @@ describe("local Dashboard", () => {
       expect(Array.isArray(data.operations)).toBe(true);
       expect(Array.isArray(data.reviews)).toBe(true);
       expect(Array.isArray(data.issues)).toBe(true);
-      expect(data.repair).toMatchObject({ legacy_files: [], orphan_backups: [] });
+      expect(data.repair).toMatchObject({ plan_hash: expect.any(String), items: [] });
       const readiness = await (await fetch(`${base}/workspace/publish/preview`)).json();
       expect(typeof readiness.ok).toBe("boolean");
       expect(Array.isArray(readiness.diagnostics)).toBe(true);
@@ -112,7 +115,8 @@ describe("local Dashboard", () => {
       const tavern = await (await fetch(`${base}/workspace/tavern/compat`)).json();
       expect(tavern.available).toBe(false);
       const repair = await (await fetch(`${base}/workspace/repair/preview`)).json();
-      expect(Array.isArray(repair.legacy_files)).toBe(true);
+      expect(Array.isArray(repair.items)).toBe(true);
+      expect(typeof repair.plan_hash).toBe("string");
       const quality = await (await fetch(`${base}/workspace/quality/profile`, {
         method: "POST",
         headers: { "content-type": "application/json" },

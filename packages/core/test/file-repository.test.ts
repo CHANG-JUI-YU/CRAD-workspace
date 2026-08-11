@@ -294,4 +294,75 @@ describe("file project repository", () => {
     expect(Array.from(new Uint8Array(await readFile(path.join(root, "demo", "exports", "Demo-珠璣角色卡.png"))))).toEqual(Array.from(pngBytes));
     await expect(readdir(path.join(root, "demo", ".workspace", "legacy-layout"))).rejects.toThrow();
   });
+
+  it("produces an exact repair plan without treating the current exports directory as legacy", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-repair-plan-"));
+    temporaryRoots.push(root);
+    const repository = new FileProjectRepository(root, "demo", { layout: "project" });
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_name: "Demo",
+      publishes: [{ id: "publish-1", operation_id: "op", artifact_ids: [], content: "x", content_hash: contentHash("x"), export_json_path: "exports/Demo-角色卡.json", created_at: new Date().toISOString() }],
+    }));
+    await mkdir(path.join(root, "demo", "exports"), { recursive: true });
+    await writeFile(path.join(root, "demo", "exports", "Demo-角色卡.json"), "current export", "utf8");
+    await writeFile(path.join(root, "demo", "state.json"), "{legacy}", "utf8");
+    await mkdir(path.join(root, "demo", "proposals"), { recursive: true });
+
+    const inspection = await repository.inspectRepair();
+    expect(inspection.items.map((item) => item.source).sort()).toEqual(["proposals", "state.json"]);
+    expect(inspection.items.every((item) => item.recoverable === true)).toBe(true);
+    for (const item of inspection.items) {
+      expect(item.target).toContain(path.join(".workspace", "legacy-layout", "repair-"));
+    }
+    expect(await readFile(path.join(root, "demo", "exports", "Demo-角色卡.json"), "utf8")).toBe("current export");
+  });
+
+  it("lists only legacy-layout directories without a migration marker as orphan backups", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-repair-orphan-"));
+    temporaryRoots.push(root);
+    const repository = new FileProjectRepository(root, "demo", { layout: "project" });
+    await repository.commit(0, (state) => ({ ...state }));
+    const backups = path.join(root, "demo", ".workspace", "legacy-layout");
+    await mkdir(path.join(backups, "migration-abc"), { recursive: true });
+    await writeFile(path.join(backups, "migration-abc", "migration.json"), "{}", "utf8");
+    await mkdir(path.join(backups, "orphan-dir"), { recursive: true });
+
+    const inspection = await repository.inspectRepair();
+    expect(inspection.items).toHaveLength(1);
+    expect(inspection.items[0]!.source).toBe(path.join(".workspace", "legacy-layout", "orphan-dir"));
+    expect(inspection.items[0]!.kind).toBe("orphan_backup");
+    expect(inspection.items[0]!.reason).toContain("migration.json");
+  });
+
+  it("executes only the confirmed plan hash and reports per-file outcomes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-repair-run-"));
+    temporaryRoots.push(root);
+    const repository = new FileProjectRepository(root, "demo", { layout: "project" });
+    await repository.commit(0, (state) => ({ ...state }));
+    await writeFile(path.join(root, "demo", "state.json"), "{legacy}", "utf8");
+    await mkdir(path.join(root, "demo", "proposals"), { recursive: true });
+    await writeFile(path.join(root, "demo", "proposals", "draft.yaml"), "draft", "utf8");
+    await mkdir(path.join(root, "demo", ".workspace", "legacy-layout", "orphan-x"), { recursive: true });
+
+    const inspection = await repository.inspectRepair();
+    expect(inspection.items).toHaveLength(3);
+    await expect(repository.runRepair("wrong-plan-hash")).rejects.toMatchObject({ code: "REPAIR_PLAN_STALE" });
+
+    const report = await repository.runRepair(inspection.plan_hash);
+    expect(report.plan_hash).toBe(inspection.plan_hash);
+    expect(report.actions).toHaveLength(3);
+    expect(report.actions.every((action) => action.outcome === "archived")).toBe(true);
+    await expect(readFile(path.join(root, "demo", "state.json"), "utf8")).rejects.toThrow();
+    await expect(readdir(path.join(root, "demo", "proposals"))).rejects.toThrow();
+    await expect(readdir(path.join(root, "demo", ".workspace", "legacy-layout", "orphan-x"))).rejects.toThrow();
+    const archivedDirectory = path.join(root, "demo", path.dirname(report.actions[0]!.target));
+    await expect(readFile(path.join(archivedDirectory, "migration.json"), "utf8")).resolves.toContain("migration_id");
+    await expect(readdir(path.join(archivedDirectory, "proposals"))).resolves.toContain("draft.yaml");
+
+    const second = await repository.inspectRepair();
+    expect(second.items).toHaveLength(0);
+    const rerun = await repository.runRepair(second.plan_hash);
+    expect(rerun.actions).toHaveLength(0);
+  });
 });

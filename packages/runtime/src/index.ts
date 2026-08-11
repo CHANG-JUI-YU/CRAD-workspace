@@ -791,9 +791,21 @@ export interface DashboardBuildReadiness {
   diagnostics: Array<{ code: string; severity: string; message: string }>;
 }
 
+export interface TavernCheckResult {
+  id: string;
+  label: string;
+  status: "PASS" | "WARN" | "FAIL";
+  detail: string;
+}
+
 export interface TavernCompatibilityReport {
   available: boolean;
-  report: string[];
+  json_path?: string;
+  png_path?: string;
+  json_sha256?: string;
+  png_sha256?: string;
+  checks: TavernCheckResult[];
+  summary: string;
 }
 
 export class WorkspaceRuntime {
@@ -2756,30 +2768,43 @@ export class WorkspaceRuntime {
   async tavernCompat(): Promise<TavernCompatibilityReport> {
     const state = await this.repository.read();
     const latest = state.publishes.at(-1);
-    if (latest === undefined) return { available: false, report: ["尚未有 publish 記錄，先完成打包再檢查相容性。"] };
-    const report: string[] = [];
+    if (latest === undefined) {
+      return { available: false, checks: [], summary: "尚未有 publish 記錄，先完成打包再檢查相容性。" };
+    }
+    const checks: TavernCheckResult[] = [];
+    const summaryParts: string[] = [];
     let jsonText: string | undefined;
+    let jsonBlobHash: string | undefined;
     if (latest.content_ref !== undefined) {
       const blob = await this.repository.readBlob(latest.content_ref.hash);
-      if (blob === undefined) report.push("content blob 遺失，請執行專案修復。");
-      else jsonText = new TextDecoder("utf-8").decode(blob);
+      if (blob === undefined) {
+        checks.push({ id: "json_load", label: "JSON 內容", status: "FAIL", detail: "content blob 遺失，請執行專案修復。" });
+      } else {
+        jsonText = new TextDecoder("utf-8").decode(blob);
+        jsonBlobHash = latest.content_ref.hash;
+      }
     } else {
       jsonText = latest.content;
     }
     let parsedJsonCard: CharacterCardV3 | undefined;
     if (jsonText !== undefined) {
+      checks.push({ id: "json_load", label: "JSON 內容", status: "PASS", detail: `長度 ${jsonText.length} 字元${jsonBlobHash === undefined ? "" : `（blob sha256 前 12：${jsonBlobHash.slice(0, 12)}）`}。` });
+      checks.push({ id: "json_hash", label: "JSON hash", status: "PASS", detail: `sha256 ${contentHash(jsonText).slice(0, 12)}。` });
       try {
         const rawJson = JSON.parse(jsonText);
         parsedJsonCard = characterCardV3Schema.parse(rawJson);
-        const card = parsedJsonCard;
-        const data = card.data;
-        report.push(`spec=${String(card.spec)} spec_version=${String(card.spec_version)}`);
+        const data = parsedJsonCard.data;
+        checks.push({ id: "ccv3_schema", label: "CCv3 schema", status: "PASS", detail: `spec=${String(parsedJsonCard.spec)} spec_version=${String(parsedJsonCard.spec_version)}。` });
         const book = data.character_book;
-        report.push(book === undefined ? "無 character_book 條目。" : `character_book「${String(book.name ?? "未命名")}」共 ${Array.isArray(book.entries) ? book.entries.length : 0} 條目。`);
+        checks.push(book === undefined || !Array.isArray(book.entries)
+          ? { id: "worldbook", label: "世界書", status: "WARN", detail: "無 character_book 條目。" }
+          : { id: "worldbook", label: "世界書", status: "PASS", detail: `「${String(book.name ?? "未命名")}」共 ${book.entries.length} 條目。` });
         let greetings = 0;
         if (typeof data.first_mes === "string" && data.first_mes.length > 0) greetings += 1;
         if (Array.isArray(data.alternate_greetings)) greetings += data.alternate_greetings.filter((item) => typeof item === "string" && item.length > 0).length;
-        report.push(`greeting 首發＋備選共 ${greetings} 組。`);
+        checks.push(greetings === 0
+          ? { id: "greetings", label: "開場白", status: "WARN", detail: "無首發或備選開場白。" }
+          : { id: "greetings", label: "開場白", status: "PASS", detail: `首發＋備選共 ${greetings} 組。` });
         const extensions = (data.extensions ?? {}) as Record<string, unknown>;
         const workspaceExt = extensions["card-workspace"] !== null && typeof extensions["card-workspace"] === "object" && !Array.isArray(extensions["card-workspace"])
           ? extensions["card-workspace"] as Record<string, unknown>
@@ -2788,49 +2813,69 @@ export class WorkspaceRuntime {
           ? workspaceExt.plugins as Record<string, unknown>
           : undefined;
         const pluginIds = pluginsObj !== undefined ? Object.keys(pluginsObj) : [];
-        report.push(pluginIds.length === 0 ? "無 plugin 依賴。" : `plugin 需求：${pluginIds.join(", ")}。`);
+        checks.push({ id: "plugins", label: "Plugin 依賴", status: "PASS", detail: pluginIds.length === 0 ? "無 plugin 依賴。" : `plugin 需求：${pluginIds.join(", ")}。` });
       } catch (error) {
-        report.push(`內容 JSON Schema 驗證失敗：${error instanceof Error ? error.message : String(error)}。`);
+        checks.push({ id: "ccv3_schema", label: "CCv3 schema", status: "FAIL", detail: `內容 JSON Schema 驗證失敗：${error instanceof Error ? error.message : String(error)}。` });
       }
     } else {
-      report.push("無內容 JSON（publish 只含 PNG 或 blob 遺失）。");
+      checks.push({ id: "json_load", label: "JSON 內容", status: "FAIL", detail: "無內容 JSON（publish 只含 PNG 或 blob 遺失）。" });
     }
     let pngBytes: Uint8Array | undefined;
-    if (latest.png_ref !== undefined) pngBytes = await this.repository.readBlob(latest.png_ref.hash);
-    else if (latest.png_base64 !== undefined) pngBytes = Buffer.from(latest.png_base64, "base64");
+    let pngBlobHash: string | undefined;
+    if (latest.png_ref !== undefined) {
+      pngBytes = await this.repository.readBlob(latest.png_ref.hash);
+      pngBlobHash = latest.png_ref.hash;
+    } else if (latest.png_base64 !== undefined) {
+      pngBytes = Buffer.from(latest.png_base64, "base64");
+    }
     if (pngBytes !== undefined) {
+      checks.push({ id: "png_hash", label: "PNG hash", status: "PASS", detail: `sha256 ${contentHash(pngBytes).slice(0, 12)}${pngBlobHash === undefined ? "" : `（blob 前 12：${pngBlobHash.slice(0, 12)}）`}。` });
       const imageInfo = readPngImageInfo(pngBytes);
       if (imageInfo !== undefined) {
         const placeholder = isBuiltInPlaceholderImage(pngBytes);
-        report.push(`PNG 尺寸 ${imageInfo.width}×${imageInfo.height}px（${placeholder ? "使用內建佔位圖，請上傳角色圖後重新打包" : "已嵌入角色圖像"}）。`);
+        checks.push({ id: "png_dimensions", label: "PNG 尺寸", status: placeholder ? "WARN" : "PASS", detail: `${imageInfo.width}×${imageInfo.height}px（${placeholder ? "使用內建佔位圖，請上傳角色圖後重新打包" : "已嵌入角色圖像"}）。` });
       } else {
-        report.push("PNG 簽名不符（可能不是有效 PNG）。");
+        checks.push({ id: "png_dimensions", label: "PNG 尺寸", status: "FAIL", detail: "PNG 簽名不符（可能不是有效 PNG）。" });
       }
       try {
         const decoded = readCardFromPng(pngBytes);
-        report.push(`PNG 內嵌卡片以 ${decoded.authority} 解析成功。`);
+        checks.push({ id: "png_card_parse", label: "PNG 內嵌卡片", status: "PASS", detail: `以 ${decoded.authority} 解析成功。` });
         if (parsedJsonCard !== undefined) {
           const canonicalPng = canonicalCardJson(decoded.card);
           const canonicalJsonStr = canonicalCardJson(parsedJsonCard);
-          report.push(canonicalPng === canonicalJsonStr ? "PNG 內嵌卡片與 JSON 內容一致。" : "PNG 內嵌卡片與 JSON 內容不一致（欄位順序或版本差異）。");
-        } else if (jsonText !== undefined) {
-          report.push("JSON Schema 不符，無法比對 PNG 內嵌卡片。");
+          checks.push({ id: "png_json_match", label: "JSON/PNG 一致", status: canonicalPng === canonicalJsonStr ? "PASS" : "FAIL", detail: canonicalPng === canonicalJsonStr ? "PNG 內嵌卡片與 JSON 內容一致。" : "PNG 內嵌卡片與 JSON 內容不一致（欄位順序或版本差異）。" });
+        } else {
+          checks.push({ id: "png_json_match", label: "JSON/PNG 一致", status: "WARN", detail: "JSON Schema 不符，無法比對 PNG 內嵌卡片。" });
         }
       } catch (error) {
-        report.push(`PNG 卡片解析失敗：${error instanceof Error ? error.message : String(error)}。`);
+        checks.push({ id: "png_card_parse", label: "PNG 內嵌卡片", status: "FAIL", detail: `PNG 卡片解析失敗：${error instanceof Error ? error.message : String(error)}。` });
       }
     } else {
-      report.push("無 PNG 輸出。");
+      checks.push({ id: "png_dimensions", label: "PNG 尺寸", status: "FAIL", detail: "無 PNG 輸出。" });
     }
-    return { available: true, report };
+    const passCount = checks.filter((check) => check.status === "PASS").length;
+    const warnCount = checks.filter((check) => check.status === "WARN").length;
+    const failCount = checks.filter((check) => check.status === "FAIL").length;
+    summaryParts.push(`${passCount} 項通過`);
+    if (warnCount > 0) summaryParts.push(`${warnCount} 項警告`);
+    if (failCount > 0) summaryParts.push(`${failCount} 項失敗`);
+    return {
+      available: true,
+      ...(latest.export_json_path === undefined ? {} : { json_path: latest.export_json_path }),
+      ...(latest.export_png_path === undefined ? {} : { png_path: latest.export_png_path }),
+      ...(jsonBlobHash === undefined ? {} : { json_sha256: jsonBlobHash }),
+      ...(pngBlobHash === undefined ? {} : { png_sha256: pngBlobHash }),
+      checks,
+      summary: `Tavern 相容性：${summaryParts.join("，")}。`,
+    };
   }
 
   async repairPreview(): Promise<RepairInspection> {
     return this.repository.inspectRepair();
   }
 
-  async repairRun(): Promise<RepairReport> {
-    return this.repository.runRepair();
+  async repairRun(planHash?: string): Promise<RepairReport> {
+    return this.repository.runRepair(planHash);
   }
 
   async setProjectImage(context: WorkspaceContext, options: { character_id?: string; aspect_ratio?: string; source?: string; license?: string } = {}): Promise<{ image_id: string; width: number; height: number }> {

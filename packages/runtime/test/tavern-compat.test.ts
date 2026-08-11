@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import { MemoryProjectRepository } from "@st-workspace/core";
 import { emitCharacterCardV3, type Ccv3Project } from "@st-workspace/adapters-ccv3";
 import { writeCardToPng, pngSignature, encodePngChunk } from "@st-workspace/adapters-png";
-import { WorkspaceRuntime } from "../src/index.js";
+import { WorkspaceRuntime, type TavernCheckResult } from "../src/index.js";
+
+function check(checks: TavernCheckResult[], id: string): TavernCheckResult | undefined {
+  return checks.find((item) => item.id === id);
+}
 
 describe("Tavern compatibility verifier (BUG2-16)", () => {
   const sampleProject: Ccv3Project = {
@@ -50,8 +54,13 @@ describe("Tavern compatibility verifier (BUG2-16)", () => {
     const runtime = new WorkspaceRuntime(repository);
     const result = await runtime.tavernCompat();
     expect(result.available).toBe(true);
-    expect(result.report).toContain("PNG 內嵌卡片與 JSON 內容一致。");
-    expect(result.report.some((line) => line.includes("plugin.test-1"))).toBe(true);
+    expect(result.summary).toContain("通過");
+    expect(check(result.checks, "json_hash")?.status).toBe("PASS");
+    expect(check(result.checks, "ccv3_schema")?.status).toBe("PASS");
+    expect(check(result.checks, "png_json_match")).toMatchObject({ status: "PASS", detail: expect.stringContaining("一致") });
+    expect(check(result.checks, "plugins")?.detail).toContain("plugin.test-1");
+    expect(result.json_sha256).toBeUndefined();
+    expect(result.png_sha256).toBeUndefined();
   });
 
   it("reports mismatch when card data differs", async () => {
@@ -80,7 +89,7 @@ describe("Tavern compatibility verifier (BUG2-16)", () => {
     const runtime = new WorkspaceRuntime(repository);
     const result = await runtime.tavernCompat();
     expect(result.available).toBe(true);
-    expect(result.report.some((line) => line.includes("不一致"))).toBe(true);
+    expect(check(result.checks, "png_json_match")).toMatchObject({ status: "FAIL", detail: expect.stringContaining("不一致") });
   });
 
   it("does not classify real 512x768 user images as built-in placeholders", async () => {
@@ -132,8 +141,10 @@ describe("Tavern compatibility verifier (BUG2-16)", () => {
     const runtime = new WorkspaceRuntime(repository);
     const result = await runtime.tavernCompat();
     expect(result.available).toBe(true);
-    expect(result.report).toContain("PNG 尺寸 512×768px（已嵌入角色圖像）。");
-    expect(result.report).not.toContain("使用內建佔位圖");
+    expect(check(result.checks, "png_dimensions")).toMatchObject({ status: "PASS", detail: expect.stringContaining("512×768") });
+    expect(check(result.checks, "png_dimensions")?.detail).toContain("已嵌入角色圖像");
+    expect(check(result.checks, "png_dimensions")?.detail).not.toContain("使用內建佔位圖");
+    expect(check(result.checks, "png_card_parse")?.status).toBe("PASS");
   });
 
   it("produces clear diagnostics for schema-invalid JSON", async () => {
@@ -161,7 +172,7 @@ describe("Tavern compatibility verifier (BUG2-16)", () => {
     const runtime = new WorkspaceRuntime(repository);
     const result = await runtime.tavernCompat();
     expect(result.available).toBe(true);
-    expect(result.report.some((line) => line.includes("內容 JSON Schema 驗證失敗"))).toBe(true);
-    expect(result.report).toContain("JSON Schema 不符，無法比對 PNG 內嵌卡片。");
+    expect(check(result.checks, "ccv3_schema")).toMatchObject({ status: "FAIL", detail: expect.stringContaining("內容 JSON Schema 驗證失敗") });
+    expect(check(result.checks, "png_json_match")).toMatchObject({ status: "WARN", detail: expect.stringContaining("無法比對") });
   });
 });

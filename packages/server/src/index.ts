@@ -661,7 +661,8 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/repair/run") {
-        json(response, 200, await (await getRuntime()).repairRun());
+        const parsed = await body(request) as { plan_hash?: unknown } | undefined;
+        json(response, 200, await (await getRuntime()).repairRun(typeof parsed?.plan_hash === "string" ? parsed.plan_hash : undefined));
         return;
       }
       if (request.method === "POST" && url.pathname === "/mcp") {

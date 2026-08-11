@@ -1408,6 +1408,7 @@ export function dashboard(): string {
       var SEVERITY_RANK = { critical: 4, error: 3, warning: 2, info: 1 };
       var SEVERITIES = ["critical", "error", "warning", "info"];
       var currentOverrides = {};
+      var repairPlanHash = "";
 
       function operationMatchesFilter(operation, filter) {
         var states = OPERATION_FILTERS[filter] || "";
@@ -1874,13 +1875,33 @@ export function dashboard(): string {
           byId("tavern-message").textContent = "沒有相容性資料。";
           return;
         }
-        byId("tavern-message").textContent = report.available === true ? "相容性檢查完成。" : "目前無法檢查相容性。";
-        var items = Array.isArray(report.report) ? report.report : [];
-        for (var i = 0; i < items.length; i += 1) {
+        byId("tavern-message").textContent = report.available === true
+          ? (firstString(report, ["summary"]) || "相容性檢查完成。")
+          : "目前無法檢查相容性。";
+        var checks = Array.isArray(report.checks) ? report.checks : [];
+        for (var i = 0; i < checks.length; i += 1) {
+          var check = checks[i];
+          if (!isRecord(check)) continue;
           var row = document.createElement("div");
-          row.className = "fact-row";
-          row.textContent = items[i];
+          row.className = "fact-row tavern-check";
+          var badge = document.createElement("span");
+          var status = firstString(check, ["status"]) || "WARN";
+          badge.className = "badge badge-" + String(status).toLowerCase();
+          badge.textContent = status;
+          row.append(badge);
+          var label = document.createElement("strong");
+          label.textContent = firstString(check, ["label"]) || "檢查";
+          row.append(label);
+          row.append("： " + (firstString(check, ["detail"]) || ""));
           target.append(row);
+        }
+        var jsonPath = firstString(report, ["json_path"]);
+        var pngPath = firstString(report, ["png_path"]);
+        if (jsonPath !== "" || pngPath !== "") {
+          var paths = document.createElement("div");
+          paths.className = "readiness-row";
+          paths.textContent = (jsonPath === "" ? "" : "JSON → " + jsonPath + "　") + (pngPath === "" ? "" : "PNG → " + pngPath);
+          target.append(paths);
         }
       }
 
@@ -1891,22 +1912,29 @@ export function dashboard(): string {
           byId("repair-message").textContent = "沒有修復資料。";
           return;
         }
-        var legacy = Array.isArray(inspection.legacy_files) ? inspection.legacy_files : [];
-        var orphan = Array.isArray(inspection.orphan_backups) ? inspection.orphan_backups : [];
-        if (legacy.length === 0 && orphan.length === 0) {
-          byId("repair-message").textContent = "沒有發現殘留 legacy 檔案或孤兒備份。";
+        var items = Array.isArray(inspection.items) ? inspection.items : [];
+        var planHash = firstString(inspection, ["plan_hash"]);
+        if (planHash !== "") repairPlanHash = planHash;
+        if (items.length === 0) {
+          byId("repair-message").textContent = "沒有需要修復的項目。";
           return;
         }
-        byId("repair-message").textContent = "發現需要處理的項目。";
-        if (legacy.length > 0) {
-          var legacyRow = document.createElement("div");
-          legacyRow.textContent = "legacy 檔案：" + legacy.join("、");
-          target.append(legacyRow);
-        }
-        if (orphan.length > 0) {
-          var orphanRow = document.createElement("div");
-          orphanRow.textContent = "孤兒備份：" + orphan.join("、");
-          target.append(orphanRow);
+        byId("repair-message").textContent = "發現 " + items.length + " 項待修復（計畫 hash " + planHash.slice(0, 12) + "）。";
+        for (var i = 0; i < items.length; i += 1) {
+          var item = items[i];
+          if (!isRecord(item)) continue;
+          var row = document.createElement("div");
+          row.className = "readiness-row";
+          var badge = document.createElement("span");
+          badge.className = "badge badge-" + (firstString(item, ["kind"]) === "orphan_backup" ? "warn" : "info");
+          badge.textContent = firstString(item, ["kind"]) === "orphan_backup" ? "孤兒備份" : "legacy";
+          row.append(badge);
+          row.append(" " + (firstString(item, ["source"]) || "?") + " → " + (firstString(item, ["target"]) || "?"));
+          var note = document.createElement("div");
+          note.className = "muted";
+          note.textContent = (firstString(item, ["reason"]) || "") + (item.recoverable === true ? "（可回復）" : "（不可回復）");
+          row.append(note);
+          target.append(row);
         }
       }
 
@@ -1917,8 +1945,21 @@ export function dashboard(): string {
           byId("repair-message").textContent = "修復執行沒有回報。";
           return;
         }
-        var archived = Array.isArray(report.archived) ? report.archived : [];
-        byId("repair-message").textContent = archived.length === 0 ? "修復完成：沒有需要歸檔的項目。" : "修復完成：已歸檔 " + archived.join("、");
+        var actions = Array.isArray(report.actions) ? report.actions : [];
+        byId("repair-message").textContent = actions.length === 0 ? "修復完成：沒有需要處理的項目。" : "修復完成（計畫 hash " + firstString(report, ["plan_hash"]).slice(0, 12) + "）。";
+        for (var i = 0; i < actions.length; i += 1) {
+          var action = actions[i];
+          if (!isRecord(action)) continue;
+          var row = document.createElement("div");
+          row.className = "readiness-row";
+          var outcome = firstString(action, ["outcome"]) || "skipped";
+          var badge = document.createElement("span");
+          badge.className = "badge badge-" + (outcome === "archived" ? "pass" : outcome === "missing" ? "fail" : "warn");
+          badge.textContent = outcome === "archived" ? "已歸檔" : outcome === "missing" ? "來源已不存在" : "略過";
+          row.append(badge);
+          row.append(" " + (firstString(action, ["source"]) || "?") + " → " + (firstString(action, ["target"]) || "?"));
+          target.append(row);
+        }
       }
 
       async function loadDashboardData() {
@@ -1962,7 +2003,7 @@ export function dashboard(): string {
 
       function runRepair() {
         void runTask("執行修復", async function () {
-          var payload = await postJson("/workspace/repair/run", {});
+          var payload = await postJson("/workspace/repair/run", { plan_hash: repairPlanHash });
           renderRepairReport(payload);
           return payload;
         });
