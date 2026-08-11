@@ -601,7 +601,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
           json(response, 400, { error: "IMAGE_ID_REQUIRED" });
           return;
         }
-        const removed = await (await getRuntime()).removeProjectImage(imageId);
+        const removed = await (await getRuntime()).removeProjectImage(imageId, actor);
         json(response, 200, { status: removed ? "removed" : "not_found", image_id: imageId });
         return;
       }
@@ -827,7 +827,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       json(response, 404, { error: "NOT_FOUND" });
     } catch (error) {
       const errorCode = error !== null && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "";
-      const recoverableInput = error !== null && typeof error === "object" && "recoverable" in error && (error as { recoverable?: unknown }).recoverable === true && /^(?:AGENT_|INTERVIEW_|PROJECT_|REQUEST_|ISSUE_|TEMPLATE_|ZHUJI_)/u.test(errorCode);
+      const recoverableInput = error !== null && typeof error === "object" && "recoverable" in error && (error as { recoverable?: unknown }).recoverable === true && /^(?:AGENT_|INTERVIEW_|PROJECT_|REQUEST_|ISSUE_|TEMPLATE_|ZHUJI_|IMAGE_)/u.test(errorCode);
       const details = error !== null && typeof error === "object" && "details" in error ? (error as { details?: unknown }).details : undefined;
       if (new URL(request.url ?? "/", "http://localhost").pathname === "/mcp") {
         json(response, 200, { jsonrpc: "2.0", id: null, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } });

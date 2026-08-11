@@ -1292,6 +1292,107 @@ describe("natural language runtime boundary", () => {
       expect(ignored).toMatchObject({ overridable: true, override: { severity: "info", against_effective_severity: "warning", reason: "reviewed", by: "director" } });
     });
   });
+
+  describe("cover image workflow", () => {
+    async function blueprintRuntimeWithRoster(roster: Array<{ id: string; label?: string; mode?: string }>, primaryCharacterId?: string) {
+      const repository = new MemoryProjectRepository("image-roster");
+      const timestamp = new Date().toISOString();
+      const blueprintContent = JSON.stringify({
+        kind: "blueprint",
+        project_id: "image-roster",
+        blueprint_direction: { selected: "calm and direct" },
+        characters: roster,
+        ...(primaryCharacterId === undefined ? {} : { primary_character_id: primaryCharacterId }),
+      });
+      const blueprintHash = contentHash(blueprintContent);
+      const precheck: BlueprintPrecheckRecord = {
+        id: "precheck-image",
+        schema_version: 1,
+        project_id: "image-roster",
+        operation_id: "interview",
+        collaboration_mode: "free",
+        candidate_blueprint: { project_id: "image-roster", characters: roster, ...(primaryCharacterId === undefined ? {} : { primary_character_id: primaryCharacterId }) },
+        candidate_blueprint_revision: contentHash("candidate"),
+        checks: [{ subject_id: "image-roster", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }],
+        status: "recorded",
+        created_at: timestamp,
+        created_by: "director",
+      };
+      await repository.commit(0, (state) => ({
+        ...state,
+        project_status: "ready",
+        interview: { ...state.interview, status: "complete", flow: "character" },
+        blueprint_prechecks: [precheck],
+        artifacts: [{ ...blueprintArtifact("image-roster", precheck.id), content: blueprintContent, content_hash: blueprintHash, revision: blueprintHash }],
+        operations: [{ id: "interview", kind: "interview", request: "interview", status: "completed", created_at: timestamp, updated_at: timestamp, progress: [] }],
+      }));
+      return new WorkspaceRuntime(repository, { interviewRequired: true });
+    }
+
+    it("rejects an upload bound to a character outside the roster", async () => {
+      const runtime = await blueprintRuntimeWithRoster([{ id: "demo", label: "Demo", mode: "zhuji" }], "demo");
+      await expect(
+        runtime.setProjectImage({ actor: "server", attachments: [{ name: "cover.png", content: makeTestPng(512, 768), media_type: "image/png" }] }, { character_id: "gamma" })
+      ).rejects.toMatchObject({ code: "IMAGE_CHARACTER_NOT_IN_ROSTER" });
+      const snapshot = await runtime.dashboardSnapshot();
+      expect(snapshot.images).toHaveLength(0);
+    });
+
+    it("allows uploads when no Blueprint roster is bound", async () => {
+      const repository = new MemoryProjectRepository("image-open");
+      const runtime = new WorkspaceRuntime(repository);
+      const result = await runtime.setProjectImage({ actor: "server", attachments: [{ name: "cover.png", content: makeTestPng(512, 768), media_type: "image/png" }] }, { character_id: "anything" });
+      expect(result.image_id).toBeTruthy();
+    });
+
+    it("records audit entries and marks the export stale after publishing", async () => {
+      const repository = new MemoryProjectRepository("image-stale");
+      const runtime = new WorkspaceRuntime(repository);
+      const upload = await runtime.setProjectImage(
+        { actor: "server", attachments: [{ name: "cover.png", content: makeTestPng(512, 768), media_type: "image/png" }] },
+        { source: "assets/cover.png", license: "CC BY" }
+      );
+      let state = await repository.read();
+      expect(state.images).toHaveLength(1);
+      expect(state.audit.some((entry) => entry.event === "image.updated" && entry.details.action === "added" && entry.details.image_id === upload.image_id)).toBe(true);
+      let snapshot = await runtime.dashboardSnapshot();
+      expect(snapshot.images_stale).toBe(false);
+      const past = new Date(Date.now() - 3600_000).toISOString();
+      await repository.commit(state.revision, (current) => ({
+        ...current,
+        publishes: [
+          {
+            id: "pub-1",
+            operation_id: "op-build",
+            artifact_ids: ["a"],
+            content_ref: { hash: "a".repeat(64), size: 1 },
+            content_hash: "a".repeat(64),
+            png_ref: { hash: "b".repeat(64), size: 1 },
+            created_at: past,
+          },
+        ],
+      }));
+      snapshot = await runtime.dashboardSnapshot();
+      expect(snapshot.images_stale).toBe(true);
+      await runtime.removeProjectImage(upload.image_id, "server");
+      state = await repository.read();
+      expect(state.images).toHaveLength(0);
+      expect(state.audit.some((entry) => entry.event === "image.updated" && entry.details.action === "removed" && entry.details.image_id === upload.image_id)).toBe(true);
+    });
+
+    it("exposes the roster and manifest primary for the image panel", async () => {
+      const runtime = await blueprintRuntimeWithRoster(
+        [
+          { id: "alpha", label: "Alpha", mode: "zhuji" },
+          { id: "beta", label: "Beta", mode: "zhuji" },
+        ],
+        "beta"
+      );
+      const snapshot = await runtime.dashboardSnapshot();
+      expect(snapshot.roster).toEqual([expect.objectContaining({ id: "alpha" }), expect.objectContaining({ id: "beta" })]);
+      expect(snapshot.primary_character_id).toBe("beta");
+    });
+  });
 });
 
 function makeTestPng(width: number, height: number, filter = 0): Buffer {

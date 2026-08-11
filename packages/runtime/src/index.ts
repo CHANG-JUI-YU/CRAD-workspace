@@ -153,6 +153,26 @@ function latestByKey(state: ProjectState): ArtifactRecord[] {
   return [...latest.values()];
 }
 
+/** Roster ids from the current usable Blueprint artifact; undefined when no Blueprint is bound. */
+function blueprintRosterIds(state: ProjectState): Set<string> | undefined {
+  const latestRecordedPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
+  const blueprint = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint"
+    && hasUsableArtifact(artifact)
+    && (latestRecordedPrecheck === undefined || artifact.blueprint_precheck_id === latestRecordedPrecheck.id));
+  if (blueprint === undefined) return undefined;
+  try {
+    const value = JSON.parse(blueprint.content) as { characters?: Array<{ id?: unknown }> };
+    if (!Array.isArray(value.characters)) return undefined;
+    const ids = new Set<string>();
+    for (const entry of value.characters) {
+      if (typeof entry?.id === "string" && entry.id.trim().length > 0) ids.add(entry.id.trim());
+    }
+    return ids.size > 0 ? ids : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function parsedModeModules(state: ProjectState, kind: "zhuji" | "palette", characterId: string): Set<string> {
   const modules = new Set<string>();
   for (const artifact of latestByKey(state)) {
@@ -758,7 +778,10 @@ export interface DashboardSnapshot {
   blueprint?: DashboardBlueprint;
   prechecks: DashboardPrecheckView[];
   artifacts: DashboardArtifactView[];
-  images: Array<{ id: string; character_id?: string; width: number; height: number; aspect_ratio?: string; source?: string; license?: string; created_at: string }>;
+  images: Array<{ id: string; character_id?: string; width: number; height: number; aspect_ratio?: string; source?: string; license?: string; created_at: string; updated_at: string }>;
+  roster?: Array<{ id: string; label: string; display_name?: string; mode?: string }>;
+  primary_character_id?: string;
+  images_stale: boolean;
   facts: DashboardFactView[];
   sources: Array<{ id: string; candidate_id: string; title: string; revision: string }>;
   candidates: Array<{ id: string; title: string; url?: string; status: string; official?: boolean }>;
@@ -2517,6 +2540,9 @@ export class WorkspaceRuntime {
         blueprint = undefined;
       }
     }
+    const imageManifest = buildRequiredArtifactManifest(state);
+    const latestPublish = state.publishes.at(-1);
+    const latestImageUpdate = state.images.reduce((latest, image) => image.updated_at > latest ? image.updated_at : latest, "");
     return {
       project: {
         project_id: state.project_id,
@@ -2528,6 +2554,15 @@ export class WorkspaceRuntime {
         answers_count: state.interview.answers.length,
       },
       ...(blueprint === undefined ? {} : { blueprint }),
+      ...(imageManifest === undefined ? {} : {
+        roster: imageManifest.characters.map((character) => ({
+          id: character.character_id,
+          label: character.display_name || character.character_id,
+          ...(character.mode === undefined ? {} : { mode: character.mode }),
+        })),
+        ...(imageManifest.primary_character_id === undefined ? {} : { primary_character_id: imageManifest.primary_character_id }),
+      }),
+      images_stale: latestPublish !== undefined && latestImageUpdate !== "" && latestImageUpdate > latestPublish.created_at,
       prechecks: state.blueprint_prechecks.map((precheck) => ({
         id: precheck.id,
         status: precheck.status,
@@ -2566,6 +2601,7 @@ export class WorkspaceRuntime {
         ...(image.source === undefined ? {} : { source: image.source }),
         ...(image.license === undefined ? {} : { license: image.license }),
         created_at: image.created_at,
+        updated_at: image.updated_at,
       })),
       facts: state.facts.map((fact) => {
         const evidenceQuote = fact.evidence[0] ?? fact.evidence_refs?.[0]?.quote;
@@ -2916,6 +2952,12 @@ export class WorkspaceRuntime {
     const now = new Date().toISOString();
     const id = internalId("image");
     const state = await this.repository.read();
+    if (options.character_id !== undefined && options.character_id.trim().length > 0) {
+      const roster = blueprintRosterIds(state);
+      if (roster !== undefined && !roster.has(options.character_id.trim())) {
+        throw new CoreError("IMAGE_CHARACTER_NOT_IN_ROSTER", `角色 ${options.character_id} 不在目前 Blueprint 的角色名單中；請確認角色 ID 或先更新 Blueprint。`, true);
+      }
+    }
     await this.repository.commit(state.revision, (current) => {
       return {
         ...current,
@@ -2934,6 +2976,15 @@ export class WorkspaceRuntime {
           updated_at: now,
           ...(context.actor === undefined ? {} : { created_by: context.actor }),
         }],
+        audit: [...current.audit, {
+          id: internalId("audit"),
+          operation_id: "console",
+          event: "image.updated",
+          actor: context.actor ?? "worker",
+          occurred_at: now,
+          project_revision: current.revision + 1,
+          details: { action: "added", image_id: id, ...(options.character_id === undefined ? {} : { character_id: options.character_id }), width: info.width, height: info.height },
+        }],
       };
     });
     return { image_id: id, width: info.width, height: info.height };
@@ -2948,12 +2999,23 @@ export class WorkspaceRuntime {
     return { media_type: image.media_type, content };
   }
 
-  async removeProjectImage(imageId: string): Promise<boolean> {
+  async removeProjectImage(imageId: string, actor: string = "worker"): Promise<boolean> {
     const state = await this.repository.read();
-    if (!state.images.some((item) => item.id === imageId)) return false;
-    await this.repository.commit(state.revision, (current) => {
-      return { ...current, images: current.images.filter((item) => item.id !== imageId) };
-    });
+    const image = state.images.find((item) => item.id === imageId);
+    if (image === undefined) return false;
+    await this.repository.commit(state.revision, (current) => ({
+      ...current,
+      images: current.images.filter((item) => item.id !== imageId),
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: "console",
+        event: "image.updated",
+        actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { action: "removed", image_id: imageId, ...(image.character_id === undefined ? {} : { character_id: image.character_id }) },
+      }],
+    }));
     return true;
   }
 

@@ -667,4 +667,112 @@ describe("build, publish and import", () => {
     expect(state.artifacts).toHaveLength(1);
     expect(state.artifacts[0]?.name).toBe("Good");
   });
+
+  function coverPng(width: number, height: number): Uint8Array {
+    const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    function crc32(input: Buffer): number {
+      let crc = 0xffffffff;
+      for (const byte of input) {
+        let value = (crc ^ byte) & 0xff;
+        for (let bit = 0; bit < 8; bit += 1) value = (value & 1) === 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+        crc = (crc >>> 8) ^ value;
+      }
+      return (crc ^ 0xffffffff) >>> 0;
+    }
+    function chunk(type: string, data: Buffer): Buffer {
+      const typeBuffer = Buffer.from(type, "ascii");
+      const output = Buffer.alloc(data.length + 12);
+      output.writeUInt32BE(data.length, 0);
+      typeBuffer.copy(output, 4);
+      data.copy(output, 8);
+      output.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), data.length + 8);
+      return output;
+    }
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(width, 0);
+    ihdr.writeUInt32BE(height, 4);
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    return Buffer.concat([pngSignature, chunk("IHDR", ihdr), chunk("IEND", Buffer.alloc(0))]);
+  }
+
+  async function imageProject(images: Array<{ id: string; character_id?: string; blob_hash: string }>) {
+    const repository = new MemoryProjectRepository("image-project");
+    const timestamp = new Date().toISOString();
+    const blueprintContent = JSON.stringify({
+      kind: "blueprint",
+      project_id: "image-project",
+      blueprint_direction: { selected: "calm and direct" },
+      characters: [
+        { id: "alpha", label: "Alpha", ordinal: 1, mode: "zhuji" },
+        { id: "beta", label: "Beta", ordinal: 2, mode: "zhuji" },
+      ],
+      primary_character_id: "alpha",
+    });
+    const blueprintHash = contentHash(blueprintContent);
+    const precheck = {
+      id: "precheck-image",
+      schema_version: 1,
+      project_id: "image-project",
+      operation_id: "op-precheck",
+      collaboration_mode: "assisted",
+      candidate_blueprint: JSON.parse(blueprintContent) as Record<string, unknown>,
+      candidate_blueprint_revision: blueprintHash,
+      checks: [{ subject_id: "alpha", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }],
+      status: "recorded" as const,
+      created_at: timestamp,
+      created_by: "director",
+    };
+    const zhujiContent = JSON.stringify({
+      kind: "zhuji",
+      character_id: "alpha",
+      module: { schema_version: 1, mode: "zhuji", module: "appearance", title: "Appearance", data: { description: "A recognizable appearance." } },
+    });
+    const zhujiHash = contentHash(zhujiContent);
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_name: "Image Project",
+      artifacts: [
+        { id: "artifact-blueprint", key: "blueprint:image-project", kind: "blueprint", name: "image-project", content: blueprintContent, media_type: "application/json", content_hash: blueprintHash, revision: blueprintHash, status: "draft", created_at: timestamp, updated_at: timestamp, created_by: "director", operation_id: "op-precheck", blueprint_precheck_id: "precheck-image", blueprint_precheck_revision: blueprintHash },
+        { id: "artifact-zhuji", key: "zhuji:alpha/appearance", kind: "zhuji", name: "alpha/appearance", content: zhujiContent, media_type: "application/json", content_hash: zhujiHash, revision: zhujiHash, status: "draft", created_at: timestamp, updated_at: timestamp, created_by: "writer", operation_id: "op-author" },
+      ],
+      blueprint_prechecks: [precheck],
+      images: images.map((image) => ({ ...image, media_type: "image/png", width: 512, height: 768, created_at: timestamp, updated_at: timestamp })),
+      operations: [operation("op-build", "build")],
+    }));
+    return repository;
+  }
+
+  it("selects the cover image by the manifest primary and warns when only other characters have images", async () => {
+    const repository = await imageProject([{ id: "image-beta", character_id: "beta", blob_hash: contentHash(coverPng(512, 768)) }]);
+    await repository.writeBlob(contentHash(coverPng(512, 768)), coverPng(512, 768));
+    const service = new BuildService(repository);
+    const result = await service.run("op-build", "Preview current card", "worker");
+    expect(result.status).toBe("completed");
+    const builds = (await repository.read()).builds;
+    const diagnostics = builds[0]?.diagnostics ?? [];
+    expect(diagnostics.some((item) => item.startsWith("CARD_IMAGE_MISSING"))).toBe(true);
+    expect(diagnostics.join(" ")).toContain("primary");
+  });
+
+  it("falls back to an unbound image when no primary-bound image exists", async () => {
+    const repository = await imageProject([{ id: "image-cover", blob_hash: contentHash(coverPng(512, 768)) }]);
+    await repository.writeBlob(contentHash(coverPng(512, 768)), coverPng(512, 768));
+    const service = new BuildService(repository);
+    const result = await service.run("op-build", "Preview current card", "worker");
+    expect(result.status).toBe("completed");
+    const builds = (await repository.read()).builds;
+    expect(builds[0]?.diagnostics.some((item) => item.startsWith("CARD_IMAGE_MISSING"))).toBe(false);
+  });
+
+  it("warns when the selected cover image blob is missing", async () => {
+    const repository = await imageProject([{ id: "image-alpha", character_id: "alpha", blob_hash: "c".repeat(64) }]);
+    const service = new BuildService(repository);
+    const result = await service.run("op-build", "Preview current card", "worker");
+    expect(result.status).toBe("completed");
+    const builds = (await repository.read()).builds;
+    const diagnostics = builds[0]?.diagnostics ?? [];
+    expect(diagnostics.some((item) => item.startsWith("CARD_IMAGE_MISSING"))).toBe(true);
+    expect(diagnostics.join(" ")).toContain("blob");
+  });
 });

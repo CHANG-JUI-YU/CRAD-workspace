@@ -486,7 +486,9 @@ export function dashboard(): string {
         <h2 id="image-heading">角色圖像</h2>
       </div>
       <div class="field-row">
-        <input id="image-character" type="text" placeholder="角色 id（空白=封面圖）">
+        <select id="image-character">
+          <option value="">未綁定（作為封面圖）</option>
+        </select>
         <select id="image-ratio">
           <option value="">不裁切</option>
           <option value="1:1">1:1 方形</option>
@@ -496,6 +498,7 @@ export function dashboard(): string {
           <option value="16:9">16:9</option>
         </select>
       </div>
+      <div id="image-crop-preview" class="crop-preview" hidden></div>
       <div class="field-row">
         <input id="image-source" type="text" placeholder="來源（檔案/網址）">
         <input id="image-license" type="text" placeholder="使用權註記">
@@ -504,6 +507,7 @@ export function dashboard(): string {
         <input id="image-file" type="file" accept="image/png">
         <button id="submit-image" class="primary" type="button">上傳角色圖</button>
       </div>
+      <div id="image-stale-banner" class="panel-message" hidden></div>
       <div id="image-message" class="panel-message" aria-live="polite">尚未上傳角色圖像。</div>
       <div id="image-list" class="fact-list"></div>
     </section>
@@ -1734,11 +1738,112 @@ export function dashboard(): string {
         };
       }
 
-      function renderImageList(images) {
+      function renderImageUploadOptions(roster, primaryCharacterId) {
+        var select = byId("image-character");
+        var current = select.value;
+        var rosterList = Array.isArray(roster) ? roster : [];
+        while (select.options.length > 1) select.remove(1);
+        for (var i = 0; i < rosterList.length; i += 1) {
+          var entry = rosterList[i];
+          if (!isRecord(entry)) continue;
+          var option = document.createElement("option");
+          option.value = firstString(entry, ["id"]) || "";
+          var label = firstString(entry, ["label"]) || firstString(entry, ["id"]) || "";
+          if (firstString(entry, ["id"]) === primaryCharacterId) label += "（primary）";
+          option.textContent = label;
+          select.append(option);
+        }
+        var restored = false;
+        for (var j = 0; j < select.options.length; j += 1) {
+          if (select.options[j].value === current) {
+            select.selectedIndex = j;
+            restored = true;
+            break;
+          }
+        }
+        if (!restored) select.selectedIndex = 0;
+      }
+
+      function parseRatio(ratio) {
+        var parts = typeof ratio === "string" ? ratio.split(":") : [];
+        var width = parseFloat(parts[0] || "");
+        var height = parseFloat(parts[1] || "");
+        if (!(width > 0) || !(height > 0)) return undefined;
+        return { width: width, height: height };
+      }
+
+      function renderCropPreview() {
+        var container = byId("image-crop-preview");
+        container.textContent = "";
+        var fileInput = byId("image-file");
+        var file = fileInput.files && fileInput.files.length > 0 ? fileInput.files[0] : undefined;
+        var ratio = parseRatio(byId("image-ratio").value);
+        if (file === undefined || !file.type || file.type.indexOf("image/") !== 0) {
+          container.hidden = true;
+          return;
+        }
+        var image = new Image();
+        var url = URL.createObjectURL(file);
+        image.onload = function () {
+          var naturalRatio = image.naturalWidth / image.naturalHeight;
+          var canvas = document.createElement("canvas");
+          var maxWidth = 480;
+          var scale = Math.min(1, maxWidth / image.naturalWidth);
+          canvas.width = Math.round(image.naturalWidth * scale);
+          canvas.height = Math.round(image.naturalHeight * scale);
+          var ctx = canvas.getContext("2d");
+          ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+          if (ratio !== undefined) {
+            var currentRatio = image.naturalWidth / image.naturalHeight;
+            var cropWidth = 0;
+            var cropHeight = 0;
+            var offsetX = 0;
+            var offsetY = 0;
+            if (currentRatio > ratio.width / ratio.height) {
+              cropHeight = image.naturalHeight;
+              cropWidth = cropHeight * ratio.width / ratio.height;
+              offsetX = Math.floor((image.naturalWidth - cropWidth) / 2);
+            } else {
+              cropWidth = image.naturalWidth;
+              cropHeight = cropWidth * ratio.height / ratio.width;
+              offsetY = Math.floor((image.naturalHeight - cropHeight) / 2);
+            }
+            var sx = offsetX * scale;
+            var sy = offsetY * scale;
+            var sw = cropWidth * scale;
+            var sh = cropHeight * scale;
+            ctx.strokeStyle = "#1d6fb8";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(sx, sy, sw, sh);
+            ctx.fillStyle = "rgba(29,111,184,0.12)";
+            ctx.fillRect(sx, sy, sw, sh);
+            canvas.setAttribute("data-crop", "1");
+            var sizeText = document.createElement("div");
+            sizeText.className = "muted";
+            sizeText.textContent = "裁切輸出約 " + Math.round(cropWidth) + "×" + Math.round(cropHeight) + "px（依內建封面裁切規則置中）";
+            container.append(canvas, sizeText);
+          } else {
+            var plainText = document.createElement("div");
+            plainText.className = "muted";
+            plainText.textContent = "原始尺寸 " + image.naturalWidth + "×" + image.naturalHeight + "px，不裁切";
+            container.append(canvas, plainText);
+          }
+          container.hidden = false;
+          URL.revokeObjectURL(url);
+        };
+        image.onerror = function () {
+          container.textContent = "無法讀取圖片預覽。";
+          container.hidden = false;
+        };
+        image.src = url;
+      }
+
+      function renderImageList(images, roster, primaryCharacterId) {
         var target = byId("image-list");
         target.textContent = "";
         var list = Array.isArray(images) ? images : [];
         target.textContent = list.length === 0 ? "沒有角色圖像。" : "角色圖像 " + list.length + " 筆";
+        renderImageUploadOptions(roster, primaryCharacterId);
         for (var i = 0; i < list.length; i += 1) {
           var image = list[i];
           if (!isRecord(image)) continue;
@@ -1750,12 +1855,25 @@ export function dashboard(): string {
           preview.className = "image-thumb";
           var text = document.createElement("span");
           var parts = [];
-          parts.push((firstString(image, ["width"]) || "?") + "×" + (firstString(image, ["height"]) || "?"));
+          var width = typeof image.width === "number" ? image.width : NaN;
+          var height = typeof image.height === "number" ? image.height : NaN;
+          parts.push(isNaN(width) || isNaN(height) ? "?×?" : width + "×" + height);
           if (image.aspect_ratio) parts.push("裁切 " + image.aspect_ratio);
+          var characterId = typeof image.character_id === "string" ? image.character_id : undefined;
+          if (characterId !== undefined) {
+            var isPrimary = characterId === primaryCharacterId;
+            parts.push(isPrimary ? "角色 " + characterId + "（primary）" : "角色 " + characterId);
+          } else {
+            parts.push("封面圖");
+          }
           if (image.source) parts.push("來源：" + image.source);
+          else parts.push("來源未註記");
           if (image.license) parts.push("授權：" + image.license);
-          if (image.character_id) parts.push("角色 " + image.character_id);
+          else parts.push("授權未註記");
           text.textContent = parts.join(" · ");
+          if (characterId === undefined || (typeof image.source !== "string" || image.source === "") || (typeof image.license !== "string" || image.license === "")) {
+            row.className = "fact-row row-warn";
+          }
           var removeButton = document.createElement("button");
           removeButton.className = "inline-button";
           removeButton.textContent = "移除";
@@ -1971,7 +2089,14 @@ export function dashboard(): string {
           renderQuality(payload);
           renderIssueList(payload);
           renderSourceFact(payload);
-          renderImageList(payload.images);
+          renderImageList(payload.images, payload.roster, payload.primary_character_id);
+          var staleBanner = byId("image-stale-banner");
+          if (payload.images_stale === true) {
+            staleBanner.hidden = false;
+            staleBanner.textContent = "圖片已變更，最新發布的輸出已過期；請重新打包（Preview／發布）。";
+          } else {
+            staleBanner.hidden = true;
+          }
           renderRepairInspection(payload.repair);
           return payload;
         } catch (error) {
@@ -2071,6 +2196,8 @@ export function dashboard(): string {
       byId("apply-quality").addEventListener("click", applyQuality);
       byId("add-quality-override").addEventListener("click", addQualityOverride);
       byId("submit-image").addEventListener("click", submitImage);
+      byId("image-file").addEventListener("change", renderCropPreview);
+      byId("image-ratio").addEventListener("change", renderCropPreview);
       byId("refresh").addEventListener("click", function () { void refresh(); });
       byId("submit-request").addEventListener("click", submitRequest);
       byId("select-project").addEventListener("click", selectProject);

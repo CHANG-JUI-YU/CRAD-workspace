@@ -72,6 +72,9 @@ describe("local Dashboard", () => {
       "計畫 hash",
       "孤兒備份",
       "已歸檔",
+      "（primary）",
+      "裁切輸出約",
+      "請重新打包",
     ]) {
       expect(html).toContain(label);
     }

@@ -114,23 +114,23 @@ export class BuildService {
         return { status: "blocked", summary: `Publish blocked: ${diagnostics.join(" ")}` };
       }
     }
+    const buildWarnings: string[] = [];
     let coverImage: Uint8Array | undefined;
     if (initial.images.length > 0) {
-      const blueprintValue = [...initial.artifacts].reverse().find((artifact) => artifact.kind === "blueprint");
-      let primaryCharacterId: string | undefined;
-      try {
-        if (blueprintValue !== undefined) {
-          const parsed = JSON.parse(blueprintValue.content) as { characters?: Array<{ id?: unknown }> };
-          if (Array.isArray(parsed.characters) && parsed.characters[0] !== undefined) primaryCharacterId = String(parsed.characters[0].id ?? "");
-        }
-      } catch {
-        primaryCharacterId = undefined;
-      }
-      const bound = primaryCharacterId === undefined ? undefined : [...initial.images].reverse().find((image) => image.character_id === primaryCharacterId);
-      const selected = bound ?? [...initial.images].at(-1);
-      if (selected !== undefined) {
+      const primaryCharacterId = manifest?.primary_character_id;
+      const selected = primaryCharacterId === undefined
+        ? [...initial.images].at(-1)
+        : ([...initial.images].reverse().find((image) => image.character_id === primaryCharacterId)
+          ?? [...initial.images].reverse().find((image) => image.character_id === undefined));
+      if (selected === undefined) {
+        buildWarnings.push("CARD_IMAGE_MISSING: 找不到 primary 角色的已上傳圖片，也沒有未綁定角色的封面圖；本次輸出將使用內建佔位圖。");
+      } else {
         const blob = await this.repository.readBlob(selected.blob_hash);
-        if (blob !== undefined) coverImage = blob;
+        if (blob === undefined) {
+          buildWarnings.push(`CARD_IMAGE_MISSING: 角色圖 ${selected.id} 的 blob 遺失；本次輸出將使用內建佔位圖。`);
+        } else {
+          coverImage = blob;
+        }
       }
     }
     const compiled = compileProject(initial, { ...(modeSelection === undefined ? {} : { mode_selection: modeSelection }), ...(coverImage === undefined ? {} : { image: coverImage }) });
@@ -151,7 +151,7 @@ export class BuildService {
     const pngBlobRef = { hash: contentHash(compiled.png), size: compiled.png.byteLength };
     await this.repository.writeBlob(jsonBlobRef.hash, Buffer.from(canonicalIr, "utf8"));
     await this.repository.writeBlob(pngBlobRef.hash, compiled.png);
-    const diagnostics = compiled.diagnostics.map((item) => `${item.code}: ${item.message}`);
+    const diagnostics = [...buildWarnings, ...compiled.diagnostics.map((item) => `${item.code}: ${item.message}`)];
     const errorDiagnostics = compiled.diagnostics.filter((item) => item.severity === "error");
     const qualityPolicy = createQualityPolicySnapshot(initial.quality_profile, actor, now());
     const isPublish = /publish|release|發布|發佈|上線/iu.test(request);
@@ -202,7 +202,7 @@ export class BuildService {
       export_png_path: publishedCardPngExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection),
       created_at: now(),
     } : undefined;
-    const warningCount = compiled.diagnostics.filter((item) => item.severity === "warning").length;
+    const warningCount = buildWarnings.length + compiled.diagnostics.filter((item) => item.severity === "warning").length;
     const summary = `${isPublish ? "發布完成" : "Preview 完成"}，輸出 hash ${hash.slice(0, 12)}。${warningCount > 0 ? `（含 ${warningCount} 個警告）` : ""}`;
     const exportJsonPath = publishedCardExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection);
     const exportPngPath = publishedCardPngExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection);
@@ -244,7 +244,7 @@ export class BuildService {
           publish_id: publish?.id,
           artifact_ids: artifactIds,
           content_hash: hash,
-          ...(compiled.diagnostics.length > 0 ? { diagnostics: compiled.diagnostics.map((item) => `${item.code}: ${item.message}`) } : {}),
+          ...(diagnostics.length > 0 ? { diagnostics } : {}),
         },
       }],
     }), writeSet);
