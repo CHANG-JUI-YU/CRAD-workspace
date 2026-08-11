@@ -408,7 +408,9 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         return;
       }
       if (request.method === "GET" && url.pathname === "/workspace/publish/preview") {
-        json(response, 200, await (await getRuntime()).publishPreview());
+        const rawMode = url.searchParams.get("mode");
+        const mode = rawMode === "zhuji" || rawMode === "palette" ? rawMode : undefined;
+        json(response, 200, await (await getRuntime()).publishPreview(mode));
         return;
       }
       if (request.method === "GET" && url.pathname === "/workspace/tavern/compat") {

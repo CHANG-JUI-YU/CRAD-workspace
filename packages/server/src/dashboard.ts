@@ -321,6 +321,11 @@ export function dashboard(): string {
         </div>
       </div>
       <div class="form-actions">
+        <select id="readiness-mode" aria-label="就緒檢查打包模式">
+          <option value="">依專案自動判斷</option>
+          <option value="zhuji">Zhuji</option>
+          <option value="palette">Palette</option>
+        </select>
         <button id="check-readiness" class="primary" type="button">重新檢查</button>
       </div>
       <div id="readiness-message" class="panel-message" aria-live="polite">尚未執行就緒檢查。</div>
@@ -1701,7 +1706,10 @@ export function dashboard(): string {
       });
       byId("check-readiness").addEventListener("click", function () {
         void runTask("Publish 就緒檢查", async function () {
-          var payload = await requestJson("/workspace/publish/preview");
+          var modeSelect = byId("readiness-mode");
+          var modeValue = modeSelect instanceof HTMLSelectElement ? modeSelect.value : "";
+          var endpoint = modeValue === "" ? "/workspace/publish/preview" : "/workspace/publish/preview?mode=" + encodeURIComponent(modeValue);
+          var payload = await requestJson(endpoint);
           renderReadiness(payload.diagnostics);
           return payload;
         });

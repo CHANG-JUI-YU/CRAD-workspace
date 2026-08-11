@@ -1145,6 +1145,40 @@ describe("natural language runtime boundary", () => {
     const auditDetails = (await repository.read()).audit.filter((entry) => entry.event === "operation.failed").at(-1)?.details;
     expect(auditDetails).toMatchObject({ recoverable: false, code: "HARD_ERROR" });
   });
+
+  it("requires a mode for publish preview when both modes are available", async () => {
+    const repository = new MemoryProjectRepository("runtime-preview-mode");
+    const timestamp = new Date().toISOString();
+    const moduleArtifact = (id: string, kind: "zhuji" | "palette", module: string): ArtifactRecord => ({
+      id,
+      key: `${kind}:demo/${module}`,
+      kind,
+      name: `${kind}/${module}`,
+      content: JSON.stringify({ kind, character_id: "demo", module: { schema_version: 1, mode: kind, module, title: module, data: {} } }),
+      media_type: "application/json",
+      content_hash: contentHash(id),
+      revision: contentHash(id),
+      status: "draft",
+      created_at: timestamp,
+      updated_at: timestamp,
+      created_by: "test",
+      operation_id: "op",
+    });
+    await repository.commit(0, (state) => ({
+      ...state,
+      artifacts: [moduleArtifact("zhuji-1", "zhuji", "basic_information"), moduleArtifact("palette-1", "palette", "personality_palette")],
+    }));
+    const runtime = new WorkspaceRuntime(repository);
+    const ambiguous = await runtime.publishPreview();
+    expect(ambiguous.ok).toBe(false);
+    expect(ambiguous.diagnostics.map((item) => item.code)).toContain("MODE_SELECTION_REQUIRED");
+    const zhuji = await runtime.publishPreview("zhuji");
+    expect(typeof zhuji.ok).toBe("boolean");
+    expect(zhuji.diagnostics.map((item) => item.code)).not.toContain("MODE_SELECTION_REQUIRED");
+    const palette = await runtime.publishPreview("palette");
+    expect(typeof palette.ok).toBe("boolean");
+    expect(palette.diagnostics.map((item) => item.code)).not.toContain("MODE_SELECTION_REQUIRED");
+  });
 });
 
 function makeTestPng(width: number, height: number, filter = 0): Buffer {

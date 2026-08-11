@@ -538,7 +538,7 @@ export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase, 
   const artifacts = latestArtifacts(state);
   const content = artifacts.filter((artifact) => contentKinds.has(artifact.kind));
   const manifest = manifestOverride ?? buildRequiredArtifactManifest(state);
-  const plan = computeBuildPlan(state);
+  const plan = computeBuildPlan(state, undefined, { inferMode: true });
   const planIds = new Set(plan.entries.map((entry) => entry.artifact_id));
   if (managed) {
     if (state.project_status === "interviewing" || state.interview.status === "active") {

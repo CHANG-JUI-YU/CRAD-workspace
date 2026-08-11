@@ -281,7 +281,7 @@ export function buildRequiredArtifactManifest(
       diagnostics.push({
         code: "BLUEPRINT_CHARACTER_MODE_INVALID",
         severity: "error",
-        message: `Blueprint character ${characterId} must declare a valid mode: zhuji or palette.`,
+        message: `Blueprint character ${characterId} must declare a valid mode: zhuji or palette. 請在 Blueprint 中為該角色補充 mode（zhuji 或 palette）後重新產生 Blueprint，再繼續打包與發布。`,
       });
     }
     const includedInExport = exportMode === undefined || exportMode === mode;

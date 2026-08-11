@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MemoryProjectRepository, contentHash, createProjectState, qualityProfileForLevel, type ArtifactRecord, type BlueprintPrecheckRecord, type FactRecord, type IssueSeverity, type OperationRecord } from "@st-workspace/core";
+import { MemoryProjectRepository, computeBuildPlan, contentHash, createProjectState, qualityProfileForLevel, type ArtifactRecord, type BlueprintPrecheckRecord, type FactRecord, type IssueSeverity, type OperationRecord } from "@st-workspace/core";
 import { AuthoringService, buildRequiredArtifactManifest, validateWorkflow } from "../src/index.js";
 
 const now = new Date().toISOString();
@@ -659,5 +659,50 @@ describe("workflow gates and editable publish", () => {
     };
     const result = validateWorkflow(await repository.read(), "publish", overridden);
     expect(result.diagnostics.map((item) => item.code)).toContain("BLUEPRINT_CHARACTER_MODE_INVALID");
+  });
+
+  it("infers the only available mode into the build plan when no blueprint exists", async () => {
+    const timestamp = new Date().toISOString();
+    const moduleArtifact = (id: string, kind: "zhuji" | "palette", module: string): ArtifactRecord => ({
+      id,
+      key: `${kind}:demo/${module}`,
+      kind,
+      name: `${kind}/${module}`,
+      content: JSON.stringify({ kind, character_id: "demo", module: { schema_version: 1, mode: kind, module, title: module, data: {} } }),
+      media_type: "application/json",
+      content_hash: contentHash(id),
+      revision: contentHash(id),
+      status: "draft",
+      created_at: timestamp,
+      updated_at: timestamp,
+      created_by: "test",
+      operation_id: "op",
+    });
+    const zhujiOnly = new MemoryProjectRepository("plan-single-zhuji");
+    await zhujiOnly.commit(0, (state) => ({
+      ...state,
+      artifacts: [moduleArtifact("zhuji-1", "zhuji", "basic_information")],
+    }));
+    const zhujiPlan = computeBuildPlan(await zhujiOnly.read(), undefined, { inferMode: true });
+    expect(zhujiPlan.mode_selection).toBe("zhuji");
+    expect(zhujiPlan.entries.map((entry) => entry.kind)).toEqual(["zhuji"]);
+
+    const paletteOnly = new MemoryProjectRepository("plan-single-palette");
+    await paletteOnly.commit(0, (state) => ({
+      ...state,
+      artifacts: [moduleArtifact("palette-1", "palette", "personality_palette")],
+    }));
+    const palettePlan = computeBuildPlan(await paletteOnly.read(), undefined, { inferMode: true });
+    expect(palettePlan.mode_selection).toBe("palette");
+    expect(palettePlan.entries.map((entry) => entry.kind)).toEqual(["palette"]);
+
+    const both = new MemoryProjectRepository("plan-both-modes");
+    await both.commit(0, (state) => ({
+      ...state,
+      artifacts: [moduleArtifact("zhuji-1", "zhuji", "basic_information"), moduleArtifact("palette-1", "palette", "personality_palette")],
+    }));
+    const bothPlan = computeBuildPlan(await both.read(), undefined, { inferMode: true });
+    expect(bothPlan.mode_selection).toBeUndefined();
+    expect(bothPlan.entries.every((entry) => entry.kind !== "zhuji" && entry.kind !== "palette")).toBe(true);
   });
 });

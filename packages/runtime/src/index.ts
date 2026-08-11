@@ -2546,9 +2546,22 @@ export class WorkspaceRuntime {
     };
   }
 
-  async publishPreview(): Promise<WorkflowGateResult> {
+  async publishPreview(mode?: "zhuji" | "palette"): Promise<WorkflowGateResult> {
     const state = await this.repository.read();
-    return validateWorkflow(state, "publish");
+    const modes = availableCardModesRuntime(state);
+    let effective = mode;
+    if (effective === undefined) {
+      if (modes.zhuji && modes.palette) {
+        return {
+          ok: false,
+          diagnostics: [{ code: "MODE_SELECTION_REQUIRED", message: "同時存在 Zhuji 與 Palette 模組；請先選擇本次打包模式（zhuji 或 palette）再檢查就緒狀態。", severity: "error" }],
+        };
+      }
+      if (modes.zhuji) effective = "zhuji";
+      if (modes.palette) effective = "palette";
+    }
+    const manifest = buildRequiredArtifactManifest(state, effective);
+    return validateWorkflow(state, "publish", manifest);
   }
 
   async buildReadiness(): Promise<DashboardBuildReadiness> {

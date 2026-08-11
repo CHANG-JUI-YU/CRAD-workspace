@@ -544,7 +544,7 @@ function planRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-export function computeBuildPlan(state: ProjectState, modeSelection?: CardModeSelection): BuildPlan {
+export function computeBuildPlan(state: ProjectState, modeSelection?: CardModeSelection, options: { inferMode?: boolean } = {}): BuildPlan {
   const latestByKey = new Map<string, ArtifactRecord>();
   for (const artifact of state.artifacts) latestByKey.set(artifact.key, artifact);
   const latest = [...latestByKey.values()];
@@ -560,19 +560,26 @@ export function computeBuildPlan(state: ProjectState, modeSelection?: CardModeSe
     if (relationships !== undefined) relationshipsEnabled = relationships.enabled === true;
   }
 
+  let effectiveMode = modeSelection;
+  if (effectiveMode === undefined && options.inferMode === true) {
+    const hasZhuji = latest.some((artifact) => artifact.kind === "zhuji");
+    const hasPalette = latest.some((artifact) => artifact.kind === "palette");
+    if (hasZhuji !== hasPalette) effectiveMode = hasZhuji ? "zhuji" : "palette";
+  }
+
   const entries: BuildPlanEntry[] = [];
   for (const artifact of latest) {
     if (NON_PLAN_ARTIFACT_KINDS.has(artifact.kind)) continue;
     if (artifact.kind === "world_lore" && !worldEnabled) continue;
     if (artifact.kind === "relationship" && !relationshipsEnabled) continue;
     if (artifact.kind === "zhuji" || artifact.kind === "palette") {
-      if (modeSelection === undefined) continue;
-      if (modeSelection !== "both" && modeSelection !== artifact.kind) continue;
+      if (effectiveMode === undefined) continue;
+      if (effectiveMode !== "both" && effectiveMode !== artifact.kind) continue;
     }
     entries.push({ key: artifact.key, artifact_id: artifact.id, kind: artifact.kind, revision: artifact.revision });
   }
   return {
-    ...(modeSelection === undefined ? {} : { mode_selection: modeSelection }),
+    ...(effectiveMode === undefined ? {} : { mode_selection: effectiveMode }),
     world_enabled: worldEnabled,
     relationships_enabled: relationshipsEnabled,
     entries,
