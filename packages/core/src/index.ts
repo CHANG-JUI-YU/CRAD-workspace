@@ -545,6 +545,22 @@ function planRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
+function getArtifactCharacterId(artifact: ArtifactRecord): string | undefined {
+  if (!["character", "wardrobe", "greeting", "zhuji", "palette"].includes(artifact.kind)) return undefined;
+  const parts = artifact.key.split(":");
+  if (parts.length >= 2 && parts[1]?.trim()) {
+    const rawCid = parts[1].trim().split("/")[0];
+    if (rawCid !== undefined && rawCid.trim().length > 0) return rawCid.trim();
+  }
+  const parsed = parseArtifactValue(artifact);
+  if (parsed !== undefined) {
+    const doc = planRecord(parsed.document);
+    if (typeof doc?.id === "string" && doc.id.trim().length > 0) return doc.id.trim();
+    if (typeof parsed.character_id === "string" && parsed.character_id.trim().length > 0) return parsed.character_id.trim();
+  }
+  return undefined;
+}
+
 export function computeBuildPlan(state: ProjectState, modeSelection?: CardModeSelection, options: { inferMode?: boolean } = {}): BuildPlan {
   const latestByKey = new Map<string, ArtifactRecord>();
   for (const artifact of state.artifacts) latestByKey.set(artifact.key, artifact);
@@ -553,12 +569,28 @@ export function computeBuildPlan(state: ProjectState, modeSelection?: CardModeSe
   const blueprint = [...latest].reverse().find((artifact) => artifact.kind === "blueprint");
   let worldEnabled = true;
   let relationshipsEnabled = true;
+  let rosterIds: Set<string> | undefined;
+  let characterModes: Map<string, "zhuji" | "palette"> | undefined;
   if (blueprint !== undefined) {
     const parsed = planRecord(parseArtifactValue(blueprint));
     const world = planRecord(parsed?.world);
     if (world !== undefined) worldEnabled = world.enabled === true;
     const relationships = planRecord(parsed?.relationships);
     if (relationships !== undefined) relationshipsEnabled = relationships.enabled === true;
+    if (Array.isArray(parsed?.characters)) {
+      rosterIds = new Set<string>();
+      characterModes = new Map<string, "zhuji" | "palette">();
+      for (const item of parsed.characters) {
+        const rec = planRecord(item);
+        if (typeof rec?.id === "string" && rec.id.trim().length > 0) {
+          const cid = rec.id.trim();
+          rosterIds.add(cid);
+          if (rec.mode === "zhuji" || rec.mode === "palette") {
+            characterModes.set(cid, rec.mode);
+          }
+        }
+      }
+    }
   }
 
   let effectiveMode = modeSelection;
@@ -573,6 +605,18 @@ export function computeBuildPlan(state: ProjectState, modeSelection?: CardModeSe
     if (NON_PLAN_ARTIFACT_KINDS.has(artifact.kind)) continue;
     if (artifact.kind === "world_lore" && !worldEnabled) continue;
     if (artifact.kind === "relationship" && !relationshipsEnabled) continue;
+
+    const boundCid = getArtifactCharacterId(artifact);
+    if (boundCid !== undefined && rosterIds !== undefined && !rosterIds.has(boundCid)) {
+      continue;
+    }
+    if (boundCid !== undefined && effectiveMode !== undefined && effectiveMode !== "both" && characterModes !== undefined) {
+      const declaredMode = characterModes.get(boundCid);
+      if (declaredMode !== undefined && declaredMode !== effectiveMode) {
+        continue;
+      }
+    }
+
     if (artifact.kind === "zhuji" || artifact.kind === "palette") {
       if (effectiveMode === undefined) continue;
       if (effectiveMode !== "both" && effectiveMode !== artifact.kind) continue;

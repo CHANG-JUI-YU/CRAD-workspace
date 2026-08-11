@@ -292,14 +292,14 @@ export function buildRequiredArtifactManifest(
       ? current.filter((artifact) => isModeModule(artifact, mode, characterId)).flatMap(modeModuleKeys)
       : [];
     const missingModules = includedInExport ? requiredModules.filter((module) => !presentModules.includes(module)) : [];
-    if (matched !== undefined) addScope([matched.artifact.id]);
-    if (matched === undefined) {
+    if (matched !== undefined && includedInExport) addScope([matched.artifact.id]);
+    if (matched === undefined && includedInExport) {
       diagnostics.push({
         code: "CHARACTER_ARTIFACT_MISSING",
         severity: "error",
         message: `Blueprint roster character ${characterId} has no character artifact.`,
       });
-    } else if (!matched.document.display_name) {
+    } else if (matched !== undefined && !matched.document.display_name && includedInExport) {
       diagnostics.push({
         code: "CHARACTER_DISPLAY_NAME_MISSING",
         severity: "error",
@@ -365,6 +365,11 @@ export function buildRequiredArtifactManifest(
 
   const selectedModes = new Set(characterRequirements.flatMap((character) => character.mode === undefined ? [] : [character.mode]));
   const exportModes: ManifestCardModeSelection = exportMode ?? (selectedModes.size === 1 ? [...selectedModes][0]! : "both");
+  const includedCharacterIds = new Set(
+    characterRequirements
+      .filter((character) => exportMode === undefined || exportMode === character.mode)
+      .map((character) => character.character_id)
+  );
   for (const character of characterRequirements) {
     if (character.mode === undefined) continue;
     const includedInExport = exportMode === undefined || exportMode === character.mode;
@@ -373,7 +378,13 @@ export function buildRequiredArtifactManifest(
       if (isModeModule(artifact, character.mode, character.character_id)) addScope([artifact.id]);
     }
   }
-  addScope(current.filter((artifact) => artifact.kind === "wardrobe").map((artifact) => artifact.id));
+  for (const artifact of current.filter((item) => item.kind === "wardrobe")) {
+    const parts = artifact.key.split(":");
+    const wardrobeCid = parts.length >= 2 ? parts[1] : undefined;
+    if (wardrobeCid === undefined || includedCharacterIds.has(wardrobeCid)) {
+      addScope([artifact.id]);
+    }
+  }
 
   const primaryCharacter = characterRequirements.find((character) => character.character_id === primaryCharacterId);
   return {

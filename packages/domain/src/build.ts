@@ -116,7 +116,12 @@ export class BuildService {
     }
     const buildWarnings: string[] = [];
     let coverImage: Uint8Array | undefined;
-    if (initial.images.length > 0) {
+    const isCharacterCardExport = manifest?.primary_character_id !== undefined || initial.artifacts.some((art) => art.kind === "character");
+    if (initial.images.length === 0) {
+      if (isCharacterCardExport) {
+        buildWarnings.push("CARD_IMAGE_MISSING: 專案尚未上傳角色圖片；本次輸出將使用內建佔位圖。");
+      }
+    } else {
       const primaryCharacterId = manifest?.primary_character_id;
       const selected = primaryCharacterId === undefined
         ? [...initial.images].at(-1)
