@@ -5,6 +5,7 @@ import {
   buildTemplateContext,
   beginInterview,
   canonicalJson,
+  computeProjectProjection,
   CoreError,
   contentHash,
   createQualityPolicySnapshot,
@@ -155,29 +156,13 @@ function hasUsableArtifact(_artifact: ProjectState["artifacts"][number]): boolea
 
 /** Current projection: the latest revision per artifact key, mirroring domain/gate semantics. */
 function latestByKey(state: ProjectState): ArtifactRecord[] {
-  const latest = new Map<string, ArtifactRecord>();
-  for (const artifact of state.artifacts) latest.set(artifact.key, artifact);
-  return [...latest.values()];
+  return [...computeProjectProjection(state).currentArtifacts];
 }
 
 /** Roster ids from the current usable Blueprint artifact; undefined when no Blueprint is bound. */
 function blueprintRosterIds(state: ProjectState): Set<string> | undefined {
-  const latestRecordedPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
-  const blueprint = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint"
-    && hasUsableArtifact(artifact)
-    && (latestRecordedPrecheck === undefined || artifact.blueprint_precheck_id === latestRecordedPrecheck.id));
-  if (blueprint === undefined) return undefined;
-  try {
-    const value = JSON.parse(blueprint.content) as { characters?: Array<{ id?: unknown }> };
-    if (!Array.isArray(value.characters)) return undefined;
-    const ids = new Set<string>();
-    for (const entry of value.characters) {
-      if (typeof entry?.id === "string" && entry.id.trim().length > 0) ids.add(entry.id.trim());
-    }
-    return ids.size > 0 ? ids : undefined;
-  } catch {
-    return undefined;
-  }
+  const roster = computeProjectProjection(state).roster;
+  return roster.length > 0 ? new Set(roster.map((character) => character.id)) : undefined;
 }
 
 function parsedModeModules(state: ProjectState, kind: "zhuji" | "palette", characterId: string): Set<string> {
@@ -289,13 +274,7 @@ function nonEmptyString(value: unknown): string | undefined {
 }
 
 function latestBlueprintSnapshot(state: ProjectState): Record<string, unknown> | undefined {
-  const artifact = [...state.artifacts].reverse().find((item) => item.kind === "blueprint" && hasUsableArtifact(item));
-  if (artifact === undefined) return undefined;
-  try {
-    return objectValue(JSON.parse(artifact.content));
-  } catch {
-    return undefined;
-  }
+  return computeProjectProjection(state).blueprint?.artifact_value;
 }
 
 function isSourceAdaptationProject(state: ProjectState): boolean {
@@ -3053,8 +3032,9 @@ export class WorkspaceRuntime {
 
   async buildReadiness(): Promise<DashboardBuildReadiness> {
     const state = await this.repository.read();
+    const projection = computeProjectProjection(state);
     const manifest = buildRequiredArtifactManifest(state);
-    const current = latestByKey(state);
+    const current = [...projection.currentArtifacts];
     const modes = availableCardModesRuntime(state);
     let primary: { id: string; label: string; mode: string } | undefined;
     if (manifest !== undefined && manifest.primary_character_id !== undefined) {
@@ -3064,16 +3044,10 @@ export class WorkspaceRuntime {
       }
     }
     if (primary === undefined) {
-      const blueprintArtifact = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint");
-      if (blueprintArtifact !== undefined) {
-        try {
-          const parsed = JSON.parse(blueprintArtifact.content) as { characters?: Array<{ id?: unknown; label?: unknown; mode?: unknown }> };
-          const characters = Array.isArray(parsed.characters) ? parsed.characters : [];
-          const first = characters[0];
-          if (first !== undefined) primary = { id: String(first.id ?? ""), label: String(first.label ?? first.id ?? ""), mode: String(first.mode ?? "") };
-        } catch {
-          primary = undefined;
-        }
+      const first = projection.roster.find((character) => character.is_primary) ?? projection.roster[0];
+      if (first !== undefined) {
+        const mode = projection.blueprint?.characters.find((character) => character.id === first.id)?.mode ?? "";
+        primary = { id: first.id, label: first.label, mode };
       }
     }
     const entryKinds: readonly ArtifactKind[] = ["world_lore", "relationship", "greeting", "wardrobe", "plugin", "zhuji", "palette"];

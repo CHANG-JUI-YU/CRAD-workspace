@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { computeBuildPlan, type FactReviewDecisionRecord, type OperationRecord, type ProjectState } from "@st-workspace/core";
+import { computeBuildPlan, computeProjectProjection, type FactReviewDecisionRecord, type OperationRecord, type ProjectState } from "@st-workspace/core";
 import { compileProject } from "@st-workspace/compiler";
 import { readCardFromPng } from "@st-workspace/adapters-png";
+import { buildRequiredArtifactManifest, validateWorkflow } from "../src/index.js";
 import { projectScenario } from "./project-scenario.js";
 
 describe("project scenario invariants", () => {
@@ -70,5 +71,48 @@ describe("project scenario invariants", () => {
     const jsonCard = JSON.parse(compiled.json) as { data: unknown };
     expect(card.card.data).toEqual(jsonCard.data);
     expect(card.authority).toBe("ccv3");
+  });
+
+  it("uses one projection for original, source-adaptation, and primary selection", async () => {
+    const original = await projectScenario({ projectName: "Original", primaryCharacterId: "c05" });
+    const sourceAdaptation = await projectScenario({ projectName: "Adaptation", sourceAdaptation: true, primaryCharacterId: "c05" });
+    for (const scenario of [original, sourceAdaptation]) {
+      const state = await scenario.repository.read();
+      const projection = computeProjectProjection(state);
+      expect(projection.roster.find((character) => character.is_primary)?.id).toBe("c05");
+      expect(projection.intent.primary_character_id).toBe("c05");
+      expect(projection.intent.is_source_adaptation).toBe(scenario === sourceAdaptation);
+    }
+  });
+
+  it("keeps the ten-character mixed-mode plan and gate scope aligned", async () => {
+    const scenario = await projectScenario({ projectName: "Mixed ten", primaryCharacterId: "c07" });
+    const state = await scenario.repository.read();
+    const projection = computeProjectProjection(state);
+    const plan = projection.publishPlan("both");
+    const manifest = buildRequiredArtifactManifest(state);
+    const compiled = compileProject(state, { mode_selection: "both" });
+    const planIds = new Set(plan.entries.map((entry) => entry.artifact_id));
+    expect(projection.roster).toHaveLength(10);
+    expect(projection.roster.find((character) => character.is_primary)?.id).toBe("c07");
+    expect(compiled.normalized.latestArtifacts.map((artifact) => artifact.id).sort()).toEqual([...planIds].sort());
+    expect(manifest).toBeDefined();
+    for (const artifactId of manifest!.in_scope_artifact_ids) expect(planIds.has(artifactId)).toBe(true);
+    const gate = validateWorkflow(state, "publish", manifest);
+    expect(gate.diagnostics.some((item) => item.code === "BLUEPRINT_PRIMARY_CHARACTER_FALLBACK")).toBe(false);
+  });
+
+  it("keeps same-character dual-mode variants independently selectable", async () => {
+    const scenario = await projectScenario({
+      projectName: "Dual mode",
+      roster: [{ id: "dual", label: "Dual", mode: "zhuji" }, { id: "dual", label: "Dual", mode: "palette" }],
+      primaryCharacterId: "dual",
+    });
+    const state = await scenario.repository.read();
+    const projection = computeProjectProjection(state);
+    const plan = projection.publishPlan("both");
+    expect(plan.entries.filter((entry) => entry.kind === "zhuji")).toHaveLength(1);
+    expect(plan.entries.filter((entry) => entry.kind === "palette")).toHaveLength(1);
+    expect(new Set(plan.entries.map((entry) => entry.artifact_id)).size).toBe(plan.entries.length);
   });
 });

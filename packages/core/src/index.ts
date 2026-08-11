@@ -524,11 +524,55 @@ export interface BuildPlanEntry {
  * projection. Gate, review, blocking-issue and compiler checks all consume this
  * same plan so that "reviewed" and "packed" always refer to the same artifact set.
  */
-export interface BuildPlan {
+export interface PublishPlan {
   mode_selection?: CardModeSelection;
   world_enabled: boolean;
   relationships_enabled: boolean;
-  entries: BuildPlanEntry[];
+  entries: readonly BuildPlanEntry[];
+}
+
+/** Backward-compatible name for callers that still refer to a build plan. */
+export type BuildPlan = PublishPlan;
+
+export interface ProjectBlueprintCharacter {
+  id: string;
+  label: string;
+  ordinal: number;
+  mode?: "zhuji" | "palette";
+  aliases: string[];
+}
+
+/** Normalized Blueprint data shared by gate, compiler and runtime projections. */
+export interface ProjectBlueprintProjection {
+  artifact_id?: string;
+  artifact_revision?: string;
+  precheck_id?: string;
+  precheck_revision?: string;
+  characters: ProjectBlueprintCharacter[];
+  primary_character_id?: string;
+  primary_character_id_explicit: boolean;
+  world_enabled: boolean;
+  world_authoring_timing?: string;
+  relationships_enabled: boolean;
+  source_adaptation: boolean;
+  /** Raw artifact value is retained for compatibility-only merge/read paths. */
+  artifact_value?: Record<string, unknown>;
+  /** Raw precheck value is retained for compatibility-only gate/read paths. */
+  precheck_value?: Record<string, unknown>;
+}
+
+/**
+ * The one read-only projection of project state used to make a publish plan.
+ * Consumers must not independently derive latest artifacts, roster or primary
+ * character information from ProjectState.artifacts.
+ */
+export interface ProjectProjection {
+  currentArtifacts: readonly ArtifactRecord[];
+  blueprint?: ProjectBlueprintProjection;
+  intent: ProjectIntentProjection;
+  roster: readonly ProjectIntentCharacter[];
+  factRegister: readonly FactRecord[];
+  publishPlan: (modeSelection?: CardModeSelection, options?: { inferMode?: boolean }) => PublishPlan;
 }
 
 const NON_PLAN_ARTIFACT_KINDS: ReadonlySet<ArtifactRecord["kind"]> = new Set([
@@ -563,74 +607,172 @@ function getArtifactCharacterId(artifact: ArtifactRecord): string | undefined {
   return undefined;
 }
 
-export function computeBuildPlan(state: ProjectState, modeSelection?: CardModeSelection, options: { inferMode?: boolean } = {}): BuildPlan {
-  const latestByKey = new Map<string, ArtifactRecord>();
-  for (const artifact of state.artifacts) latestByKey.set(artifact.key, artifact);
-  const latest = [...latestByKey.values()];
+function blueprintValue(value: unknown): Record<string, unknown> | undefined {
+  return planRecord(value);
+}
 
-  const blueprint = [...latest].reverse().find((artifact) => artifact.kind === "blueprint");
-  let worldEnabled = true;
-  let relationshipsEnabled = true;
-  let rosterIds: Set<string> | undefined;
-  let characterModes: Map<string, "zhuji" | "palette"> | undefined;
-  if (blueprint !== undefined) {
-    const parsed = planRecord(parseArtifactValue(blueprint));
-    const world = planRecord(parsed?.world);
-    if (world !== undefined) worldEnabled = world.enabled === true;
-    const relationships = planRecord(parsed?.relationships);
-    if (relationships !== undefined) relationshipsEnabled = relationships.enabled === true;
-    if (Array.isArray(parsed?.characters)) {
-      rosterIds = new Set<string>();
-      characterModes = new Map<string, "zhuji" | "palette">();
-      for (const item of parsed.characters) {
-        const rec = planRecord(item);
-        if (typeof rec?.id === "string" && rec.id.trim().length > 0) {
-          const cid = rec.id.trim();
-          rosterIds.add(cid);
-          if (rec.mode === "zhuji" || rec.mode === "palette") {
-            characterModes.set(cid, rec.mode);
-          }
-        }
-      }
-    }
-  }
+function textValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
 
+function stringValues(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
+    : [];
+}
+
+function parseBlueprintProjection(
+  value: Record<string, unknown> | undefined,
+  refs: { artifact?: ArtifactRecord; precheck?: BlueprintPrecheckRecord } = {},
+): ProjectBlueprintProjection | undefined {
+  if (value === undefined) return undefined;
+  const rawCharacters = Array.isArray(value.characters) ? value.characters : [];
+  const characters: ProjectBlueprintCharacter[] = [];
+  const seen = new Set<string>();
+  rawCharacters.forEach((item, index) => {
+    const entry = planRecord(item);
+    const id = textValue(entry?.id);
+    if (id === undefined || seen.has(id)) return;
+    seen.add(id);
+    characters.push({
+      id,
+      label: textValue(entry?.label) ?? textValue(entry?.display_name) ?? id,
+      ordinal: typeof entry?.ordinal === "number" && Number.isFinite(entry.ordinal) ? entry.ordinal : index + 1,
+      ...(entry?.mode === "zhuji" || entry?.mode === "palette" ? { mode: entry.mode } : {}),
+      aliases: stringValues(entry?.aliases),
+    });
+  });
+  const world = planRecord(value.world);
+  const relationships = planRecord(value.relationships);
+  const artifact = refs.artifact;
+  const precheck = refs.precheck;
+  const primary = textValue(value.primary_character_id);
+  const timing = textValue(world?.authoring_timing);
+  const artifactRaw = artifact === undefined ? undefined : blueprintValue(parseArtifactValue(artifact));
+  const precheckRaw = precheck?.candidate_blueprint;
+  return {
+    ...(artifact === undefined ? {} : { artifact_id: artifact.id, artifact_revision: artifact.revision }),
+    ...(precheck === undefined ? {} : { precheck_id: precheck.id, precheck_revision: precheck.candidate_blueprint_revision }),
+    characters,
+    ...(primary === undefined ? {} : { primary_character_id: primary }),
+    primary_character_id_explicit: primary !== undefined,
+    world_enabled: world === undefined ? true : world.enabled === true,
+    ...(timing === undefined ? {} : { world_authoring_timing: timing }),
+    relationships_enabled: relationships === undefined ? true : relationships.enabled === true,
+    source_adaptation: value.intent === "source_adaptation"
+      || value.intent_kind === "source_adaptation"
+      || value.source_adaptation !== undefined,
+    ...(artifactRaw === undefined ? {} : { artifact_value: artifactRaw }),
+    ...(precheckRaw === undefined ? {} : { precheck_value: precheckRaw }),
+  };
+}
+
+function parseLatestBlueprint(state: ProjectState, current: readonly ArtifactRecord[]): ProjectBlueprintProjection | undefined {
+  const artifact = [...current].reverse().find((item) => item.kind === "blueprint");
+  const precheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
+  const precheckValue = precheck === undefined ? undefined : blueprintValue(precheck.candidate_blueprint);
+  const artifactValue = artifact === undefined ? undefined : blueprintValue(parseArtifactValue(artifact));
+  // A recorded precheck is the authoritative publish roster. Legacy projects
+  // without one continue to use the latest Blueprint artifact.
+  return parseBlueprintProjection(precheckValue ?? artifactValue, {
+    ...(artifact === undefined ? {} : { artifact }),
+    ...(precheck === undefined ? {} : { precheck }),
+  });
+}
+
+function buildIntentProjection(state: ProjectState, blueprint: ProjectBlueprintProjection | undefined): ProjectIntentProjection {
+  const sourceAdaptation = state.interview.flow === "source_adaptation" || blueprint?.source_adaptation === true;
+  const primaryCharacterId = blueprint?.primary_character_id ?? blueprint?.characters[0]?.id;
+  return {
+    is_source_adaptation: sourceAdaptation,
+    ...(primaryCharacterId === undefined ? {} : { primary_character_id: primaryCharacterId }),
+    roster: (blueprint?.characters ?? []).map((character) => ({
+      id: character.id,
+      label: character.label,
+      is_primary: primaryCharacterId !== undefined && character.id === primaryCharacterId,
+      aliases: character.aliases,
+    })),
+  };
+}
+
+function publishPlanFromProjection(
+  projection: ProjectProjection,
+  modeSelection?: CardModeSelection,
+  options: { inferMode?: boolean } = {},
+): PublishPlan {
+  const latest = projection.currentArtifacts;
+  const blueprint = projection.blueprint;
+  const worldEnabled = blueprint?.world_enabled ?? true;
+  const relationshipsEnabled = blueprint?.relationships_enabled ?? true;
+  const rosterIds = blueprint === undefined ? undefined : new Set(blueprint.characters.map((character) => character.id));
+  const characterModes = blueprint === undefined
+    ? undefined
+    : new Map(blueprint.characters.flatMap((character) => character.mode === undefined ? [] : [[character.id, character.mode] as const]));
   let effectiveMode = modeSelection;
   if (effectiveMode === undefined && options.inferMode === true) {
     const hasZhuji = latest.some((artifact) => artifact.kind === "zhuji");
     const hasPalette = latest.some((artifact) => artifact.kind === "palette");
     if (hasZhuji !== hasPalette) effectiveMode = hasZhuji ? "zhuji" : "palette";
   }
-
   const entries: BuildPlanEntry[] = [];
   for (const artifact of latest) {
     if (NON_PLAN_ARTIFACT_KINDS.has(artifact.kind)) continue;
     if (artifact.kind === "world_lore" && !worldEnabled) continue;
     if (artifact.kind === "relationship" && !relationshipsEnabled) continue;
-
     const boundCid = getArtifactCharacterId(artifact);
-    if (boundCid !== undefined && rosterIds !== undefined && !rosterIds.has(boundCid)) {
-      continue;
-    }
+    if (boundCid !== undefined && rosterIds !== undefined && !rosterIds.has(boundCid)) continue;
     if (boundCid !== undefined && effectiveMode !== undefined && effectiveMode !== "both" && characterModes !== undefined) {
       const declaredMode = characterModes.get(boundCid);
-      if (declaredMode !== undefined && declaredMode !== effectiveMode) {
-        continue;
-      }
+      if (declaredMode !== undefined && declaredMode !== effectiveMode) continue;
     }
-
     if (artifact.kind === "zhuji" || artifact.kind === "palette") {
       if (effectiveMode === undefined) continue;
       if (effectiveMode !== "both" && effectiveMode !== artifact.kind) continue;
     }
     entries.push({ key: artifact.key, artifact_id: artifact.id, kind: artifact.kind, revision: artifact.revision });
   }
-  return {
+  return Object.freeze({
     ...(effectiveMode === undefined ? {} : { mode_selection: effectiveMode }),
     world_enabled: worldEnabled,
     relationships_enabled: relationshipsEnabled,
-    entries,
-  };
+    entries: Object.freeze(entries),
+  });
+}
+
+/** Latest revision per artifact key, in state/source order. */
+export function currentArtifacts(state: ProjectState): ArtifactRecord[] {
+  return currentArtifactsFromRecords(state.artifacts);
+}
+
+/** Shared latest-by-key projection for callers that already have a state slice. */
+export function currentArtifactsFromRecords(artifacts: readonly ArtifactRecord[]): ArtifactRecord[] {
+  const latest = new Map<string, ArtifactRecord>();
+  for (const artifact of artifacts) latest.set(artifact.key, artifact);
+  return [...latest.values()];
+}
+
+export function computeProjectProjection(state: ProjectState): ProjectProjection {
+  const current = Object.freeze(currentArtifacts(state));
+  const blueprint = parseLatestBlueprint(state, current);
+  const intent = buildIntentProjection(state, blueprint);
+  const projection = {
+    currentArtifacts: current,
+    ...(blueprint === undefined ? {} : { blueprint }),
+    intent,
+    roster: Object.freeze(intent.roster),
+    factRegister: Object.freeze([...state.facts]),
+    publishPlan: (selection?: CardModeSelection, options: { inferMode?: boolean } = {}) => publishPlanFromProjection(projection as ProjectProjection, selection, options),
+  } as ProjectProjection;
+  return Object.freeze(projection);
+}
+
+export function computePublishPlan(state: ProjectState, modeSelection?: CardModeSelection, options: { inferMode?: boolean } = {}): PublishPlan {
+  return computeProjectProjection(state).publishPlan(modeSelection, options);
+}
+
+/** Compatibility wrapper; the projection is the only source of plan logic. */
+export function computeBuildPlan(state: ProjectState, modeSelection?: CardModeSelection, options: { inferMode?: boolean } = {}): BuildPlan {
+  return computePublishPlan(state, modeSelection, options);
 }
 
 const sourceCandidateSchema = z.object({
@@ -3213,63 +3355,7 @@ export interface ProjectIntentProjection {
   roster: ProjectIntentCharacter[];
 }
 
+/** Compatibility wrapper; all latest/Blueprint parsing lives in the projection. */
 export function computeProjectIntentProjection(state: ProjectState): ProjectIntentProjection {
-  const latestArtifactsMap = new Map<string, ArtifactRecord>();
-  for (const artifact of state.artifacts) latestArtifactsMap.set(artifact.key, artifact);
-  const blueprintArtifact = [...latestArtifactsMap.values()].reverse().find((artifact) => artifact.kind === "blueprint");
-  let blueprint: Record<string, unknown> | undefined;
-  if (blueprintArtifact !== undefined) {
-    try {
-      const parsed = JSON.parse(blueprintArtifact.content);
-      if (parsed !== null && typeof parsed === "object") blueprint = parsed as Record<string, unknown>;
-    } catch {}
-  }
-  const isSourceAdaptation = state.interview.flow === "source_adaptation"
-    || blueprint?.source_adaptation !== undefined
-    || blueprint?.intent === "source_adaptation"
-    || blueprint?.intent_kind === "source_adaptation";
-
-  const rawCharacters = Array.isArray(blueprint?.characters) ? blueprint!.characters : [];
-  const rawPrimary = typeof blueprint?.primary_character_id === "string" ? blueprint!.primary_character_id : undefined;
-
-  const characters: Array<{ id: string; label: string; aliases: string[] }> = [];
-  const adaptationSubjects = blueprint?.source_adaptation && typeof blueprint.source_adaptation === "object"
-    ? (blueprint.source_adaptation as Record<string, unknown>).subjects
-    : undefined;
-  const perCharacterSubjects = Array.isArray(adaptationSubjects) ? adaptationSubjects : [];
-
-  for (const charObj of rawCharacters) {
-    if (charObj !== null && typeof charObj === "object" && typeof (charObj as Record<string, unknown>).id === "string") {
-      const id = (charObj as Record<string, unknown>).id as string;
-      const label = typeof (charObj as Record<string, unknown>).label === "string"
-        ? ((charObj as Record<string, unknown>).label as string)
-        : (typeof (charObj as Record<string, unknown>).display_name === "string"
-            ? ((charObj as Record<string, unknown>).display_name as string)
-            : id);
-      const aliases = perCharacterSubjects.flatMap((entry) => {
-        if (entry !== null && typeof entry === "object" && (entry as Record<string, unknown>).character_id === id) {
-          const name = typeof (entry as Record<string, unknown>).subject_name === "string"
-            ? ((entry as Record<string, unknown>).subject_name as string)
-            : undefined;
-          return name && name.length > 0 ? [name] : [];
-        }
-        return [];
-      });
-      characters.push({ id, label, aliases });
-    }
-  }
-
-  const primaryCharacterId = rawPrimary ?? characters[0]?.id;
-  const roster: ProjectIntentCharacter[] = characters.map((c) => ({
-    id: c.id,
-    label: c.label,
-    is_primary: primaryCharacterId !== undefined && c.id === primaryCharacterId,
-    aliases: c.aliases,
-  }));
-
-  return {
-    is_source_adaptation: isSourceAdaptation,
-    ...(primaryCharacterId === undefined ? {} : { primary_character_id: primaryCharacterId }),
-    roster,
-  };
+  return computeProjectProjection(state).intent;
 }

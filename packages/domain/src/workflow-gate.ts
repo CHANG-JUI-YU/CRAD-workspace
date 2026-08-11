@@ -1,4 +1,4 @@
-import { computeBuildPlan, computeProjectIntentProjection, parseWardrobeMarkdown, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
+import { computeProjectProjection, parseWardrobeMarkdown, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "./required-artifacts.js";
 import { contradictingAcceptedFacts } from "./knowledge.js";
 
@@ -37,12 +37,6 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
-}
-
-function latestArtifacts(state: ProjectState): ArtifactRecord[] {
-  const latest = new Map<string, ArtifactRecord>();
-  for (const artifact of state.artifacts) latest.set(artifact.key, artifact);
-  return [...latest.values()];
 }
 
 function managedProject(state: ProjectState): boolean {
@@ -420,7 +414,7 @@ function reportFacts(state: ProjectState, diagnostics: WorkflowDiagnostic[]): vo
 
   // Coverage is only a source-adaptation obligation. Original-character
   // projects may intentionally have no source-derived coverage register.
-  const intentProjection = computeProjectIntentProjection(state);
+  const intentProjection = computeProjectProjection(state).intent;
   if (intentProjection.is_source_adaptation) {
     const subjects = intentProjection.roster;
     if (subjects.length > 0) {
@@ -523,10 +517,11 @@ export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase, 
     }
   }
   if (phase === "draft") return { ok: diagnostics.length === 0, diagnostics };
-  const artifacts = latestArtifacts(state);
+  const projection = computeProjectProjection(state);
+  const artifacts = [...projection.currentArtifacts];
   const content = artifacts.filter((artifact) => contentKinds.has(artifact.kind));
   const manifest = manifestOverride ?? buildRequiredArtifactManifest(state);
-  const plan = computeBuildPlan(state, undefined, { inferMode: true });
+  const plan = projection.publishPlan(undefined, { inferMode: true });
   const planIds = new Set(plan.entries.map((entry) => entry.artifact_id));
   if (managed) {
     if (state.project_status === "interviewing" || state.interview.status === "active") {

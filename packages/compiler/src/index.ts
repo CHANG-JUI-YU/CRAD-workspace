@@ -1,11 +1,13 @@
 import {
   canonicalJson,
-  computeBuildPlan,
+  computeProjectProjection,
+  currentArtifactsFromRecords,
   contentHash,
   parseWardrobeMarkdown,
   pluginProposalValueSchema,
   type ArtifactRecord,
   type FactRecord,
+  type ProjectProjection,
   type ProjectState,
 } from "@st-workspace/core";
 import {
@@ -199,80 +201,6 @@ function yamlModeProjection(artifact: ArtifactRecord): Omit<ModeProjection, "art
   return { characterId, mode: modeName, module: moduleName, title: yamlScalar(title.value), text };
 }
 
-interface BlueprintCharacterDescriptor {
-  id: string;
-  displayName?: string;
-  label?: string;
-}
-
-interface BlueprintDescriptor {
-  characters: BlueprintCharacterDescriptor[];
-  primaryCharacterId?: string;
-}
-
-function blueprintCharacterDescriptor(value: unknown): BlueprintCharacterDescriptor | undefined {
-  const character = recordValue(value);
-  if (character === undefined) return undefined;
-  const id = textValue(character.id) ?? textValue(character.character_id);
-  if (id === undefined) return undefined;
-  const displayName = textValue(character.display_name);
-  const label = textValue(character.label);
-  return {
-    id,
-    ...(displayName === undefined ? {} : { displayName }),
-    ...(label === undefined ? {} : { label }),
-  };
-}
-
-function jsonBlueprintDescriptor(content: string): BlueprintDescriptor | undefined {
-  const parsed = parseJson(content);
-  if (parsed === undefined) return undefined;
-  const characters = Array.isArray(parsed.characters)
-    ? parsed.characters.map(blueprintCharacterDescriptor).filter((item): item is BlueprintCharacterDescriptor => item !== undefined)
-    : [];
-  const primaryCharacterId = textValue(parsed.primary_character_id);
-  if (characters.length === 0 && primaryCharacterId === undefined) return undefined;
-  return { characters, ...(primaryCharacterId === undefined ? {} : { primaryCharacterId }) };
-}
-
-function yamlBlueprintDescriptor(content: string): BlueprintDescriptor | undefined {
-  const lines = content.replaceAll("\r", "").split("\n");
-  const characters: BlueprintCharacterDescriptor[] = [];
-  const primaryField = lines.find((line) => /^\s*primary_character_id\s*:\s*(.+)$/u.test(line));
-  const primaryCharacterId = primaryField?.match(/^\s*primary_character_id\s*:\s*(.+)$/u)?.[1];
-  for (let index = 0; index < lines.length; index += 1) {
-    const character = lines[index]?.match(/^(\s*)-\s+character_id\s*:\s*(.+)$/u);
-    if (character === null || character === undefined) continue;
-    const itemIndent = character[1]?.length ?? 0;
-    const characterId = yamlScalar(character[2] ?? "");
-    for (let next = index + 1; next < lines.length; next += 1) {
-      const line = lines[next] ?? "";
-      if (line.trim().length > 0 && yamlIndent(line) <= itemIndent) break;
-      const display = line.match(/^\s+display_name\s*:\s*(.+)$/u);
-      if (display !== null && display !== undefined) {
-        const displayName = yamlScalar(display[1] ?? "");
-        if (characterId.length > 0) characters.push(displayName.length > 0 ? { id: characterId, displayName } : { id: characterId });
-        break;
-      }
-    }
-    if (!characters.some((item) => item.id === characterId)) characters.push({ id: characterId });
-  }
-  if (characters.length === 0 && primaryCharacterId === undefined) return undefined;
-  return {
-    characters,
-    ...(primaryCharacterId === undefined ? {} : { primaryCharacterId: yamlScalar(primaryCharacterId) }),
-  };
-}
-
-function blueprintDescriptor(artifacts: readonly ArtifactRecord[]): BlueprintDescriptor | undefined {
-  const blueprintArtifacts = artifacts.filter((artifact) => artifact.kind === "blueprint");
-  for (const artifact of [...blueprintArtifacts].reverse()) {
-    const descriptor = jsonBlueprintDescriptor(artifact.content) ?? yamlBlueprintDescriptor(artifact.content);
-    if (descriptor !== undefined) return descriptor;
-  }
-  return undefined;
-}
-
 function recordValue(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
@@ -285,20 +213,8 @@ function stringValues(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()) : [];
 }
 
-function latestArtifacts(artifacts: readonly ArtifactRecord[]): ArtifactRecord[] {
-  const latestByKey = new Map<string, ArtifactRecord>();
-  for (const artifact of artifacts) latestByKey.set(artifact.key, artifact);
-  return [...latestByKey.values()].sort((left, right) => left.key.localeCompare(right.key));
-}
-
-function latestArtifactsInSourceOrder(artifacts: readonly ArtifactRecord[]): ArtifactRecord[] {
-  const latestByKey = new Map<string, ArtifactRecord>();
-  for (const artifact of artifacts) latestByKey.set(artifact.key, artifact);
-  return [...latestByKey.values()];
-}
-
 export function availableCardModes(artifacts: readonly ArtifactRecord[]): AvailableCardModes {
-  const latest = latestArtifacts(artifacts);
+  const latest = currentArtifactsFromRecords(artifacts);
   return {
     zhuji: latest.some((artifact) => artifact.kind === "zhuji" && modeProjection(artifact) !== undefined),
     palette: latest.some((artifact) => artifact.kind === "palette" && modeProjection(artifact) !== undefined),
@@ -325,7 +241,7 @@ function localizedModeName(mode: "zhuji" | "palette", module: string): string {
   return (mode === "zhuji" ? ZHUJI_MODULE_NAMES : PALETTE_MODULE_NAMES)[module] ?? module;
 }
 
-function characterDisplayNames(artifacts: readonly ArtifactRecord[]): Map<string, string> {
+function characterDisplayNames(artifacts: readonly ArtifactRecord[], projection?: ProjectProjection): Map<string, string> {
   const names = new Map<string, string>();
   for (const artifact of artifacts) {
     if (artifact.kind === "character") {
@@ -335,10 +251,8 @@ function characterDisplayNames(artifacts: readonly ArtifactRecord[]): Map<string
       if (id !== undefined && displayName !== undefined) names.set(id, displayName);
     }
   }
-  const blueprint = blueprintDescriptor(artifacts);
-  for (const character of blueprint?.characters ?? []) {
-    const blueprintName = character.displayName ?? character.label;
-    if (blueprintName !== undefined && !names.has(character.id)) names.set(character.id, blueprintName);
+  for (const character of projection?.roster ?? []) {
+    if (!names.has(character.id)) names.set(character.id, character.label);
   }
   return names;
 }
@@ -666,15 +580,17 @@ function characterIdsForArtifact(artifact: ArtifactRecord): string[] {
 }
 
 function primaryCharacterIdFor(
+  projection: ProjectProjection,
   artifacts: readonly ArtifactRecord[],
   sourceOrderedArtifacts: readonly ArtifactRecord[] = artifacts,
 ): { id: string | undefined; diagnostics: CompilerDiagnostic[] } {
-  const blueprint = blueprintDescriptor(artifacts);
-  const rosterIds = [...new Set((blueprint?.characters ?? []).map((character) => character.id))];
+  const rosterIds = projection.roster.map((character) => character.id);
   const sourceCharacterIds = [...new Set(sourceOrderedArtifacts.flatMap(characterIdsForArtifact))];
   const knownCharacterIds = new Set([...rosterIds, ...sourceCharacterIds]);
   const fallback = rosterIds[0] ?? sourceCharacterIds[0];
-  const explicitPrimary = blueprint?.primaryCharacterId;
+  const explicitPrimary = projection.blueprint?.primary_character_id_explicit === true
+    ? projection.blueprint.primary_character_id
+    : undefined;
   if (explicitPrimary !== undefined) {
     if (knownCharacterIds.has(explicitPrimary)) return { id: explicitPrimary, diagnostics: [] };
     return {
@@ -714,15 +630,19 @@ function factEntry(fact: FactRecord, index: number): Ccv3LoreEntry {
   return entry(`fact.${fact.id}`, `${fact.classification ?? "fact"} ${index + 1}`, statement, keys, 500 + index);
 }
 
-function projectMetadata(latestArtifacts: readonly ArtifactRecord[], primaryCharacterId: string | undefined, modeSelection?: CardModeSelection): Record<string, unknown> {
-  const blueprint = blueprintDescriptor(latestArtifacts);
+function projectMetadata(
+  latestArtifacts: readonly ArtifactRecord[],
+  primaryCharacterId: string | undefined,
+  modeSelection: CardModeSelection | undefined,
+  projection: ProjectProjection,
+): Record<string, unknown> {
   const artifactIds = new Set(latestArtifacts.flatMap(characterIdsForArtifact));
-  const rosterIds = (blueprint?.characters ?? []).map((character) => character.id);
+  const rosterIds = projection.roster.map((character) => character.id);
   const ids = [
     ...rosterIds,
     ...[...artifactIds].filter((id) => !rosterIds.includes(id)).sort((left, right) => left.localeCompare(right)),
   ];
-  const names = characterDisplayNames(latestArtifacts);
+  const names = characterDisplayNames(latestArtifacts, projection);
   const modeArtifacts = latestArtifacts.flatMap((artifact) => {
     const mode = modeProjection(artifact);
     return mode === undefined ? [] : [{ artifact_id: artifact.id, revision: artifact.revision, character_id: mode.characterId, mode: mode.mode, module: mode.module }];
@@ -766,24 +686,25 @@ function unavailableModeMessage(requested: CardModeSelection, available: Availab
 }
 
 export function normalizeProject(state: ProjectState, options: CompileOptions = {}): NormalizedProject {
-  const latest = latestArtifacts(state.artifacts);
-  const sourceOrdered = latestArtifactsInSourceOrder(state.artifacts);
+  const projection = computeProjectProjection(state);
+  const latest = [...projection.currentArtifacts].sort((left, right) => left.key.localeCompare(right.key));
+  const sourceOrdered = [...projection.currentArtifacts];
   const available = availableCardModes(latest);
   const requested = options.mode_selection;
   const modeSelection = resolvedModeSelection(available, requested);
-  const plan = computeBuildPlan(state, modeSelection);
+  const plan = projection.publishPlan(modeSelection);
   const planIds = new Set(plan.entries.map((entry) => entry.artifact_id));
   const selected = latest.filter((artifact) => planIds.has(artifact.id));
   const selectedIds = new Set(selected.map((artifact) => artifact.id));
   const selectedSourceOrdered = sourceOrdered.filter((artifact) => selectedIds.has(artifact.id));
-  const primarySelection = primaryCharacterIdFor(selected, selectedSourceOrdered);
+  const primarySelection = primaryCharacterIdFor(projection, selected, selectedSourceOrdered);
   const primaryCharacterId = primarySelection.id;
-  const names = characterDisplayNames(selected);
+  const names = characterDisplayNames(selected, projection);
   const title = textValue(state.project_name) ?? state.project_id;
   const parts = selected.map((artifact) => artifactEntries(artifact, names, modeSelection));
   const artifactIds = selected.map((artifact) => artifact.id);
   const artifactRevisions = Object.fromEntries(selected.map((artifact) => [artifact.key, artifact.revision]));
-  const projectMetadataValue = projectMetadata(selected, primaryCharacterId, modeSelection);
+  const projectMetadataValue = projectMetadata(selected, primaryCharacterId, modeSelection, projection);
   const diagnostics = requested !== undefined && modeSelection === undefined
     ? [...primarySelection.diagnostics, { code: "MODE_SELECTION_UNAVAILABLE", severity: "error" as const, message: unavailableModeMessage(requested, available) }]
     : primarySelection.diagnostics;

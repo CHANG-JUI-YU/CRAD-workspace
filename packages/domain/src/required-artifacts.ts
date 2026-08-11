@@ -1,4 +1,4 @@
-import { contentHash, type ArtifactRecord, type ProjectState } from "@st-workspace/core";
+import { computeProjectProjection, contentHash, type ArtifactRecord, type ProjectState } from "@st-workspace/core";
 
 /**
  * Shared descriptor of required module keys per card mode. This is the single
@@ -154,9 +154,7 @@ function characterDocument(artifact: ArtifactRecord): { id?: string; display_nam
  * revisions, so every manifest helper consumes this projection.
  */
 export function currentArtifacts(state: ProjectState): ArtifactRecord[] {
-  const latest = new Map<string, ArtifactRecord>();
-  for (const artifact of state.artifacts) latest.set(artifact.key, artifact);
-  return [...latest.values()];
+  return [...computeProjectProjection(state).currentArtifacts];
 }
 
 function normalized(value: string): string {
@@ -221,9 +219,21 @@ export function buildRequiredArtifactManifest(
   state: ProjectState,
   exportMode?: CardMode,
 ): RequiredArtifactManifest | undefined {
-  const recorded = [...state.blueprint_prechecks].reverse().find((precheck) => precheck.status === "recorded");
+  const projection = computeProjectProjection(state);
+  const recorded = projection.blueprint?.precheck_id === undefined
+    ? undefined
+    : state.blueprint_prechecks.find((precheck) => precheck.id === projection.blueprint?.precheck_id && precheck.status === "recorded");
   if (recorded === undefined) return undefined;
-  const blueprint = record(recorded.candidate_blueprint);
+  const blueprintProjection = projection.blueprint;
+  const blueprint = blueprintProjection === undefined ? undefined : {
+    primary_character_id: blueprintProjection.primary_character_id,
+    characters: blueprintProjection.characters,
+    world: {
+      enabled: blueprintProjection.world_enabled,
+      ...(blueprintProjection.world_authoring_timing === undefined ? {} : { authoring_timing: blueprintProjection.world_authoring_timing }),
+    },
+    relationships: { enabled: blueprintProjection.relationships_enabled },
+  } satisfies BlueprintShape;
   if (blueprint === undefined) return undefined;
 
   const roster = Array.isArray(blueprint.characters) ? blueprint.characters : [];
@@ -242,7 +252,7 @@ export function buildRequiredArtifactManifest(
   const diagnostics: ManifestDiagnostic[] = [];
   const inScope = new Set<string>();
   const inScopeKeys = new Set<string>();
-  const current = currentArtifacts(state);
+  const current = projection.currentArtifacts;
 
   const addScope = (artifactIds: readonly string[]): void => {
     for (const artifactId of artifactIds) {

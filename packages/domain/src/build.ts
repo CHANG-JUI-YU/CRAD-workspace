@@ -1,6 +1,7 @@
 import {
   canonicalJson,
   contentHash,
+  computeProjectProjection,
   CoreError,
   createQualityPolicySnapshot,
   internalId,
@@ -47,7 +48,8 @@ export class BuildService {
       }));
       return { status: "needs_input", summary: "目前沒有可建置的 artifact。" };
     }
-    const availableModes = availableCardModes(initial.artifacts);
+    const projection = computeProjectProjection(initial);
+    const availableModes = availableCardModes(projection.currentArtifacts);
     const manifest = buildRequiredArtifactManifest(initial);
     const manifestMode = manifest === undefined || manifest.export_modes === "both" ? undefined : manifest.export_modes;
     const modeUsable = (selection: CardModeSelection): boolean => {
@@ -116,7 +118,7 @@ export class BuildService {
     }
     const buildWarnings: string[] = [];
     let coverImage: Uint8Array | undefined;
-    const isCharacterCardExport = manifest?.primary_character_id !== undefined || initial.artifacts.some((art) => art.kind === "character");
+    const isCharacterCardExport = manifest?.primary_character_id !== undefined || projection.currentArtifacts.some((art) => art.kind === "character");
     if (initial.images.length === 0) {
       if (isCharacterCardExport) {
         buildWarnings.push("CARD_IMAGE_MISSING: 專案尚未上傳角色圖片；本次輸出將使用內建佔位圖。");

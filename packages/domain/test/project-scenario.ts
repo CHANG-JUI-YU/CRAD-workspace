@@ -31,6 +31,7 @@ export interface ProjectScenarioOptions {
   projectId?: string;
   roster?: ScenarioRosterEntry[];
   primaryCharacterId?: string;
+  sourceAdaptation?: boolean;
   acceptedFacts?: ScenarioFact[];
   candidateFacts?: ScenarioFact[];
   recoverableOperation?: boolean;
@@ -248,6 +249,7 @@ export async function projectScenario(options: ProjectScenarioOptions = {}): Pro
       ...(entry.mode === undefined ? {} : { mode: entry.mode }),
     })),
     primary_character_id: primaryCharacterId,
+    ...(options.sourceAdaptation === true ? { intent: "source_adaptation", source_adaptation: { subjects: roster.map((entry) => ({ character_id: entry.id, subject_name: entry.label ?? entry.id })) } } : {}),
     world: { enabled: false },
     relationships: { enabled: false },
   };
@@ -272,6 +274,7 @@ export async function projectScenario(options: ProjectScenarioOptions = {}): Pro
     project_id: projectId,
     characters: roster.map((entry, index) => ({ id: entry.id, ...(entry.label === undefined ? {} : { label: entry.label }), ordinal: index + 1, ...(entry.mode === undefined ? {} : { mode: entry.mode }) })),
     primary_character_id: primaryCharacterId,
+    ...(options.sourceAdaptation === true ? { intent: "source_adaptation", source_adaptation: { subjects: roster.map((entry) => ({ character_id: entry.id, subject_name: entry.label ?? entry.id })) } } : {}),
     blueprint_direction: { selected: "維持原有方向" },
   });
   const blueprintArtifact: ArtifactRecord = {
@@ -382,7 +385,7 @@ export async function projectScenario(options: ProjectScenarioOptions = {}): Pro
     project_id: projectId,
     project_name: projectName,
     project_status: "ready" as const,
-    interview: { ...state.interview, status: "complete" as const, flow: "character" as const },
+    interview: { ...state.interview, status: "complete" as const, flow: options.sourceAdaptation === true ? "source_adaptation" as const : "character" as const },
     quality_profile: qualityProfileForLevel("none"),
     blueprint_prechecks: [precheck],
     artifacts,

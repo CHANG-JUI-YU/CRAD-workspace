@@ -1,5 +1,6 @@
 import {
   canonicalJson,
+  computeProjectProjection,
   contentHash,
   conversionProposalValueSchema,
   CoreError,
@@ -10,6 +11,7 @@ import {
   type ArtifactRecord,
   type OperationRecord,
   type ProjectRepository,
+  type ProjectProjection,
   type TemplateProposalValue,
 } from "@st-workspace/core";
 import { PALETTE_REQUIRED_MODULES, ZHUJI_REQUIRED_MODULES } from "./required-artifacts.js";
@@ -109,14 +111,8 @@ function targetName(target: TargetProposal): string {
   return `${target.character_id}/${target.module.module}`;
 }
 
-function latestArtifacts(artifacts: readonly ArtifactRecord[]): ArtifactRecord[] {
-  const latestByKey = new Map<string, ArtifactRecord>();
-  for (const artifact of artifacts) latestByKey.set(artifact.key, artifact);
-  return [...latestByKey.values()];
-}
-
-function latestArtifactByKey(artifacts: readonly ArtifactRecord[], key: string): ArtifactRecord | undefined {
-  return latestArtifacts(artifacts).find((artifact) => artifact.key === key);
+function latestArtifactByKey(projection: ProjectProjection, key: string): ArtifactRecord | undefined {
+  return projection.currentArtifacts.find((artifact) => artifact.key === key);
 }
 
 function currentBlueprintBinding(state: { blueprint_prechecks: readonly { id: string; candidate_blueprint_revision: string; status: string }[] }): BlueprintBinding | undefined {
@@ -174,11 +170,11 @@ function validateTargetModules(proposal: ConversionProposal): ConversionProposal
 }
 
 function sourceReferencesFor(
-  artifacts: readonly ArtifactRecord[],
+  projection: ProjectProjection,
   proposal: ConversionProposal,
   binding: BlueprintBinding | undefined,
 ): SourceReference[] {
-  const latest = latestArtifacts(artifacts);
+  const latest = projection.currentArtifacts;
   const candidates: SourceCandidate[] = latest.flatMap((artifact) => {
     if (artifact.kind !== sourceKind(proposal.source_mode)) return [];
     const envelope = parseEnvelope(artifact.content);
@@ -317,8 +313,9 @@ export class ConversionService {
     const result = await this.repository.transaction(initial.revision, (current) => {
       const operation = current.operations.find((item) => item.id === operationId);
       if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
+      const projection = computeProjectProjection(current);
       const binding = currentBlueprintBinding(current);
-      const sourceReferences = sourceReferencesFor(current.artifacts, normalizedProposal, binding);
+      const sourceReferences = sourceReferencesFor(projection, normalizedProposal, binding);
       const mappingDigest = contentHash(canonicalJson(normalizedProposal.mappings));
       const conversionContent = canonicalJson({
         ...normalizedProposal,
@@ -327,7 +324,7 @@ export class ConversionService {
         ...blueprintFields(binding),
       });
       const conversionKey = `conversion:${normalizedProposal.character_id.toLocaleLowerCase()}-${normalizedProposal.source_mode}-to-${normalizedProposal.target_mode}`;
-      const previousConversion = latestArtifactByKey(current.artifacts, conversionKey);
+      const previousConversion = latestArtifactByKey(projection, conversionKey);
       const conversionArtifact = previousConversion?.content_hash === contentHash(conversionContent)
         ? previousConversion
         : artifact(operationId, actor, "conversion", conversionKey, `${normalizedProposal.character_id}/${normalizedProposal.source_mode}-to-${normalizedProposal.target_mode}`, conversionContent, previousConversion, binding);
@@ -337,7 +334,7 @@ export class ConversionService {
         const target = withConversionProvenance(base, normalizedProposal.source_mode, normalizedProposal.target_mode, mappingDigest, sourceReferences, binding);
         const content = canonicalJson(target);
         const key = targetKey(target);
-        const previous = latestArtifactByKey(current.artifacts, key);
+        const previous = latestArtifactByKey(projection, key);
         const stored = previous?.content_hash === contentHash(content)
           ? previous
           : artifact(operationId, actor, target.kind, key, targetName(target), content, previous, binding);
