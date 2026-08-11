@@ -521,7 +521,7 @@ function reportBlueprintBindings(state: ProjectState, artifacts: ArtifactRecord[
   }
 }
 
-export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase): WorkflowGateResult {
+export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase, manifestOverride?: RequiredArtifactManifest): WorkflowGateResult {
   const diagnostics: WorkflowDiagnostic[] = [];
   const managed = managedProject(state);
   if (managed) {
@@ -537,7 +537,7 @@ export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase):
   if (phase === "draft") return { ok: diagnostics.length === 0, diagnostics };
   const artifacts = latestArtifacts(state);
   const content = artifacts.filter((artifact) => contentKinds.has(artifact.kind));
-  const manifest = buildRequiredArtifactManifest(state);
+  const manifest = manifestOverride ?? buildRequiredArtifactManifest(state);
   const plan = computeBuildPlan(state);
   const planIds = new Set(plan.entries.map((entry) => entry.artifact_id));
   if (managed) {

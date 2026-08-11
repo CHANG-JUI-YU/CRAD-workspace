@@ -1479,15 +1479,31 @@ export function dashboard(): string {
         if (isRecord(readiness.primary_character)) {
           parts.push("主要角色 " + (firstString(readiness.primary_character, ["label"]) || "?"));
         }
+        if (firstString(readiness, ["selected_mode"])) parts.push("選定模式 " + firstString(readiness, ["selected_mode"]));
+        else if (firstString(readiness, ["export_modes"])) parts.push("Blueprint 模式 " + firstString(readiness, ["export_modes"]));
+        if (firstString(readiness, ["card_name"])) parts.push("角色卡 " + firstString(readiness, ["card_name"]));
+        if (firstString(readiness, ["world_book_name"])) parts.push("世界書 " + firstString(readiness, ["world_book_name"]));
         byId("build-message").textContent = parts.join(" · ");
         var entries = Array.isArray(readiness.entries) ? readiness.entries : [];
         var entryTarget = document.createElement("div");
-        var entryLabels = entries.map(function (entry) { return (isRecord(entry) ? (firstString(entry, ["kind"]) || "?") + ":" + (firstString(entry, ["name"]) || "?") : "?"); });
+        var entryLabels = entries.map(function (entry) {
+          if (!isRecord(entry)) return "?";
+          var label = (firstString(entry, ["kind"]) || "?") + ":" + (firstString(entry, ["name"]) || "?");
+          if (firstString(entry, ["revision"])) label += "（@" + String(firstString(entry, ["revision"])).slice(0, 8) + "）";
+          return label;
+        });
         entryTarget.textContent = entries.length === 0 ? "沒有附加條目。" : "附加條目：" + entryLabels.join("、");
         target.append(entryTarget);
         var stats = [];
-        if (readiness.greeting_entries !== undefined) stats.push("greeting " + readiness.greeting_entries + " 組");
+        if (readiness.greeting_entries !== undefined) stats.push("greeting 共 " + readiness.greeting_entries + " 組");
+        if (readiness.alternate_greeting_count !== undefined) stats.push("備選 " + readiness.alternate_greeting_count + "／群組 " + readiness.group_greeting_count);
+        if (firstString(readiness, ["first_greeting"])) stats.push("首發：" + String(firstString(readiness, ["first_greeting"])));
+        if (Array.isArray(readiness.plugin_ids) && readiness.plugin_ids.length > 0) stats.push("plugin：" + readiness.plugin_ids.join("、"));
         if (readiness.png_expected !== undefined) stats.push(readiness.png_expected ? "將輸出 PNG" : "不輸出 PNG");
+        if (isRecord(readiness.output_paths)) {
+          if (firstString(readiness.output_paths, ["json"])) stats.push("JSON → " + firstString(readiness.output_paths, ["json"]));
+          if (firstString(readiness.output_paths, ["png"])) stats.push("PNG → " + firstString(readiness.output_paths, ["png"]));
+        }
         var totalChars = entries.reduce(function (sum, entry) { return sum + (isRecord(entry) && typeof entry.char_count === "number" ? entry.char_count : 0); }, 0);
         var totalTokens = entries.reduce(function (sum, entry) { return sum + (isRecord(entry) && typeof entry.estimated_tokens === "number" ? entry.estimated_tokens : 0); }, 0);
         if (entries.length > 0) stats.push("字數 " + totalChars + "／token 預估 " + totalTokens);

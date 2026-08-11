@@ -316,7 +316,23 @@ describe("natural language runtime boundary", () => {
     }));
     const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
     await expect(runtime.submitZhujiProposal(zhujiProposal(), { actor: "creator", attachments: [] })).rejects.toMatchObject({ code: "BLUEPRINT_REQUIRED" });
-    const blueprint = blueprintArtifact("blueprint-order", precheck.id);
+    const baseBlueprint = blueprintArtifact("blueprint-order", precheck.id);
+    const blueprintContent = JSON.stringify({
+      kind: "blueprint",
+      project_id: "blueprint-order",
+      blueprint_direction: { selected: "calm and direct" },
+      characters: [
+        { id: "yukino", label: "雪之下", ordinal: 1, mode: "zhuji" },
+        { id: "demo", label: "Demo", ordinal: 2, mode: "palette" },
+      ],
+    });
+    const blueprintHash = contentHash(blueprintContent);
+    const blueprint = {
+      ...baseBlueprint,
+      content: blueprintContent,
+      content_hash: blueprintHash,
+      revision: blueprintHash,
+    };
     await repository.commit((await repository.read()).revision, (state) => ({
       ...state,
       artifacts: [blueprint, {
@@ -340,6 +356,149 @@ describe("natural language runtime boundary", () => {
     const final = await repository.read();
     expect(final.artifacts).toHaveLength(3);
     expect(final.artifacts.at(-1)).toMatchObject({ kind: "palette", blueprint_precheck_id: precheck.id });
+  });
+
+  it("rejects authoring for a character outside the Blueprint roster", async () => {
+    const repository = new MemoryProjectRepository("roster-check");
+    const timestamp = new Date().toISOString();
+    const precheck: BlueprintPrecheckRecord = {
+      id: "precheck-roster",
+      schema_version: 1,
+      project_id: "roster-check",
+      operation_id: "interview",
+      collaboration_mode: "free",
+      candidate_blueprint: { project_id: "roster-check", characters: [{ id: "other", label: "Other", ordinal: 1, mode: "zhuji", display_name: "Other" }] },
+      candidate_blueprint_revision: contentHash("candidate"),
+      checks: [{ subject_id: "roster-check", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }],
+      status: "recorded",
+      created_at: timestamp,
+      created_by: "director",
+    };
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      blueprint_prechecks: [precheck],
+      artifacts: [blueprintArtifact("roster-check", precheck.id)],
+      operations: [{ id: "interview", kind: "interview", request: "interview", status: "completed", created_at: timestamp, updated_at: timestamp, progress: [] }],
+    }));
+    const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
+    await expect(runtime.submitZhujiProposal(zhujiProposal(), { actor: "creator", attachments: [] })).rejects.toMatchObject({ code: "BLUEPRINT_CHARACTER_NOT_IN_ROSTER" });
+  });
+
+  it("rejects authoring when the submitted mode mismatches the Blueprint mode", async () => {
+    const repository = new MemoryProjectRepository("mode-mismatch");
+    const timestamp = new Date().toISOString();
+    const precheck: BlueprintPrecheckRecord = {
+      id: "precheck-mismatch",
+      schema_version: 1,
+      project_id: "mode-mismatch",
+      operation_id: "interview",
+      collaboration_mode: "free",
+      candidate_blueprint: { project_id: "mode-mismatch", characters: [{ id: "yukino", label: "雪之下", ordinal: 1, mode: "palette", display_name: "雪之下" }] },
+      candidate_blueprint_revision: contentHash("candidate"),
+      checks: [{ subject_id: "mode-mismatch", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }],
+      status: "recorded",
+      created_at: timestamp,
+      created_by: "director",
+    };
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      blueprint_prechecks: [precheck],
+      artifacts: [blueprintArtifact("mode-mismatch", precheck.id)],
+      operations: [{ id: "interview", kind: "interview", request: "interview", status: "completed", created_at: timestamp, updated_at: timestamp, progress: [] }],
+    }));
+    const mismatchContent = JSON.stringify({ kind: "blueprint", project_id: "mode-mismatch", blueprint_direction: { selected: "calm and direct" }, characters: [{ id: "yukino", label: "雪之下", ordinal: 1, mode: "palette" }] });
+    const mismatchHash = contentHash(mismatchContent);
+    await repository.commit((await repository.read()).revision, (state) => ({
+      ...state,
+      artifacts: [{ ...state.artifacts[0]!, content: mismatchContent, content_hash: mismatchHash, revision: mismatchHash }],
+    }));
+    const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
+    await expect(runtime.submitZhujiProposal(zhujiProposal(), { actor: "creator", attachments: [] })).rejects.toMatchObject({ code: "BLUEPRINT_MODE_MISMATCH" });
+  });
+
+  it("does not count historical mode modules toward the previous-module gate", async () => {
+    const repository = new MemoryProjectRepository("history-modules");
+    const timestamp = new Date().toISOString();
+    const precheck: BlueprintPrecheckRecord = {
+      id: "precheck-history",
+      schema_version: 1,
+      project_id: "history-modules",
+      operation_id: "interview",
+      collaboration_mode: "free",
+      candidate_blueprint: { project_id: "history-modules", characters: [{ id: "yukino", label: "雪之下", ordinal: 1, mode: "zhuji", display_name: "雪之下" }] },
+      candidate_blueprint_revision: contentHash("candidate"),
+      checks: [{ subject_id: "history-modules", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }],
+      status: "recorded",
+      created_at: timestamp,
+      created_by: "director",
+    };
+    const oldAppearance = modeArtifact("zhuji-history-old", "zhuji:yukino/appearance", "zhuji", "yukino/appearance", { kind: "zhuji", character_id: "yukino", module: { schema_version: 1, mode: "zhuji", module: "appearance", title: "Appearance", content: "Tall." } });
+    const newAppearance = modeArtifact("zhuji-history-new", "zhuji:yukino/appearance", "zhuji", "yukino/appearance", { kind: "zhuji", character_id: "other", module: { schema_version: 1, mode: "zhuji", module: "appearance", title: "Appearance", content: "Changed." } });
+    const historyContent = JSON.stringify({ kind: "blueprint", project_id: "history-modules", blueprint_direction: { selected: "calm and direct" }, characters: [{ id: "yukino", label: "雪之下", ordinal: 1, mode: "zhuji" }] });
+    const historyHash = contentHash(historyContent);
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      blueprint_prechecks: [precheck],
+      artifacts: [{ ...blueprintArtifact("history-modules", precheck.id), content: historyContent, content_hash: historyHash, revision: historyHash }, oldAppearance, newAppearance],
+      operations: [{ id: "interview", kind: "interview", request: "interview", status: "completed", created_at: timestamp, updated_at: timestamp, progress: [] }],
+    }));
+    const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
+    await expect(runtime.submitZhujiProposal(zhujiProposal(), { actor: "creator", attachments: [] })).rejects.toMatchObject({ code: "AUTHORING_PREVIOUS_MODULE_REQUIRED" });
+  });
+
+  it("reports a package plan with current projections and mode-aware outputs", async () => {
+    const repository = new MemoryProjectRepository("build-readiness");
+    const timestamp = new Date().toISOString();
+    const precheck: BlueprintPrecheckRecord = {
+      id: "precheck-readiness",
+      schema_version: 1,
+      project_id: "build-readiness",
+      operation_id: "interview",
+      collaboration_mode: "free",
+      candidate_blueprint: { project_id: "build-readiness", characters: [{ id: "alpha", label: "Alpha", ordinal: 1, mode: "zhuji", display_name: "Alpha" }, { id: "beta", label: "Beta", ordinal: 2, mode: "palette", display_name: "Beta" }] },
+      candidate_blueprint_revision: contentHash("candidate"),
+      checks: [{ subject_id: "alpha", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }],
+      status: "recorded",
+      created_at: timestamp,
+      created_by: "director",
+    };
+    const characterContent = (id: string, displayName: string) => ({ kind: "character", document: { schema_version: 1, id, display_name: displayName, aliases: [], summary: "A complete character.", relationships: [], sections: [], provenance: [], extensions: {} } });
+    const greetingContent = { document: { greetings: [{ kind: "primary", content: "First line.", character_ids: ["alpha"] }, { kind: "alternate", content: "Alt one." }, { kind: "alternate", content: "Alt two." }, { kind: "group_only", content: "Group." }] } };
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_name: "Readiness",
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      blueprint_prechecks: [precheck],
+      artifacts: [
+        modeArtifact("character-alpha-r", "character:alpha", "character", "alpha", characterContent("alpha", "Alpha")),
+        modeArtifact("character-beta-r", "character:beta", "character", "beta", characterContent("beta", "Beta")),
+        modeArtifact("zhuji-alpha-r", "zhuji:alpha/appearance", "zhuji", "alpha/appearance", { kind: "zhuji", character_id: "alpha", module: { schema_version: 1, mode: "zhuji", module: "appearance", title: "Appearance", content: "Tall." } }),
+        modeArtifact("greeting-readiness", "greeting:greetings", "greeting", "greetings", greetingContent),
+      ],
+      operations: [{ id: "interview", kind: "interview", request: "interview", status: "completed", created_at: timestamp, updated_at: timestamp, progress: [] }],
+    }));
+    const readiness = await new WorkspaceRuntime(repository).buildReadiness();
+    expect(readiness.modes).toEqual({ zhuji: true, palette: false });
+    expect(readiness.primary_character).toMatchObject({ id: "alpha" });
+    expect(readiness.greeting_entries).toBe(4);
+    expect(readiness.alternate_greeting_count).toBe(2);
+    expect(readiness.group_greeting_count).toBe(1);
+    expect(readiness.first_greeting).toContain("First line.");
+    expect(readiness.png_expected).toBe(true);
+    expect(readiness.card_name).toBe("Readiness");
+    expect(readiness.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "greeting", artifact_id: "greeting-readiness", revision: expect.any(String) }),
+      expect.objectContaining({ kind: "zhuji", artifact_id: "zhuji-alpha-r", revision: expect.any(String) }),
+    ]));
+    expect(readiness.output_paths?.json).toBe("exports/Readiness-雙模式角色卡.json");
+    expect(readiness.output_paths?.png).toBe("exports/Readiness-雙模式角色卡.png");
   });
 
   it("keeps published snapshots and creates a Blueprint successor for direction edits", async () => {

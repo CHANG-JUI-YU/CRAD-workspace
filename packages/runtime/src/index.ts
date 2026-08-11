@@ -16,6 +16,8 @@ import {
   normalizeInterviewStateForDisplay,
   parseRelationshipParticipants,
   parseWardrobeMarkdown,
+  publishedCardExportPath,
+  publishedCardPngExportPath,
   templateJsonSchemaFor,
   templateProposalValueSchema,
   zhujiProposalJsonSchema,
@@ -144,9 +146,16 @@ function hasUsableArtifact(_artifact: ProjectState["artifacts"][number]): boolea
   return true;
 }
 
+/** Current projection: the latest revision per artifact key, mirroring domain/gate semantics. */
+function latestByKey(state: ProjectState): ArtifactRecord[] {
+  const latest = new Map<string, ArtifactRecord>();
+  for (const artifact of state.artifacts) latest.set(artifact.key, artifact);
+  return [...latest.values()];
+}
+
 function parsedModeModules(state: ProjectState, kind: "zhuji" | "palette", characterId: string): Set<string> {
   const modules = new Set<string>();
-  for (const artifact of state.artifacts) {
+  for (const artifact of latestByKey(state)) {
     if (artifact.kind !== kind || !hasUsableArtifact(artifact)) continue;
     try {
       const value = JSON.parse(artifact.content) as { character_id?: unknown; module?: { module?: unknown } };
@@ -156,6 +165,23 @@ function parsedModeModules(state: ProjectState, kind: "zhuji" | "palette", chara
     }
   }
   return modules;
+}
+
+/** Actual buildable modes derived from current module artifacts, mirroring compiler availableCardModes. */
+function availableCardModesRuntime(state: ProjectState): { zhuji: boolean; palette: boolean } {
+  const current = latestByKey(state);
+  const hasModeModule = (kind: "zhuji" | "palette"): boolean => {
+    return current.some((artifact) => {
+      if (artifact.kind !== kind) return false;
+      try {
+        const value = JSON.parse(artifact.content) as { character_id?: unknown; module?: { module?: unknown } };
+        return typeof value.character_id === "string" && typeof value.module?.module === "string";
+      } catch {
+        return false;
+      }
+    });
+  };
+  return { zhuji: hasModeModule("zhuji"), palette: hasModeModule("palette") };
 }
 
 function blueprintKey(projectId: string): string {
@@ -727,7 +753,15 @@ export interface DashboardBuildReadiness {
   modes: { zhuji: boolean; palette: boolean };
   primary_character?: { id: string; label: string; mode: string };
   export_modes?: string;
-  entries: Array<{ kind: string; name: string; char_count: number; estimated_tokens: number }>;
+  selected_mode?: string;
+  card_name?: string;
+  world_book_name?: string;
+  first_greeting?: string;
+  alternate_greeting_count: number;
+  group_greeting_count: number;
+  plugin_ids: string[];
+  output_paths?: { json?: string; png?: string };
+  entries: Array<{ kind: string; name: string; char_count: number; estimated_tokens: number; artifact_id?: string; revision?: string }>;
   greeting_entries: number;
   png_expected: boolean;
   missing: string[];
@@ -2493,33 +2527,99 @@ export class WorkspaceRuntime {
   async buildReadiness(): Promise<DashboardBuildReadiness> {
     const state = await this.repository.read();
     const manifest = buildRequiredArtifactManifest(state);
-    const blueprintArtifact = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint");
+    const current = latestByKey(state);
+    const modes = availableCardModesRuntime(state);
     let primary: { id: string; label: string; mode: string } | undefined;
-    let modes: { zhuji: boolean; palette: boolean } = { zhuji: false, palette: false };
-    if (blueprintArtifact !== undefined) {
-      try {
-        const parsed = JSON.parse(blueprintArtifact.content) as { characters?: Array<{ id?: unknown; label?: unknown; mode?: unknown }> };
-        const characters = Array.isArray(parsed.characters) ? parsed.characters : [];
-        const first = characters[0];
-        if (first !== undefined) primary = { id: String(first.id ?? ""), label: String(first.label ?? first.id ?? ""), mode: String(first.mode ?? "") };
-        for (const character of characters) {
-          const mode = String(character.mode ?? "");
-          if (mode === "zhuji") modes.zhuji = true;
-          if (mode === "palette") modes.palette = true;
-        }
-      } catch {
-        primary = undefined;
+    if (manifest !== undefined && manifest.primary_character_id !== undefined) {
+      const rosterEntry = manifest.characters.find((character) => character.character_id === manifest.primary_character_id);
+      if (rosterEntry !== undefined) {
+        primary = { id: rosterEntry.character_id, label: rosterEntry.display_name, mode: rosterEntry.mode ?? "" };
       }
     }
-    const entries = state.artifacts.filter((artifact) => ["world_lore", "relationship", "greeting", "wardrobe", "plugin"].includes(artifact.kind)).map((artifact) => ({ kind: artifact.kind, name: artifact.name, char_count: artifact.content.length, estimated_tokens: Math.ceil(artifact.content.length / 4) }));
+    if (primary === undefined) {
+      const blueprintArtifact = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint");
+      if (blueprintArtifact !== undefined) {
+        try {
+          const parsed = JSON.parse(blueprintArtifact.content) as { characters?: Array<{ id?: unknown; label?: unknown; mode?: unknown }> };
+          const characters = Array.isArray(parsed.characters) ? parsed.characters : [];
+          const first = characters[0];
+          if (first !== undefined) primary = { id: String(first.id ?? ""), label: String(first.label ?? first.id ?? ""), mode: String(first.mode ?? "") };
+        } catch {
+          primary = undefined;
+        }
+      }
+    }
+    const entryKinds: readonly ArtifactKind[] = ["world_lore", "relationship", "greeting", "wardrobe", "plugin", "zhuji", "palette"];
+    const entries = current.filter((artifact) => entryKinds.includes(artifact.kind))
+      .filter((artifact) => {
+        if (artifact.kind === "zhuji") return modes.zhuji;
+        if (artifact.kind === "palette") return modes.palette;
+        return true;
+      })
+      .map((artifact) => ({
+        kind: artifact.kind,
+        name: artifact.name,
+        char_count: artifact.content.length,
+        estimated_tokens: Math.ceil(artifact.content.length / 4),
+        artifact_id: artifact.id,
+        revision: artifact.revision,
+      }));
+    let firstGreeting: string | undefined;
+    let alternateGreetingCount = 0;
+    let groupGreetingCount = 0;
+    let greetingTotal = 0;
+    for (const artifact of current) {
+      if (artifact.kind !== "greeting") continue;
+      try {
+        const value = JSON.parse(artifact.content) as { document?: { greetings?: Array<{ kind?: unknown; content?: unknown }> } };
+        const greetings = Array.isArray(value.document?.greetings) ? value.document.greetings : [];
+        for (const greeting of greetings) {
+          greetingTotal += 1;
+          if (greeting.kind === "primary" && firstGreeting === undefined && typeof greeting.content === "string") {
+            firstGreeting = greeting.content.length > 120 ? `${greeting.content.slice(0, 120)}…` : greeting.content;
+          } else if (greeting.kind === "alternate") {
+            alternateGreetingCount += 1;
+          } else if (greeting.kind === "group_only") {
+            groupGreetingCount += 1;
+          }
+        }
+      } catch {
+        // Malformed greeting artifacts surface through normal gate diagnostics.
+      }
+    }
+    const contentKinds: ReadonlySet<ArtifactKind> = new Set(["character", "relationship", "world_lore", "greeting", "zhuji", "palette", "wardrobe", "plugin"]);
+    const pngExpected = current.some((artifact) => contentKinds.has(artifact.kind));
+    const pluginIds = current.filter((artifact) => artifact.kind === "plugin").flatMap((artifact) => {
+      try {
+        const value = JSON.parse(artifact.content) as { plugin_id?: unknown };
+        return typeof value.plugin_id === "string" ? [value.plugin_id] : [];
+      } catch {
+        return [];
+      }
+    });
+    const cardName = state.project_name ?? state.project_id;
+    const exportModes = manifest?.export_modes;
+    const outputMode = exportModes === "zhuji" || exportModes === "palette" ? exportModes : exportModes === "both" ? "both" : undefined;
+    const outputPaths = {
+      json: publishedCardExportPath(state.project_name, state.project_id, current, outputMode),
+      png: publishedCardPngExportPath(state.project_name, state.project_id, current, outputMode),
+    };
     const missing = manifest === undefined ? [] : manifest.characters.flatMap((character) => character.missing_modules.map((module) => `${character.character_id}:${module}`));
     return {
       modes,
       ...(primary === undefined ? {} : { primary_character: primary }),
       ...(manifest === undefined ? {} : { export_modes: manifest.export_modes }),
+      ...(outputMode === undefined || outputMode === "both" ? {} : { selected_mode: outputMode }),
+      card_name: cardName,
+      world_book_name: `${cardName}_世界書`,
+      ...(firstGreeting === undefined ? {} : { first_greeting: firstGreeting }),
+      alternate_greeting_count: alternateGreetingCount,
+      group_greeting_count: groupGreetingCount,
+      plugin_ids: pluginIds,
+      output_paths: outputPaths,
       entries,
-      greeting_entries: entries.filter((entry) => entry.kind === "greeting").length,
-      png_expected: modes.zhuji || modes.palette,
+      greeting_entries: greetingTotal,
+      png_expected: pngExpected,
       missing,
       diagnostics: manifest?.diagnostics ?? [],
     };
@@ -2794,6 +2894,38 @@ export class WorkspaceRuntime {
     if (blueprint === undefined) {
       throw new CoreError("BLUEPRINT_REQUIRED", "請先完成並保存 Blueprint，確認後才能開始珠璣或調色盤模組創作。", true);
     }
+    const blueprintValue = (() => {
+      try {
+        return objectValue(JSON.parse(blueprint.content));
+      } catch {
+        return undefined;
+      }
+    })();
+    const roster = Array.isArray(blueprintValue?.characters) ? blueprintValue.characters : [];
+    const rosterEntry = roster.find((entry) => typeof entry === "object" && entry !== null && (entry as { id?: unknown }).id === characterId);
+    if (rosterEntry === undefined) {
+      throw new CoreError(
+        "BLUEPRINT_CHARACTER_NOT_IN_ROSTER",
+        `角色 ${characterId} 不在目前 Blueprint 的角色名單中；請確認角色 ID 或先更新 Blueprint。`,
+        true,
+      );
+    }
+    const rosterMode = (rosterEntry as { mode?: unknown }).mode;
+    const blueprintMode: "zhuji" | "palette" | undefined = rosterMode === "zhuji" ? "zhuji" : rosterMode === "palette" ? "palette" : undefined;
+    if (blueprintMode === undefined) {
+      throw new CoreError(
+        "BLUEPRINT_CHARACTER_MODE_INVALID",
+        `角色 ${characterId} 在 Blueprint 中沒有宣告模式（zhuji/palette）。`,
+        true,
+      );
+    }
+    if (kind !== blueprintMode) {
+      throw new CoreError(
+        "BLUEPRINT_MODE_MISMATCH",
+        `角色 ${characterId} 在 Blueprint 中的模式是 ${blueprintMode === "zhuji" ? "珠璣" : "調色盤"}，無法提交 ${kind === "zhuji" ? "珠璣" : "調色盤"} 模組。`,
+        true,
+      );
+    }
     const order: readonly string[] = kind === "zhuji" ? ZHUJI_MODULE_ORDER : PALETTE_MODULE_ORDER;
     const index = order.indexOf(module);
     if (index < 0) return;
@@ -2829,7 +2961,7 @@ export class WorkspaceRuntime {
     if (blueprint === undefined) {
       throw new CoreError("BLUEPRINT_REQUIRED", "請先完成並保存 Blueprint，確認後才能建立衣櫃。", true);
     }
-    const hasCharacterSettings = state.artifacts.some((artifact) => {
+    const hasCharacterSettings = latestByKey(state).some((artifact) => {
       if (artifact.kind !== "zhuji" && artifact.kind !== "palette") return false;
       try {
         const value = JSON.parse(artifact.content) as { character_id?: unknown };
@@ -2862,8 +2994,8 @@ export class WorkspaceRuntime {
     if (world?.enabled !== true) return;
     const timing = typeof world.authoring_timing === "string" && world.authoring_timing.length > 0 ? world.authoring_timing : "before_characters";
     const characterKinds: readonly ArtifactKind[] = ["character", "zhuji", "palette", "wardrobe"];
-    const hasWorldLore = state.artifacts.some((artifact) => artifact.kind === "world_lore" && hasUsableArtifact(artifact));
-    const hasCharacterSide = state.artifacts.some((artifact) => characterKinds.includes(artifact.kind) && hasUsableArtifact(artifact));
+    const hasWorldLore = latestByKey(state).some((artifact) => artifact.kind === "world_lore" && hasUsableArtifact(artifact));
+    const hasCharacterSide = latestByKey(state).some((artifact) => characterKinds.includes(artifact.kind) && hasUsableArtifact(artifact));
     if (timing === "before_characters") {
       if (characterKinds.includes(kind) && !hasWorldLore) {
         throw new CoreError("WORLD_AUTHORING_ORDER", "世界設定需在角色創作之前完成；請先建立世界設定。", true);

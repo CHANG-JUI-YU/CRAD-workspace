@@ -148,8 +148,23 @@ function characterDocument(artifact: ArtifactRecord): { id?: string; display_nam
   };
 }
 
-function latestCharacterFor(state: ProjectState, characterId: string, label: string | undefined): { artifact: ArtifactRecord; document: { id?: string; display_name?: string } } | undefined {
-  const candidates = state.artifacts.filter((artifact) => artifact.kind === "character");
+/**
+ * The current projection of a project's artifacts: only the latest revision
+ * per artifact key. Manifest completeness must never be judged against stale
+ * revisions, so every manifest helper consumes this projection.
+ */
+export function currentArtifacts(state: ProjectState): ArtifactRecord[] {
+  const latest = new Map<string, ArtifactRecord>();
+  for (const artifact of state.artifacts) latest.set(artifact.key, artifact);
+  return [...latest.values()];
+}
+
+function normalized(value: string): string {
+  return value.trim().toLocaleLowerCase();
+}
+
+function latestCharacterFor(artifacts: readonly ArtifactRecord[], characterId: string, label: string | undefined): { artifact: ArtifactRecord; document: { id?: string; display_name?: string } } | undefined {
+  const candidates = artifacts.filter((artifact) => artifact.kind === "character");
   let best: { artifact: ArtifactRecord; document: { id?: string; display_name?: string } } | undefined;
   let bestScore = 0;
   for (const artifact of candidates) {
@@ -167,10 +182,11 @@ function latestCharacterFor(state: ProjectState, characterId: string, label: str
   return bestScore === 0 ? undefined : best;
 }
 
-function greetingCoversPrimary(state: ProjectState, primaryCharacterId: string): { artifactIds: string[]; complete: boolean } {
+function greetingCoversPrimary(artifacts: readonly ArtifactRecord[], primaryCharacterId: string): { artifactIds: string[]; complete: boolean } {
   let complete = false;
   const artifactIds: string[] = [];
-  for (const artifact of state.artifacts) {
+  const target = normalized(primaryCharacterId);
+  for (const artifact of artifacts) {
     if (artifact.kind !== "greeting") continue;
     artifactIds.push(artifact.id);
     const parsed = parseJson(artifact.content);
@@ -180,19 +196,19 @@ function greetingCoversPrimary(state: ProjectState, primaryCharacterId: string):
     const covers = greetings.some((entry) => {
       const item = record(entry);
       const characterIds = Array.isArray(item?.character_ids) ? item.character_ids : [];
-      return characterIds.some((id) => typeof id === "string" && (id === primaryCharacterId || id.includes(primaryCharacterId)));
+      return characterIds.some((id) => typeof id === "string" && normalized(id) === target);
     });
     if (covers) complete = true;
   }
   return { artifactIds, complete };
 }
 
-function worldArtifactIds(state: ProjectState): string[] {
-  return state.artifacts.filter((artifact) => artifact.kind === "world_lore").map((artifact) => artifact.id);
+function worldArtifactIds(artifacts: readonly ArtifactRecord[]): string[] {
+  return artifacts.filter((artifact) => artifact.kind === "world_lore").map((artifact) => artifact.id);
 }
 
-function relationshipArtifactIds(state: ProjectState): string[] {
-  return state.artifacts.filter((artifact) => artifact.kind === "relationship").map((artifact) => artifact.id);
+function relationshipArtifactIds(artifacts: readonly ArtifactRecord[]): string[] {
+  return artifacts.filter((artifact) => artifact.kind === "relationship").map((artifact) => artifact.id);
 }
 
 /**
@@ -223,12 +239,14 @@ export function buildRequiredArtifactManifest(
   }
   if (characters.length === 0) return undefined;
 
-  const diagnostics: ManifestDiagnostic[] = [];  const inScope = new Set<string>();
+  const diagnostics: ManifestDiagnostic[] = [];
+  const inScope = new Set<string>();
   const inScopeKeys = new Set<string>();
+  const current = currentArtifacts(state);
 
   const addScope = (artifactIds: readonly string[]): void => {
     for (const artifactId of artifactIds) {
-      const artifact = state.artifacts.find((candidate) => candidate.id === artifactId);
+      const artifact = current.find((candidate) => candidate.id === artifactId);
       if (artifact === undefined) continue;
       inScope.add(artifactId);
       inScopeKeys.add(artifact.key);
@@ -259,13 +277,21 @@ export function buildRequiredArtifactManifest(
     const label = text(item.label);
     const rawMode = text(item.mode);
     const mode: CardMode | undefined = rawMode === "zhuji" || rawMode === "palette" ? rawMode : undefined;
-    const matched = latestCharacterFor(state, characterId, label);
+    if (mode === undefined) {
+      diagnostics.push({
+        code: "BLUEPRINT_CHARACTER_MODE_INVALID",
+        severity: "error",
+        message: `Blueprint character ${characterId} must declare a valid mode: zhuji or palette.`,
+      });
+    }
+    const includedInExport = exportMode === undefined || exportMode === mode;
+    const matched = latestCharacterFor(current, characterId, label);
     const displayName = matched?.document.display_name ?? label ?? characterId;
     const requiredModules = mode === "palette" ? PALETTE_REQUIRED_MODULES : ZHUJI_REQUIRED_MODULES;
-    const presentModules = state.artifacts
-      .filter((artifact) => mode !== undefined && isModeModule(artifact, mode, characterId))
-      .flatMap(modeModuleKeys);
-    const missingModules = requiredModules.filter((module) => !presentModules.includes(module));
+    const presentModules = includedInExport && mode !== undefined
+      ? current.filter((artifact) => isModeModule(artifact, mode, characterId)).flatMap(modeModuleKeys)
+      : [];
+    const missingModules = includedInExport ? requiredModules.filter((module) => !presentModules.includes(module)) : [];
     if (matched !== undefined) addScope([matched.artifact.id]);
     if (matched === undefined) {
       diagnostics.push({
@@ -280,7 +306,7 @@ export function buildRequiredArtifactManifest(
         message: `Character artifact ${matched.artifact.id} has no formal display_name.`,
       });
     }
-    if (mode !== undefined && missingModules.length > 0) {
+    if (mode !== undefined && includedInExport && missingModules.length > 0) {
       diagnostics.push({
         code: "MODE_MODULES_INCOMPLETE",
         severity: "error",
@@ -303,7 +329,7 @@ export function buildRequiredArtifactManifest(
 
   const world = record(blueprint.world) as BlueprintWorldShape | undefined;
   const worldEnabled = world?.enabled === true;
-  const worldArtifacts = worldArtifactIds(state);
+  const worldArtifacts = worldArtifactIds(current);
   const worldTiming = text(world?.authoring_timing);
   if (worldEnabled) addScope(worldArtifacts);
   if (worldEnabled && worldArtifacts.length === 0) {
@@ -316,7 +342,7 @@ export function buildRequiredArtifactManifest(
 
   const relationships = record(blueprint.relationships) as BlueprintRelationshipsShape | undefined;
   const relationshipsEnabled = relationships?.enabled === true;
-  const relationshipArtifacts = relationshipArtifactIds(state);
+  const relationshipArtifacts = relationshipArtifactIds(current);
   if (relationshipsEnabled) addScope(relationshipArtifacts);
   if (relationshipsEnabled && relationshipArtifacts.length === 0) {
     diagnostics.push({
@@ -326,7 +352,7 @@ export function buildRequiredArtifactManifest(
     });
   }
 
-  const greeting = greetingCoversPrimary(state, primaryCharacterId ?? "");
+  const greeting = greetingCoversPrimary(current, primaryCharacterId ?? "");
   const greetingRequired = characters.length > 0;
   addScope(greeting.artifactIds);
   if (greetingRequired && primaryCharacterId !== undefined && !greeting.complete) {
@@ -341,11 +367,13 @@ export function buildRequiredArtifactManifest(
   const exportModes: ManifestCardModeSelection = exportMode ?? (selectedModes.size === 1 ? [...selectedModes][0]! : "both");
   for (const character of characterRequirements) {
     if (character.mode === undefined) continue;
-    for (const artifact of state.artifacts) {
+    const includedInExport = exportMode === undefined || exportMode === character.mode;
+    if (!includedInExport) continue;
+    for (const artifact of current) {
       if (isModeModule(artifact, character.mode, character.character_id)) addScope([artifact.id]);
     }
   }
-  addScope(state.artifacts.filter((artifact) => artifact.kind === "wardrobe").map((artifact) => artifact.id));
+  addScope(current.filter((artifact) => artifact.kind === "wardrobe").map((artifact) => artifact.id));
 
   const primaryCharacter = characterRequirements.find((character) => character.character_id === primaryCharacterId);
   return {

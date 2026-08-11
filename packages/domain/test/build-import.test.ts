@@ -480,6 +480,129 @@ describe("build, publish and import", () => {
     }
   });
 
+  it("asks for the mode again when both modes are available even if the Blueprint selects one", async () => {
+    const repository = new MemoryProjectRepository("mode-ask-again");
+    const timestamp = new Date().toISOString();
+    const precheck = {
+      id: "precheck-mode-ask",
+      schema_version: 1,
+      project_id: "mode-ask-again",
+      operation_id: "interview",
+      collaboration_mode: "assisted",
+      candidate_blueprint: { project_id: "mode-ask-again", characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "zhuji" }], world: { enabled: false }, relationships: { enabled: false } },
+      candidate_blueprint_revision: contentHash("bp"),
+      checks: [{ subject_id: "demo", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }],
+      status: "recorded" as const,
+      created_at: timestamp,
+      created_by: "director",
+    };
+    const characterValue = { kind: "character", document: { schema_version: 1, id: "demo", display_name: "Demo", aliases: [], summary: "A complete character.", relationships: [], sections: [], provenance: [], extensions: {} } };
+    const zhujiValue = { kind: "zhuji", character_id: "demo", module: { schema_version: 1, mode: "zhuji", module: "appearance", title: "Appearance", data: { summary: "Zhuji" } } };
+    const paletteValue = { kind: "palette", character_id: "demo", module: { schema_version: 1, mode: "palette", module: "basic_information", title: "Basic", content: "Palette" } };
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_name: "Mode Ask Again",
+      blueprint_prechecks: [precheck],
+      artifacts: [
+        jsonArtifact("character-mode-ask", "character:demo", "character", "demo", characterValue),
+        jsonArtifact("zhuji-mode-ask", "zhuji:demo/appearance", "zhuji", "demo/appearance", zhujiValue),
+        jsonArtifact("palette-mode-ask", "palette:demo/basic_information", "palette", "demo/basic_information", paletteValue),
+      ],
+      operations: [operation("op-mode-ask", "build")],
+    }));
+    const service = new BuildService(repository);
+    const result = await service.run("op-mode-ask", "preview current card", "builder");
+    expect(result.status).toBe("needs_input");
+    expect(result.summary).toContain("Blueprint 選定");
+    const state = await repository.read();
+    expect(state.audit.some((entry) => entry.event === "build.mode_selection_required")).toBe(true);
+    const confirmed = await service.run("op-mode-ask", "preview current card", "builder", { mode_selection: "zhuji" });
+    expect(confirmed.status).toBe("completed");
+    expect(confirmed.mode_selection).toBe("zhuji");
+  });
+
+  it("gates publish against the exact selected mode", async () => {
+    const repository = new MemoryProjectRepository("gate-exact-mode");
+    const timestamp = new Date().toISOString();
+    const precheck = {
+      id: "precheck-exact-mode",
+      schema_version: 1,
+      project_id: "gate-exact-mode",
+      operation_id: "interview",
+      collaboration_mode: "assisted",
+      candidate_blueprint: { project_id: "gate-exact-mode", characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "palette" }], world: { enabled: false }, relationships: { enabled: false } },
+      candidate_blueprint_revision: contentHash("bp"),
+      checks: [{ subject_id: "demo", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }],
+      status: "recorded" as const,
+      created_at: timestamp,
+      created_by: "director",
+    };
+    const artifacts = [
+      jsonArtifact("character-dem", "character:demo", "character", "demo", { kind: "character", document: { schema_version: 1, id: "demo", display_name: "Demo", aliases: [], summary: "A complete character.", relationships: [], sections: [{ id: "personality", title: "Personality", content: "Calm and direct." }], provenance: [], extensions: {} } }),
+      jsonArtifact("palette-basic", "palette:demo/basic_information", "palette", "demo/basic_information", { kind: "palette", character_id: "demo", module: { schema_version: 1, mode: "palette", module: "basic_information", title: "Basic", content: "Calm." } }),
+      jsonArtifact("greeting-dem", "greeting:greetings", "greeting", "greetings", { document: { greetings: [{ kind: "primary", content: "Hello there.", character_ids: ["demo"] }] } }),
+    ];
+    const reviews = artifacts.map((item) => ({ id: `review-${item.id}`, artifact_id: item.id, artifact_revision: item.revision, reviewer: "character-critic", status: "passed" as const, issue_ids: [], created_at: timestamp }));
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_name: "Gate Exact",
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      quality_profile: qualityProfileForLevel("none"),
+      blueprint_prechecks: [precheck],
+      artifacts,
+      reviews,
+      operations: [operation("op-gate-exact", "build")],
+    }));
+    const result = await new BuildService(repository).run("op-gate-exact", "publish current card", "publisher", { mode_selection: "palette" });
+    expect(result.status).toBe("blocked");
+    const state = await repository.read();
+    expect(state.audit.find((entry) => entry.event === "publish.gate_blocked")?.details).toMatchObject({ codes: expect.arrayContaining(["MODE_MODULES_INCOMPLETE"]) });
+    expect(state.publishes).toHaveLength(0);
+  });
+
+  it("passes publish for the selected mode even when other-mode modules are incomplete", async () => {
+    const repository = new MemoryProjectRepository("publish-selected-mode");
+    const timestamp = new Date().toISOString();
+    const precheck = {
+      id: "precheck-dual",
+      schema_version: 1,
+      project_id: "publish-selected-mode",
+      operation_id: "interview",
+      collaboration_mode: "assisted",
+      candidate_blueprint: { project_id: "publish-selected-mode", characters: [{ id: "alpha", label: "Alpha", ordinal: 1, mode: "zhuji" }, { id: "beta", label: "Beta", ordinal: 2, mode: "palette" }], world: { enabled: false }, relationships: { enabled: false } },
+      candidate_blueprint_revision: contentHash("bp"),
+      checks: [{ subject_id: "alpha", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }],
+      status: "recorded" as const,
+      created_at: timestamp,
+      created_by: "director",
+    };
+    const zhujiModules = ["appearance", "inner_nature", "extension", "trait_refinement", "trait_dialogue", "scene_dialogue", "self_introduction"];
+    const artifacts = [
+      jsonArtifact("character-alpha", "character:alpha", "character", "alpha", { kind: "character", document: { schema_version: 1, id: "alpha", display_name: "Alpha", aliases: [], summary: "A complete character.", relationships: [], sections: [], provenance: [], extensions: {} } }),
+      jsonArtifact("character-beta", "character:beta", "character", "beta", { kind: "character", document: { schema_version: 1, id: "beta", display_name: "Beta", aliases: [], summary: "A complete character.", relationships: [], sections: [], provenance: [], extensions: {} } }),
+      ...zhujiModules.map((module, index) => jsonArtifact(`zhuji-${module}`, `zhuji:alpha/${module}`, "zhuji", `alpha/${module}`, { kind: "zhuji", character_id: "alpha", module: { schema_version: 1, mode: "zhuji", module, title: module, data: { summary: `module-${index}` } } })),
+      jsonArtifact("greeting-alpha", "greeting:greetings", "greeting", "greetings", { document: { greetings: [{ kind: "primary", content: "Hello alpha.", character_ids: ["alpha"] }] } }),
+    ];
+    const reviews = artifacts.map((item) => ({ id: `review-${item.id}`, artifact_id: item.id, artifact_revision: item.revision, reviewer: "character-critic", status: "passed" as const, issue_ids: [], created_at: timestamp }));
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_name: "Selected Mode",
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      quality_profile: qualityProfileForLevel("none"),
+      blueprint_prechecks: [precheck],
+      artifacts: artifacts.map((item) => ({ ...item, blueprint_precheck_id: precheck.id, blueprint_precheck_revision: precheck.candidate_blueprint_revision })),
+      reviews,
+      operations: [operation("op-selected-mode", "build")],
+    }));
+    const result = await new BuildService(repository).run("op-selected-mode", "publish current card", "publisher", { mode_selection: "zhuji" });
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    expect(state.publishes).toHaveLength(1);
+    expect(state.publishes[0]?.export_json_path).toBe("exports/Selected-Mode-珠璣角色卡.json");
+  });
+
   it("imports a YAML card and converts it into the internal Character schema", async () => {
     const repository = new MemoryProjectRepository("demo");
     await repository.commit(0, (state) => ({ ...state, operations: [operation("op-yaml", "import")] }));

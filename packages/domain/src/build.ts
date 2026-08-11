@@ -40,31 +40,6 @@ export class BuildService {
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
     const isPublishRequest = /publish|release|發布|發佈|上線/iu.test(request);
-    if (isPublishRequest) {
-      const gate = validateWorkflow(initial, "publish");
-      if (!gate.ok) {
-        const diagnostics = gate.diagnostics.map((item) => `${item.code}: ${item.message}`);
-        await this.repository.commit(initial.revision, (current) => ({
-          ...current,
-          operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, {
-            status: "blocked",
-            question: diagnostics.join(" "),
-            result_summary: `Publish blocked: ${diagnostics.join(" ")}`,
-            progress: [...item.progress, { item_id: operationId, status: "blocked", message: "workflow gate blocked publish" }],
-          }) : item),
-          audit: [...current.audit, {
-            id: internalId("audit"),
-            operation_id: operationId,
-            event: "publish.gate_blocked",
-            actor,
-            occurred_at: now(),
-            project_revision: current.revision + 1,
-            details: { diagnostics, codes: gate.diagnostics.map((item) => item.code) },
-          }],
-        }));
-        return { status: "blocked", summary: `Publish blocked: ${diagnostics.join(" ")}` };
-      }
-    }
     if (initial.artifacts.length === 0) {
       await this.repository.commit(initial.revision, (current) => ({
         ...current,
@@ -83,11 +58,11 @@ export class BuildService {
       if (selection === "both") return availableModes.zhuji && availableModes.palette;
       return availableModes[selection];
     };
-    const modeSelection = options.mode_selection ?? (manifestMode !== undefined && availableModes[manifestMode] ? manifestMode : undefined);
+    const modeSelection = options.mode_selection ?? (manifestMode !== undefined && availableModes[manifestMode] && !(availableModes.zhuji && availableModes.palette) ? manifestMode : undefined);
     if (availableModes.zhuji && availableModes.palette && modeSelection === undefined) {
       const question = manifestMode === undefined
         ? "本次打包同時有珠璣與調色盤模組，請選擇：珠璣、調色盤，或兩者。"
-        : `Blueprint 選定 ${manifestMode === "zhuji" ? "珠璣" : "調色盤"}，但目前沒有可用的${manifestMode === "zhuji" ? "珠璣" : "調色盤"}模組。`;
+        : `本次打包同時有珠璣與調色盤模組；Blueprint 選定 ${manifestMode === "zhuji" ? "珠璣" : "調色盤"}，本次只能打包該模式。請確認後再試。`;
       await this.repository.commit(initial.revision, (current) => ({
         ...current,
         operations: current.operations.map((item) => item.id === operationId
@@ -112,6 +87,32 @@ export class BuildService {
         operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "needs_input", question }) : item),
       }));
       return { status: "needs_input", summary: question };
+    }
+    const exactManifest = buildRequiredArtifactManifest(initial, modeSelection === "zhuji" || modeSelection === "palette" ? modeSelection : undefined);
+    if (isPublishRequest) {
+      const gate = validateWorkflow(initial, "publish", exactManifest);
+      if (!gate.ok) {
+        const diagnostics = gate.diagnostics.map((item) => `${item.code}: ${item.message}`);
+        await this.repository.commit(initial.revision, (current) => ({
+          ...current,
+          operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, {
+            status: "blocked",
+            question: diagnostics.join(" "),
+            result_summary: `Publish blocked: ${diagnostics.join(" ")}`,
+            progress: [...item.progress, { item_id: operationId, status: "blocked", message: "workflow gate blocked publish" }],
+          }) : item),
+          audit: [...current.audit, {
+            id: internalId("audit"),
+            operation_id: operationId,
+            event: "publish.gate_blocked",
+            actor,
+            occurred_at: now(),
+            project_revision: current.revision + 1,
+            details: { diagnostics, codes: gate.diagnostics.map((item) => item.code) },
+          }],
+        }));
+        return { status: "blocked", summary: `Publish blocked: ${diagnostics.join(" ")}` };
+      }
     }
     let coverImage: Uint8Array | undefined;
     if (initial.images.length > 0) {

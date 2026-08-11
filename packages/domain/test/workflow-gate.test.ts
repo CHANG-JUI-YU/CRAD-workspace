@@ -540,4 +540,124 @@ describe("workflow gates and editable publish", () => {
     expect(result.diagnostics.map((item) => item.code)).not.toContain("ARTIFACT_REVIEW_REQUIRED");
     expect(result.diagnostics.map((item) => item.code)).not.toContain("BLUEPRINT_BINDING_STALE");
   });
+
+  it("does not count historical greeting revisions toward primary coverage", async () => {
+    const repository = new MemoryProjectRepository("greeting-current");
+    const precheck = { id: "precheck-greeting", schema_version: 1, project_id: "greeting-current", operation_id: "interview", collaboration_mode: "assisted", candidate_blueprint: { project_id: "greeting-current", characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "zhuji" }] }, candidate_blueprint_revision: contentHash("current"), checks: [{ subject_id: "demo", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }], status: "recorded" as const, created_at: now, created_by: "director" };
+    const target = artifact("character-g", "character:demo", "character", "demo", character("demo"));
+    const oldGreeting = artifact("greeting-old", "greeting:greetings", "greeting", "greetings", { document: { greetings: [{ character_ids: ["demo"] }] } });
+    const newGreeting = artifact("greeting-new", "greeting:greetings", "greeting", "greetings", { document: { greetings: [{ character_ids: ["other"] }] } });
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      blueprint_prechecks: [precheck],
+      artifacts: [target, oldGreeting, newGreeting],
+      operations: [operation("op-greeting")],
+    }));
+    const missing = buildRequiredArtifactManifest(await repository.read());
+    expect(missing?.greeting.complete).toBe(false);
+    expect(missing?.greeting.required).toBe(true);
+    expect(missing?.diagnostics.map((item) => item.code)).toContain("REQUIRED_GREETING_MISSING");
+    const coveringContent = JSON.stringify({ document: { greetings: [{ character_ids: ["demo"] }] } });
+    await repository.commit((await repository.read()).revision, (state) => ({
+      ...state,
+      artifacts: state.artifacts.map((item) => (item.id === "greeting-new" ? { ...item, content: coveringContent, content_hash: contentHash(coveringContent), revision: contentHash(coveringContent) } : item)),
+    }));
+    const covered = buildRequiredArtifactManifest(await repository.read());
+    expect(covered?.greeting.complete).toBe(true);
+    expect(covered?.diagnostics.map((item) => item.code)).not.toContain("REQUIRED_GREETING_MISSING");
+  });
+
+  it("matches greeting coverage only by exact normalized character id", async () => {
+    const repository = new MemoryProjectRepository("greeting-exact");
+    const precheck = { id: "precheck-exact", schema_version: 1, project_id: "greeting-exact", operation_id: "interview", collaboration_mode: "assisted", candidate_blueprint: { project_id: "greeting-exact", characters: [{ id: "momoka", label: "Momoka", ordinal: 1, mode: "zhuji" }] }, candidate_blueprint_revision: contentHash("current"), checks: [{ subject_id: "momoka", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }], status: "recorded" as const, created_at: now, created_by: "director" };
+    const target = artifact("character-momoka", "character:momoka", "character", "momoka", character("momoka"));
+    const fuzzy = artifact("greeting-fuzzy", "greeting:greetings", "greeting", "greetings", { document: { greetings: [{ character_ids: ["momoka-2"] }] } });
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      blueprint_prechecks: [precheck],
+      artifacts: [target, fuzzy],
+      operations: [operation("op-exact")],
+    }));
+    const manifest = buildRequiredArtifactManifest(await repository.read());
+    expect(manifest?.greeting.complete).toBe(false);
+    expect(manifest?.diagnostics.map((item) => item.code)).toContain("REQUIRED_GREETING_MISSING");
+    const normalizedContent = JSON.stringify({ document: { greetings: [{ character_ids: ["Momoka"] }] } });
+    await repository.commit((await repository.read()).revision, (state) => ({
+      ...state,
+      artifacts: state.artifacts.map((item) => (item.id === "greeting-fuzzy" ? { ...item, content: normalizedContent, content_hash: contentHash(normalizedContent), revision: contentHash(normalizedContent) } : item)),
+    }));
+    expect(buildRequiredArtifactManifest(await repository.read())?.greeting.complete).toBe(true);
+  });
+
+  it("flags a Blueprint character without a valid mode", async () => {
+    const repository = new MemoryProjectRepository("mode-invalid");
+    const precheck = { id: "precheck-mode", schema_version: 1, project_id: "mode-invalid", operation_id: "interview", collaboration_mode: "assisted", candidate_blueprint: { project_id: "mode-invalid", characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "hybrid" }] }, candidate_blueprint_revision: contentHash("current"), checks: [{ subject_id: "demo", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }], status: "recorded" as const, created_at: now, created_by: "director" };
+    const target = artifact("character-mi", "character:demo", "character", "demo", character("demo"));
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      blueprint_prechecks: [precheck],
+      artifacts: [target],
+      operations: [operation("op-mode")],
+    }));
+    const manifest = buildRequiredArtifactManifest(await repository.read());
+    expect(manifest?.diagnostics).toContainEqual(expect.objectContaining({ code: "BLUEPRINT_CHARACTER_MODE_INVALID", severity: "error" }));
+  });
+
+  it("recomputes module requirements and scope for the selected export mode", async () => {
+    const repository = new MemoryProjectRepository("export-recompute");
+    const precheck = { id: "precheck-export", schema_version: 1, project_id: "export-recompute", operation_id: "interview", collaboration_mode: "assisted", candidate_blueprint: { project_id: "export-recompute", characters: [{ id: "alpha", label: "Alpha", ordinal: 1, mode: "zhuji" }, { id: "beta", label: "Beta", ordinal: 2, mode: "palette" }] }, candidate_blueprint_revision: contentHash("current"), checks: [{ subject_id: "alpha", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }], status: "recorded" as const, created_at: now, created_by: "director" };
+    const alphaCharacter = artifact("character-alpha", "character:alpha", "character", "alpha", character("alpha"));
+    const betaCharacter = artifact("character-beta", "character:beta", "character", "beta", character("beta"));
+    const zhujiModule = artifact("zhuji-alpha", "zhuji:alpha/appearance", "zhuji", "alpha/appearance", { kind: "zhuji", character_id: "alpha", module: { schema_version: 1, mode: "zhuji", module: "appearance", title: "Appearance", content: "Tall." } });
+    const paletteModule = artifact("palette-beta", "palette:beta/basic_information", "palette", "beta/basic_information", { kind: "palette", character_id: "beta", module: { schema_version: 1, mode: "palette", module: "basic_information", title: "Basic", content: "Calm." } });
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      blueprint_prechecks: [precheck],
+      artifacts: [alphaCharacter, betaCharacter, zhujiModule, paletteModule],
+      operations: [operation("op-export")],
+    }));
+    const all = buildRequiredArtifactManifest(await repository.read());
+    expect(all?.export_modes).toBe("both");
+    expect(all?.characters.find((item) => item.character_id === "alpha")?.mode_complete).toBe(false);
+    expect(all?.characters.find((item) => item.character_id === "beta")?.mode_complete).toBe(false);
+    expect(all?.diagnostics.map((item) => item.code)).toContain("MODE_MODULES_INCOMPLETE");
+    const zhujiOnly = buildRequiredArtifactManifest(await repository.read(), "zhuji");
+    expect(zhujiOnly?.export_modes).toBe("zhuji");
+    expect(zhujiOnly?.characters.find((item) => item.character_id === "alpha")?.mode_complete).toBe(false);
+    const betaZhuji = zhujiOnly?.characters.find((item) => item.character_id === "beta");
+    expect(betaZhuji?.mode_complete).toBe(true);
+    expect(betaZhuji?.missing_modules).toEqual([]);
+    expect(zhujiOnly?.in_scope_artifact_ids).not.toContain(paletteModule.id);
+    expect(zhujiOnly?.diagnostics.map((item) => item.code)).toContain("MODE_MODULES_INCOMPLETE");
+  });
+
+  it("uses an overridden manifest for the publish gate", async () => {
+    const repository = new MemoryProjectRepository("gate-override");
+    const precheck = { id: "precheck-override", schema_version: 1, project_id: "gate-override", operation_id: "interview", collaboration_mode: "assisted", candidate_blueprint: { project_id: "gate-override", characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "zhuji" }] }, candidate_blueprint_revision: contentHash("current"), checks: [{ subject_id: "demo", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }], status: "recorded" as const, created_at: now, created_by: "director" };
+    const target = artifact("character-go", "character:demo", "character", "demo", character("demo"));
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      blueprint_prechecks: [precheck],
+      artifacts: [target],
+      operations: [operation("op-go")],
+    }));
+    const base = buildRequiredArtifactManifest(await repository.read());
+    expect(base).toBeDefined();
+    const overridden = {
+      ...base!,
+      diagnostics: [{ code: "BLUEPRINT_CHARACTER_MODE_INVALID" as const, severity: "error" as const, message: "Blueprint character demo must declare a valid mode: zhuji or palette." }],
+    };
+    const result = validateWorkflow(await repository.read(), "publish", overridden);
+    expect(result.diagnostics.map((item) => item.code)).toContain("BLUEPRINT_CHARACTER_MODE_INVALID");
+  });
 });
