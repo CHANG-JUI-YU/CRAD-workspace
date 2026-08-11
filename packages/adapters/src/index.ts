@@ -25,6 +25,11 @@ async function defaultLookup(hostname: string): Promise<ReadonlyArray<string>> {
   return records.map((record) => record.address);
 }
 
+function remoteAddressOf(response: Response): string | undefined {
+  const value = (response as unknown as { remoteAddress?: unknown }).remoteAddress;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 export class HttpSourceFetcher {
   readonly fetch: SourceFetcher;
   private readonly allowedHosts: ReadonlySet<string> | undefined;
@@ -57,8 +62,9 @@ export class HttpSourceFetcher {
       let current = initial;
       let redirects = 0;
       while (true) {
-        await this.assertTargetAllowed(current);
+        const resolved = await this.assertTargetAllowed(current);
         const response = await this.fetchImpl(current, { redirect: "manual", signal: controller.signal });
+        this.assertRemoteAddress(current, resolved, remoteAddressOf(response));
         const status = response.status;
         if (status >= 300 && status < 400) {
           const location = response.headers.get("location");
@@ -97,7 +103,7 @@ export class HttpSourceFetcher {
     }
   }
 
-  private async assertTargetAllowed(url: URL): Promise<void> {
+  private async assertTargetAllowed(url: URL): Promise<{ literal?: string; addresses?: ReadonlyArray<string> }> {
     if (url.protocol !== "https:") throw new CoreError("SOURCE_URL_UNSAFE", "受控來源只允許 HTTPS", true);
     if (this.allowedHosts !== undefined && !this.allowedHosts.has(url.hostname)) {
       throw new CoreError("SOURCE_FETCH_TARGET_DENIED", `目標站 ${url.hostname} 不在允許清單`, true);
@@ -105,7 +111,7 @@ export class HttpSourceFetcher {
     const hostname = stripBrackets(url.hostname);
     if (isIpLiteral(hostname)) {
       if (isBlockedIp(hostname)) throw new CoreError("SOURCE_NETWORK_DENIED", `目標 ${url.hostname} 指向不允許的網路位址`, true);
-      return;
+      return { literal: hostname };
     }
     let addresses: ReadonlyArray<string>;
     try {
@@ -118,6 +124,18 @@ export class HttpSourceFetcher {
       if (isBlockedIp(address)) {
         throw new CoreError("SOURCE_NETWORK_DENIED", `目標 ${url.hostname} 解析到不允許的網路位址 ${address}`, true);
       }
+    }
+    return { addresses };
+  }
+
+  private assertRemoteAddress(url: URL, resolved: { literal?: string; addresses?: ReadonlyArray<string> }, remoteAddress: string | undefined): void {
+    if (remoteAddress === undefined) return;
+    const address = stripBrackets(remoteAddress);
+    if (isBlockedIp(address)) {
+      throw new CoreError("SOURCE_NETWORK_DENIED", `連線實際目標 ${remoteAddress} 指向不允許的網路位址`, true);
+    }
+    if (resolved.literal !== undefined && address !== resolved.literal) {
+      throw new CoreError("SOURCE_NETWORK_DENIED", `連線實際目標 ${remoteAddress} 與驗證過的目標 ${resolved.literal} 不符`, true);
     }
   }
 

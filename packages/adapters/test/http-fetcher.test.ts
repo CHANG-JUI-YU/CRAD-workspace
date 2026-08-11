@@ -30,6 +30,10 @@ function streamedBody(totalBytes: number, chunkSize = 8): ReadableStream<Uint8Ar
   });
 }
 
+function withRemoteAddress(response: Response, address: string): Response {
+  return Object.defineProperty(response, "remoteAddress", { value: address, enumerable: true });
+}
+
 describe("controlled HTTP source adapter", () => {
   it("rejects non-HTTPS targets before network access", async () => {
     const fetcher = new HttpSourceFetcher();
@@ -203,5 +207,42 @@ describe("controlled HTTP source adapter", () => {
     });
     const result = await fetcher.fetch("https://example.test/medium");
     expect(result.content.byteLength).toBe(50);
+  });
+
+  it("rejects a connection whose actual remote address is private (DNS rebinding / TOCTOU)", async () => {
+    const fetcher = new HttpSourceFetcher({
+      lookup: publicLookup,
+      fetchImpl: fetchStub(() => withRemoteAddress(okResponse("secret"), "10.0.0.5")),
+    });
+    await expect(fetcher.fetch("https://example.test/x")).rejects.toMatchObject({ code: "SOURCE_NETWORK_DENIED" });
+  });
+
+  it("rejects a redirect hop that rebinds to loopback after a valid first hop", async () => {
+    const fetcher = new HttpSourceFetcher({
+      lookup: publicLookup,
+      fetchImpl: fetchStub(async (url) => {
+        if (url.pathname === "/start") {
+          return withRemoteAddress(new Response(null, { status: 302, headers: { location: "/internal" } }), "93.184.216.34");
+        }
+        return withRemoteAddress(okResponse("secret"), "127.0.0.1");
+      }),
+    });
+    await expect(fetcher.fetch("https://example.test/start")).rejects.toMatchObject({ code: "SOURCE_NETWORK_DENIED" });
+  });
+
+  it("accepts a response whose remote address matches the resolved public address", async () => {
+    const fetcher = new HttpSourceFetcher({
+      lookup: publicLookup,
+      fetchImpl: fetchStub(() => withRemoteAddress(okResponse("ok", { "content-type": "text/plain" }), "93.184.216.34")),
+    });
+    const result = await fetcher.fetch("https://example.test/x");
+    expect(new TextDecoder().decode(result.content)).toBe("ok");
+  });
+
+  it("rejects a literal IP target whose connection reaches a different address", async () => {
+    const fetcher = new HttpSourceFetcher({
+      fetchImpl: fetchStub(() => withRemoteAddress(okResponse("secret"), "10.0.0.5")),
+    });
+    await expect(fetcher.fetch("https://93.184.216.34/x")).rejects.toMatchObject({ code: "SOURCE_NETWORK_DENIED" });
   });
 });
