@@ -5,6 +5,7 @@ export interface WorkspaceWorkerOptions {
   readonly pollIntervalMs?: number;
   readonly retryDelayMs?: number;
   readonly maxRetries?: number;
+  readonly leaseRenewIntervalMs?: number;
   readonly actor?: string;
   readonly onEvent?: (event: WorkspaceWorkerEvent) => void;
 }
@@ -54,6 +55,7 @@ export class WorkspaceWorker {
   private readonly pollIntervalMs: number;
   private readonly retryDelayMs: number;
   private readonly maxRetries: number;
+  private readonly leaseRenewIntervalMs: number;
   private readonly actor: string;
   private readonly onEvent: (event: WorkspaceWorkerEvent) => void;
   private readonly jobs: WorkerJob[] = [];
@@ -72,6 +74,7 @@ export class WorkspaceWorker {
     this.pollIntervalMs = Math.max(25, options.pollIntervalMs ?? 250);
     this.retryDelayMs = Math.max(0, options.retryDelayMs ?? 100);
     this.maxRetries = Math.max(0, options.maxRetries ?? 3);
+    this.leaseRenewIntervalMs = Math.max(50, options.leaseRenewIntervalMs ?? 20_000);
     this.actor = options.actor ?? "worker";
     this.onEvent = options.onEvent ?? (() => undefined);
   }
@@ -185,28 +188,38 @@ export class WorkspaceWorker {
     if (claimed === undefined) return;
     const token = claimed.lease_token ?? "";
     const attempt = claimed.attempt ?? 1;
+    const lease = { owner: actor, token };
     this.attempts.set(operationId, attempt);
     this.activeOperationId = operationId;
     this.onEvent({ type: "operation.started", operation_id: operationId, attempt });
+    let leaseLost = false;
+    const renewer = setInterval(() => {
+      void runtime.renewOperationLease(operationId, actor, token).then((renewed) => {
+        if (!renewed) leaseLost = true;
+      });
+    }, this.leaseRenewIntervalMs);
     try {
-      const result = await runtime.recoverOperation(operationId, { actor, attachments: [] });
+      const result = await runtime.recoverOperation(operationId, { actor, attachments: [] }, { lease });
+      if (leaseLost) return;
       await runtime.releaseOperationLease(operationId, actor, token);
       this.attempts.delete(operationId);
       this.lastError = undefined;
       this.onEvent({ type: "operation.completed", operation_id: operationId, result });
     } catch (error) {
+      if (leaseLost) return;
       const message = errorMessage(error);
-      await runtime.releaseOperationLease(operationId, actor, token);
       if (this.recoverableError(error) && attempt <= this.maxRetries) {
+        await runtime.releaseOperationLease(operationId, actor, token);
         this.onEvent({ type: "operation.retry", operation_id: operationId, attempt, error: message });
         await delay(this.retryDelayMs * attempt);
       } else {
-        await runtime.failOperation(operationId, error, actor);
+        await runtime.failOperation(operationId, error, actor, lease);
         this.attempts.delete(operationId);
         this.lastError = message;
         this.onEvent({ type: "operation.failed", operation_id: operationId, error: message });
       }
     } finally {
+      clearInterval(renewer);
       this.activeOperationId = undefined;
     }
   }

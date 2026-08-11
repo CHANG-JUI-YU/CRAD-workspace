@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deflateSync } from "node:zlib";
-import { MemoryProjectRepository, contentHash, createProjectState, type ArtifactRecord, type BlueprintPrecheckRecord, type ProjectRepository, type ZhujiProposalValue } from "@st-workspace/core";
+import { CoreError, MemoryProjectRepository, contentHash, createProjectState, type ArtifactRecord, type BlueprintPrecheckRecord, type ProjectRepository, type ZhujiProposalValue } from "@st-workspace/core";
 import { encodePngChunk, pngSignature } from "@st-workspace/adapters-png";
 import { WorkspaceRuntime } from "../src/index.js";
 
@@ -1045,6 +1045,105 @@ describe("natural language runtime boundary", () => {
     );
     expect(boundary.width).toBe(2048);
     expect(boundary.height).toBe(2048);
+  });
+
+  it("validates lease ownership before and after recovery", async () => {
+    const repository = new MemoryProjectRepository("runtime-lease-check");
+    const timestamp = new Date().toISOString();
+    const base: OperationRecord = { id: "op-lease", kind: "authoring", request: "Draft note: Create character: Lease. Personality: calm and clear.", actor: "writer", status: "running", created_at: timestamp, updated_at: timestamp, progress: [], execution_snapshot: { execution_agent_id: "director", execution_agent_role: "orchestrator", initiated_by: "writer", created_at: timestamp } };
+    await repository.commit(0, (state) => ({ ...state, operations: [base] }));
+    const runtime = new WorkspaceRuntime(repository);
+    const claimed = await runtime.claimOperation("op-lease", "worker-1");
+    const token = claimed?.lease_token ?? "";
+    expect(token.length).toBeGreaterThan(0);
+    await expect(runtime.recoverOperation("op-lease", { actor: "worker-1", attachments: [] }, { lease: { owner: "worker-2", token } })).rejects.toMatchObject({ code: "OPERATION_LEASE_LOST" });
+    await expect(runtime.recoverOperation("op-lease", { actor: "worker-1", attachments: [] }, { lease: { owner: "worker-1", token: "wrong-token" } })).rejects.toMatchObject({ code: "OPERATION_LEASE_LOST" });
+    const recovered = await runtime.recoverOperation("op-lease", { actor: "worker-1", attachments: [] }, { lease: { owner: "worker-1", token } });
+    expect(recovered.status).toBe("completed");
+  });
+
+  it("rejects an expired lease during recovery", async () => {
+    const repository = new MemoryProjectRepository("runtime-lease-expired");
+    const timestamp = new Date().toISOString();
+    const past = new Date(Date.now() - 5_000).toISOString();
+    const leased: OperationRecord = { id: "op-expired", kind: "authoring", request: "Draft note: Create character: Expired. Personality: calm.", actor: "writer", status: "running", created_at: timestamp, updated_at: timestamp, progress: [], lease_owner: "worker-1", lease_token: "token-1", lease_expires_at: past, execution_snapshot: { execution_agent_id: "director", execution_agent_role: "orchestrator", initiated_by: "writer", created_at: timestamp } };
+    await repository.commit(0, (state) => ({ ...state, operations: [leased] }));
+    const runtime = new WorkspaceRuntime(repository);
+    await expect(runtime.recoverOperation("op-expired", { actor: "worker-1", attachments: [] }, { lease: { owner: "worker-1", token: "token-1" } })).rejects.toMatchObject({ code: "OPERATION_LEASE_LOST" });
+  });
+
+  it("ignores failOperation when the lease does not match and clears it when it does", async () => {
+    const repository = new MemoryProjectRepository("runtime-fail-lease");
+    const timestamp = new Date().toISOString();
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const leased: OperationRecord = { id: "op-held-fail", kind: "authoring", request: "Draft note: Create character: HeldFail. Personality: calm.", actor: "writer", status: "running", created_at: timestamp, updated_at: timestamp, progress: [], lease_owner: "worker-1", lease_token: "token-1", lease_expires_at: future };
+    await repository.commit(0, (state) => ({ ...state, operations: [leased] }));
+    const runtime = new WorkspaceRuntime(repository);
+    await runtime.failOperation("op-held-fail", new Error("boom"), "worker-2", { owner: "worker-2", token: "token-1" });
+    let after = (await repository.read()).operations[0];
+    expect(after?.status).toBe("running");
+    expect(after?.lease_owner).toBe("worker-1");
+    await runtime.failOperation("op-held-fail", new Error("boom"), "worker-1", { owner: "worker-1", token: "token-1" });
+    after = (await repository.read()).operations[0];
+    expect(after?.status).toBe("failed");
+    expect(after?.lease_owner).toBeUndefined();
+    expect(after?.lease_token).toBeUndefined();
+  });
+
+  it("does not pre-write lease fields for synchronous operations", async () => {
+    const repository = new MemoryProjectRepository("runtime-sync-no-lease");
+    const runtime = new WorkspaceRuntime(repository);
+    const result = await runtime.request("Draft note: Create character: SyncLease. Personality: calm and clear.", { actor: "writer", attachments: [] });
+    expect(result.status).toBe("completed");
+    const operation = (await repository.read()).operations[0];
+    expect(operation?.lease_owner).toBeUndefined();
+    expect(operation?.lease_token).toBeUndefined();
+    expect(operation?.lease_expires_at).toBeUndefined();
+  });
+
+  it("reuses the operation when the same idempotency key is requested again", async () => {
+    const repository = new MemoryProjectRepository("runtime-idempotency");
+    const runtime = new WorkspaceRuntime(repository);
+    const first = await runtime.request("Draft note: Create character: Idem. Personality: calm and clear.", { actor: "writer", attachments: [] }, { idempotency_key: "key-1" });
+    expect(first.status).toBe("completed");
+    const second = await runtime.request("Draft note: Create character: Idem. Personality: calm and clear.", { actor: "writer", attachments: [] }, { idempotency_key: "key-1" });
+    expect(second.operation_id).toBe(first.operation_id);
+    const state = await repository.read();
+    expect(state.operations.filter((item) => item.idempotency_key === "key-1")).toHaveLength(1);
+    expect(state.audit.some((entry) => entry.event === "request.idempotent_replay")).toBe(true);
+    expect(state.artifacts.filter((item) => item.name === "Idem")).toHaveLength(1);
+  });
+
+  it("clears the lease when an operation moves to needs_input", async () => {
+    const repository = new MemoryProjectRepository("runtime-needs-input-lease");
+    const timestamp = new Date().toISOString();
+    const base: OperationRecord = { id: "op-unclear", kind: "authoring", request: "unclear", actor: "writer", status: "running", created_at: timestamp, updated_at: timestamp, progress: [] };
+    await repository.commit(0, (state) => ({ ...state, operations: [base] }));
+    const runtime = new WorkspaceRuntime(repository);
+    const claimed = await runtime.claimOperation("op-unclear", "worker-1");
+    const result = await runtime.recoverOperation("op-unclear", { actor: "worker-1", attachments: [] }, { lease: { owner: "worker-1", token: claimed?.lease_token ?? "" } });
+    expect(result.status).toBe("needs_input");
+    const after = (await repository.read()).operations[0];
+    expect(after?.lease_owner).toBeUndefined();
+    expect(after?.lease_token).toBeUndefined();
+  });
+
+  it("exposes the error class from the latest failure audit", async () => {
+    const repository = new MemoryProjectRepository("runtime-error-class");
+    const timestamp = new Date().toISOString();
+    const base: OperationRecord = { id: "op-summary", kind: "authoring", request: "Draft note: Create character: Summary. Personality: calm.", actor: "writer", status: "failed", created_at: timestamp, updated_at: timestamp, progress: [] };
+    await repository.commit(0, (state) => ({ ...state, operations: [base] }));
+    const runtime = new WorkspaceRuntime(repository);
+    const clean = await runtime.dashboardSnapshot();
+    expect(clean.operations.find((item) => item.id === "op-summary")?.error_class).toBeUndefined();
+    await runtime.failOperation("op-summary", new Error("soft failure"), "writer");
+    const recoverable = await runtime.dashboardSnapshot();
+    expect(recoverable.operations.find((item) => item.id === "op-summary")?.error_class).toBe("recoverable");
+    await runtime.failOperation("op-summary", new CoreError("HARD_ERROR", "fatal failure", false), "writer");
+    const fatalSnapshot = await runtime.dashboardSnapshot();
+    expect(fatalSnapshot.operations.find((item) => item.id === "op-summary")?.error_class).toBe("fatal");
+    const auditDetails = (await repository.read()).audit.filter((entry) => entry.event === "operation.failed").at(-1)?.details;
+    expect(auditDetails).toMatchObject({ recoverable: false, code: "HARD_ERROR" });
   });
 });
 

@@ -108,7 +108,64 @@ describe("background workspace worker", () => {
     worker.start();
     try {
       await waitFor(async () => events.includes("operation.failed"));
-      expect(fail).toHaveBeenCalledWith("op-fail", expect.any(Error), "writer");
+      expect(fail).toHaveBeenCalledWith("op-fail", expect.any(Error), "writer", expect.objectContaining({ owner: "writer", token: expect.any(String) }));
+    } finally {
+      worker.stop();
+    }
+  });
+
+  it("renews the operation lease while recovery is in progress", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-renew", "Draft note: Create character: Renew. Personality: calm and clear.")] }));
+    const runtime = new WorkspaceRuntime(repository);
+    const renew = vi.spyOn(runtime, "renewOperationLease");
+    const recover = vi.spyOn(runtime, "recoverOperation").mockImplementation(async (operationId) => {
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      await repository.commit((await repository.read()).revision, (state) => ({
+        ...state,
+        operations: state.operations.map((item) => item.id === operationId ? { ...item, status: "completed", updated_at: new Date().toISOString() } : item),
+      }));
+      return { operation_id: operationId, status: "completed", summary: "done", completed: [], blocked: [] };
+    });
+    const worker = new WorkspaceWorker(runtime, { pollIntervalMs: 10, leaseRenewIntervalMs: 50 });
+    worker.start();
+    try {
+      await waitFor(async () => (await repository.read()).operations[0]?.status === "completed");
+      expect(renew).toHaveBeenCalled();
+      expect(renew.mock.calls[0]?.[0]).toBe("op-renew");
+      expect(renew.mock.calls[0]?.[1]).toBe("writer");
+      expect(renew.mock.calls[0]?.[2]).toEqual(expect.any(String));
+      expect(recover).toHaveBeenCalledWith("op-renew", { actor: "writer", attachments: [] }, expect.objectContaining({ lease: { owner: "writer", token: expect.any(String) } }));
+    } finally {
+      worker.stop();
+    }
+  });
+
+  it("stops quietly when the lease is lost mid-recovery", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-lost", "Draft note: Create character: Lost. Personality: calm and clear.")] }));
+    const runtime = new WorkspaceRuntime(repository);
+    const renew = vi.spyOn(runtime, "renewOperationLease").mockResolvedValue(false);
+    const release = vi.spyOn(runtime, "releaseOperationLease");
+    const fail = vi.spyOn(runtime, "failOperation").mockResolvedValue();
+    const recover = vi.spyOn(runtime, "recoverOperation").mockImplementation(async (operationId) => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await repository.commit((await repository.read()).revision, (state) => ({
+        ...state,
+        operations: state.operations.map((item) => item.id === operationId ? { ...item, status: "completed", updated_at: new Date().toISOString() } : item),
+      }));
+      return { operation_id: operationId, status: "completed", summary: "done", completed: [], blocked: [] };
+    });
+    const events: string[] = [];
+    const worker = new WorkspaceWorker(runtime, { pollIntervalMs: 10, leaseRenewIntervalMs: 30, onEvent: (event) => events.push(event.type) });
+    worker.start();
+    try {
+      await waitFor(async () => (await repository.read()).operations[0]?.status === "completed");
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(recover).toHaveBeenCalled();
+      expect(release).not.toHaveBeenCalled();
+      expect(fail).not.toHaveBeenCalled();
+      expect(events).not.toContain("operation.completed");
     } finally {
       worker.stop();
     }

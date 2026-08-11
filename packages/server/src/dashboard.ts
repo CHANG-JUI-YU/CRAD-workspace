@@ -399,8 +399,17 @@ export function dashboard(): string {
       <div class="panel-heading">
         <div>
           <h2 id="operation-heading">Operation 管理</h2>
-          <p class="muted">列出 operation 與 lease/attempt 資訊；可取消卡住的 operation 或重新嘗試。</p>
+          <p class="muted">列出 operation 與 lease/attempt 資訊；可回答待輸入問題、取消卡住的 operation 或重新嘗試失敗的操作。</p>
         </div>
+        <label class="field-label" for="operation-filter">狀態篩選
+          <select id="operation-filter">
+            <option value="all">全部</option>
+            <option value="active">進行中</option>
+            <option value="needs_input">待輸入</option>
+            <option value="failed">失敗</option>
+            <option value="terminal">已完成／已取消</option>
+          </select>
+        </label>
       </div>
       <div id="operation-message" class="panel-message" aria-live="polite">尚未取得 operation 資料。</div>
       <div id="operation-list" class="operation-list"></div>
@@ -1238,17 +1247,56 @@ export function dashboard(): string {
         byId("blueprint-json").textContent = blueprint === undefined ? "{}" : jsonText(blueprint);
       }
 
+      var cachedOperations = [];
+      var OPERATION_FILTERS = { all: "", active: "created,resolving,running,partial", needs_input: "needs_input", failed: "failed", terminal: "completed,cancelled" };
+
+      function operationMatchesFilter(operation, filter) {
+        var states = OPERATION_FILTERS[filter] || "";
+        if (states === "") return true;
+        return states.split(",").indexOf(operation.status || "unknown") !== -1;
+      }
+
+      function answerNeedsInput(operationId, input) {
+        return function () {
+          if (state.busy) return;
+          var value = input.value.trim();
+          if (!value) {
+            localValidation("Operation 回答", "回答不可為空。");
+            return;
+          }
+          var body = { request: value };
+          void runTask("回答 Operation", async function () {
+            var payload = await postJson("/workspace/request", body);
+            await loadDashboardData();
+            return payload;
+          });
+        };
+      }
+
+      function confirmCancel(operationId) {
+        return function () {
+          if (state.busy) return;
+          if (!window.confirm("確定要取消 operation " + operationId + "？此操作將被標記為失敗。" + "需要重新執行時可再按「重試」。")) return;
+          postOperation("fail", operationId);
+        };
+      }
+
       function renderOperationList(operations) {
         var target = byId("operation-list");
+        var filter = byId("operation-filter").value;
+        cachedOperations = Array.isArray(operations) ? operations : [];
         target.textContent = "";
-        if (!Array.isArray(operations) || operations.length === 0) {
+        if (cachedOperations.length === 0) {
           byId("operation-message").textContent = "目前沒有 operation。";
           return;
         }
-        byId("operation-message").textContent = "共 " + operations.length + " 個 operation。";
-        for (var i = 0; i < operations.length; i += 1) {
-          var operation = operations[i];
-          if (!isRecord(operation)) continue;
+        var visible = [];
+        for (var i = 0; i < cachedOperations.length; i += 1) {
+          if (isRecord(cachedOperations[i]) && operationMatchesFilter(cachedOperations[i], filter)) visible.push(cachedOperations[i]);
+        }
+        byId("operation-message").textContent = "共 " + cachedOperations.length + " 個 operation（顯示 " + visible.length + " 個）。";
+        for (var j = 0; j < visible.length; j += 1) {
+          var operation = visible[j];
           var row = document.createElement("div");
           row.className = "operation-row";
           var badge = document.createElement("span");
@@ -1257,21 +1305,44 @@ export function dashboard(): string {
           var label = document.createElement("span");
           var labelParts = [firstString(operation, ["kind"]) || "?", firstString(operation, ["request"]) || ""];
           if (operation.attempt) labelParts.push("attempt " + operation.attempt);
-          if (operation.lease_owner) labelParts.push("lease " + operation.lease_owner + (operation.lease_expires_at ? " ~ " + operation.lease_expires_at : ""));
+          if (operation.lease_owner) {
+            var remainingText = operation.lease_expires_at ? " 剩餘 " + Math.max(0, Math.round((new Date(operation.lease_expires_at).getTime() - Date.now()) / 1000)) + "s" : "";
+            labelParts.push("lease " + operation.lease_owner + remainingText);
+          }
+          if ((operation.status === "running" || operation.status === "partial") && typeof operation.progress_count === "number") labelParts.push("progress " + operation.progress_count);
+          if (operation.status === "needs_input" && operation.question) labelParts.push("問題: " + operation.question);
+          if (operation.error_class === "recoverable") labelParts.push("可安全重試");
+          if (operation.error_class === "fatal") labelParts.push("需人工重送");
           if (operation.last_error) labelParts.push("error: " + operation.last_error);
           label.textContent = labelParts.join(" · ");
           row.append(badge, label);
           var actions = document.createElement("span");
           actions.className = "inline-actions";
-          var recover = document.createElement("button");
-          recover.type = "button";
-          recover.textContent = "重試";
-          recover.addEventListener("click", function () { postOperation("recover", operation.id); });
-          var fail = document.createElement("button");
-          fail.type = "button";
-          fail.textContent = "取消";
-          fail.addEventListener("click", function () { postOperation("fail", operation.id); });
-          actions.append(recover, fail);
+          var status = operation.status || "unknown";
+          if (status === "needs_input") {
+            var answer = document.createElement("input");
+            answer.type = "text";
+            answer.placeholder = "回答此問題…";
+            var send = document.createElement("button");
+            send.type = "button";
+            send.textContent = "送出";
+            send.addEventListener("click", answerNeedsInput(operation.id, answer));
+            actions.append(answer, send);
+          } else if (status === "failed") {
+            if (operation.error_class !== "fatal") {
+              var retry = document.createElement("button");
+              retry.type = "button";
+              retry.textContent = "重試";
+              retry.addEventListener("click", function () { postOperation("recover", operation.id); });
+              actions.append(retry);
+            }
+          } else if (status === "created" || status === "resolving" || status === "running" || status === "partial") {
+            var cancel = document.createElement("button");
+            cancel.type = "button";
+            cancel.textContent = "取消";
+            cancel.addEventListener("click", confirmCancel(operation.id));
+            actions.append(cancel);
+          }
           row.append(actions);
           target.append(row);
         }
@@ -1625,6 +1696,9 @@ export function dashboard(): string {
         });
       }
 
+      byId("operation-filter").addEventListener("change", function () {
+        renderOperationList(cachedOperations);
+      });
       byId("check-readiness").addEventListener("click", function () {
         void runTask("Publish 就緒檢查", async function () {
           var payload = await requestJson("/workspace/publish/preview");

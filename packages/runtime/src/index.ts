@@ -1176,11 +1176,14 @@ export class WorkspaceRuntime {
    * Continue one persisted operation without creating a duplicate operation.
    * Operations that asked a user a question are intentionally excluded from this path.
    */
-  async recoverOperation(operationId: string, context: WorkspaceContext = { actor: "worker", attachments: [] }, options: { agent?: string } = {}): Promise<RequestResult> {
+  async recoverOperation(operationId: string, context: WorkspaceContext = { actor: "worker", attachments: [] }, options: { agent?: string; lease?: Readonly<{ owner: string; token: string }> } = {}): Promise<RequestResult> {
     const state = await this.repository.read();
     const operation = state.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
     if (!["created", "resolving", "running"].includes(operation.status)) return responseFromOperation(operation);
+    if (options.lease !== undefined && !this.leaseHeldBy(operation, options.lease)) {
+      throw new CoreError("OPERATION_LEASE_LOST", `Operation ${operationId} is no longer held by this lease; another instance may have taken over.`, true);
+    }
     const actor = context.actor.trim().length > 0 ? context.actor : operation.actor ?? "worker";
     const effectiveContext = { ...context, actor };
     const latest = await this.repository.read();
@@ -1212,17 +1215,39 @@ export class WorkspaceRuntime {
     if (identityRequired && agentId === undefined) {
       return this.markNeedsInput(operation, "EXECUTION_IDENTITY_RECOVERY_REQUIRED: 無法還原此操作的原執行代理（缺少 execution snapshot 與可信 audit 記錄）。請重新指定執行代理後重試。");
     }
-    return this.replayOperation(operation, effectiveContext, agentId);
+    const result = await this.replayOperation(operation, effectiveContext, agentId);
+    if (options.lease !== undefined) {
+      const after = (await this.repository.read()).operations.find((item) => item.id === operationId);
+      if (after === undefined) {
+        throw new CoreError("OPERATION_LEASE_LOST", `Operation ${operationId} lost its lease during recovery; another instance may have taken over.`, true);
+      }
+      if (after.lease_owner !== undefined && !this.leaseHeldBy(after, options.lease)) {
+        throw new CoreError("OPERATION_LEASE_LOST", `Operation ${operationId} lost its lease during recovery; another instance may have taken over.`, true);
+      }
+    }
+    return result;
+  }
+
+  private leaseHeldBy(operation: OperationRecord | undefined, lease: Readonly<{ owner: string; token: string }>): boolean {
+    if (operation === undefined) return false;
+    if (operation.lease_owner !== lease.owner || operation.lease_token !== lease.token) return false;
+    if (operation.lease_expires_at === undefined) return true;
+    return new Date(operation.lease_expires_at).getTime() > Date.now();
   }
 
   /** Mark an operation failed after the worker exhausted its retry budget. */
-  async failOperation(operationId: string, error: unknown, actor = "worker"): Promise<void> {
+  async failOperation(operationId: string, error: unknown, actor = "worker", lease?: Readonly<{ owner: string; token: string }>): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     const state = await this.repository.read();
+    const latest = state.operations.find((item) => item.id === operationId);
+    if (latest === undefined) return;
+    if (lease !== undefined && !this.leaseHeldBy(latest, lease)) return;
+    const code = error instanceof CoreError ? error.code : undefined;
+    const recoverable = !(error instanceof CoreError && error.recoverable === false);
     await this.repository.commit(state.revision, (current) => ({
       ...current,
       operations: current.operations.map((item) => item.id === operationId
-        ? { ...item, status: "failed", result_summary: message, updated_at: now() }
+        ? { ...(lease !== undefined ? stripLease(item) : item), status: "failed", result_summary: message, updated_at: now() }
         : item),
       audit: [...current.audit, {
         id: internalId("audit"),
@@ -1231,7 +1256,7 @@ export class WorkspaceRuntime {
         actor,
         occurred_at: now(),
         project_revision: current.revision + 1,
-        details: { message },
+        details: { message, recoverable, ...(code === undefined ? {} : { code }) },
       }],
     }));
   }
@@ -1252,7 +1277,7 @@ export class WorkspaceRuntime {
     await this.repository.commit(state.revision, (current) => ({
       ...current,
       operations: current.operations.map((item) => item.id === operation.id
-        ? { ...item, status: "needs_input" as const, question, updated_at: now() }
+        ? { ...stripLease(item), status: "needs_input" as const, question, updated_at: now() }
         : item),
     }));
     return { operation_id: operation.id, status: "needs_input", summary: question, completed: [], blocked: [], question };
@@ -1687,9 +1712,6 @@ export class WorkspaceRuntime {
       updated_at: now(),
       progress: [],
       command: { version: 1, type: "source_select", payload: { decisions } },
-      lease_owner: context.actor,
-      lease_token: internalId("lease"),
-      lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
       execution_snapshot: {
         execution_agent_id: "source-researcher",
         execution_agent_role: "researcher",
@@ -1803,9 +1825,6 @@ export class WorkspaceRuntime {
       updated_at: now(),
       progress: [],
       command: { version: 1, type: "template_proposal", payload: parsed.data },
-      lease_owner: context.actor,
-      lease_token: internalId("lease"),
-      lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
       execution_snapshot: {
         execution_agent_id: resolution.agent_id,
         execution_agent_role: resolution.agent_role,
@@ -1916,9 +1935,6 @@ export class WorkspaceRuntime {
       updated_at: now(),
       progress: [],
       command: { version: 1, type: "zhuji_proposal", payload: parsed.data },
-      lease_owner: context.actor,
-      lease_token: internalId("lease"),
-      lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
       execution_snapshot: {
         execution_agent_id: resolution.agent_id,
         execution_agent_role: resolution.agent_role,
@@ -2007,9 +2023,6 @@ export class WorkspaceRuntime {
       updated_at: now(),
       progress: [],
       command: { version: 1, type: "issue_update", payload: input },
-      lease_owner: context.actor,
-      lease_token: internalId("lease"),
-      lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
       execution_snapshot: {
         execution_agent_id: resolution.agent_id,
         execution_agent_role: resolution.agent_role,
@@ -2182,7 +2195,7 @@ export class WorkspaceRuntime {
     };
   }
 
-  async request(request: string, context: WorkspaceContext, options: { agent?: string } = {}): Promise<RequestResult> {
+  async request(request: string, context: WorkspaceContext, options: { agent?: string; idempotency_key?: string } = {}): Promise<RequestResult> {
     const trimmed = request.trim();
     if (trimmed.length === 0) {
       throw new CoreError("REQUEST_EMPTY", "請描述想完成的事情", true);
@@ -2225,6 +2238,13 @@ export class WorkspaceRuntime {
       const resumed = await this.resumePendingIfAnswered(pending, trimmed, context, kind);
       if (resumed !== undefined) return resumed;
     }
+    if (options.idempotency_key !== undefined) {
+      const existingByKey = existing.operations.find((item) => item.idempotency_key === options.idempotency_key);
+      if (existingByKey !== undefined) {
+        await this.recordAudit(existingByKey.id, "request.idempotent_replay", { idempotency_key: options.idempotency_key }, context.actor);
+        return responseFromOperation(existingByKey);
+      }
+    }
     const state = existing;
     if (kind === "authoring") this.ensureSourceAdaptationFactsReady(state);
     if (kind === "authoring") {
@@ -2250,9 +2270,7 @@ export class WorkspaceRuntime {
         type: kind === "import" ? "import" : kind === "source" ? (isSourceSearch ? "source_search" : "source_resume") : "request",
         ...(attachmentRefs.length === 0 ? {} : { attachment_refs: attachmentRefs }),
       },
-      lease_owner: context.actor,
-      lease_token: internalId("lease"),
-      lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
+      ...(options.idempotency_key === undefined ? {} : { idempotency_key: options.idempotency_key }),
       execution_snapshot: {
         execution_agent_id: resolution.agent_id,
         execution_agent_role: resolution.agent_role,
@@ -2485,21 +2503,30 @@ export class WorkspaceRuntime {
       }),
       sources: state.sources.map((source) => ({ id: source.id, candidate_id: source.candidate_id, title: source.title, revision: source.revision })),
       candidates: state.candidates.map((candidate) => ({ id: candidate.id, title: candidate.title, ...(candidate.url === undefined ? {} : { url: candidate.url }), status: candidate.status, ...(candidate.official === undefined ? {} : { official: candidate.official }) })),
-      operations: state.operations.map((operation) => ({
-        id: operation.id,
-        kind: operation.kind,
-        status: operation.status,
-        request: operation.request,
-        ...(operation.actor === undefined ? {} : { actor: operation.actor }),
-        ...(operation.question === undefined ? {} : { question: operation.question }),
-        ...(operation.lease_owner === undefined ? {} : { lease_owner: operation.lease_owner }),
-        ...(operation.lease_expires_at === undefined ? {} : { lease_expires_at: operation.lease_expires_at }),
-        ...(operation.attempt === undefined ? {} : { attempt: operation.attempt }),
-        ...(operation.last_error === undefined ? {} : { last_error: operation.last_error }),
-        created_at: operation.created_at,
-        updated_at: operation.updated_at,
-        progress_count: operation.progress.length,
-      })),
+      operations: (() => {
+        const failedClasses = new Map<string, "recoverable" | "fatal">();
+        for (const entry of state.audit) {
+          if (entry.operation_id !== undefined && entry.event === "operation.failed" && typeof entry.details.recoverable === "boolean") {
+            failedClasses.set(entry.operation_id, entry.details.recoverable ? "recoverable" : "fatal");
+          }
+        }
+        return state.operations.map((operation) => ({
+          id: operation.id,
+          kind: operation.kind,
+          status: operation.status,
+          request: operation.request,
+          ...(operation.actor === undefined ? {} : { actor: operation.actor }),
+          ...(operation.question === undefined ? {} : { question: operation.question }),
+          ...(operation.lease_owner === undefined ? {} : { lease_owner: operation.lease_owner }),
+          ...(operation.lease_expires_at === undefined ? {} : { lease_expires_at: operation.lease_expires_at }),
+          ...(operation.attempt === undefined ? {} : { attempt: operation.attempt }),
+          ...(operation.last_error === undefined ? {} : { last_error: operation.last_error }),
+          ...(failedClasses.get(operation.id) === undefined ? {} : { error_class: failedClasses.get(operation.id) }),
+          created_at: operation.created_at,
+          updated_at: operation.updated_at,
+          progress_count: operation.progress.length,
+        }));
+      })(),
       issues: state.issues.map((issue) => ({
         id: issue.id,
         artifact_id: issue.artifact_id,
