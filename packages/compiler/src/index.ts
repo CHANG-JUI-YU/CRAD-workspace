@@ -1,5 +1,6 @@
 import {
   canonicalJson,
+  computeBuildPlan,
   contentHash,
   parseWardrobeMarkdown,
   pluginProposalValueSchema,
@@ -753,23 +754,6 @@ function projectMetadata(latestArtifacts: readonly ArtifactRecord[], primaryChar
   };
 }
 
-const NON_CARD_ARTIFACT_KINDS: ReadonlySet<ArtifactRecord["kind"]> = new Set([
-  "review",
-  "source_research",
-  "fact_curation",
-  "fact_review",
-  "conversion",
-  "import_analysis",
-  "director_routing",
-  "unknown",
-]);
-
-function isIncludedArtifact(artifact: ArtifactRecord, modeSelection: CardModeSelection | undefined): boolean {
-  const projection = modeProjection(artifact);
-  if (projection !== undefined) return selectedMode(projection.mode, modeSelection);
-  return !NON_CARD_ARTIFACT_KINDS.has(artifact.kind);
-}
-
 function unavailableModeMessage(requested: CardModeSelection, available: AvailableCardModes): string {
   const availableText = available.zhuji && available.palette
     ? "zhuji、palette"
@@ -787,7 +771,9 @@ export function normalizeProject(state: ProjectState, options: CompileOptions = 
   const available = availableCardModes(latest);
   const requested = options.mode_selection;
   const modeSelection = resolvedModeSelection(available, requested);
-  const selected = latest.filter((artifact) => isIncludedArtifact(artifact, modeSelection));
+  const plan = computeBuildPlan(state, modeSelection);
+  const planIds = new Set(plan.entries.map((entry) => entry.artifact_id));
+  const selected = latest.filter((artifact) => planIds.has(artifact.id));
   const selectedIds = new Set(selected.map((artifact) => artifact.id));
   const selectedSourceOrdered = sourceOrdered.filter((artifact) => selectedIds.has(artifact.id));
   const primarySelection = primaryCharacterIdFor(selected, selectedSourceOrdered);

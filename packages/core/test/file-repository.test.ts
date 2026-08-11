@@ -259,4 +259,39 @@ describe("file project repository", () => {
     expect(await readFile(path.join(root, "demo", ".workspace", "workflow.json"), "utf8")).not.toContain("chara_card_v3");
     expect(await readFile(path.join(root, "demo", ".workspace", "blobs", payloadHash), "utf8")).toBe(payload);
   });
+
+  it("keeps the published JSON and PNG exports when the publish payload lives in blobs", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-publish-png-"));
+    temporaryRoots.push(root);
+    const repository = new FileProjectRepository(root, "demo", { layout: "project", materialize: true });
+    const cardJson = JSON.stringify({ spec: "chara_card_v3", data: { name: "Demo" } });
+    const cardHash = contentHash(cardJson);
+    const pngBytes = Buffer.from("fake png bytes");
+    const pngHash = contentHash(pngBytes);
+    await repository.writeBlob(cardHash, Buffer.from(cardJson, "utf8"));
+    await repository.writeBlob(pngHash, pngBytes);
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_name: "Demo",
+      project_slug: "demo",
+      project_status: "ready",
+      publishes: [{
+        id: "publish-1",
+        operation_id: "op",
+        artifact_ids: [],
+        content_ref: { hash: cardHash, size: cardJson.length },
+        png_ref: { hash: pngHash, size: pngBytes.byteLength },
+        content_hash: cardHash,
+        export_json_path: "exports/Demo-珠璣角色卡.json",
+        export_png_path: "exports/Demo-珠璣角色卡.png",
+        created_at: new Date().toISOString(),
+      }],
+    }));
+
+    const reopened = new FileProjectRepository(root, "demo", { layout: "project", materialize: true });
+    await reopened.read();
+    expect(await readFile(path.join(root, "demo", "exports", "Demo-珠璣角色卡.json"), "utf8")).toContain("chara_card_v3");
+    expect(Array.from(new Uint8Array(await readFile(path.join(root, "demo", "exports", "Demo-珠璣角色卡.png"))))).toEqual(Array.from(pngBytes));
+    await expect(readdir(path.join(root, "demo", ".workspace", "legacy-layout"))).rejects.toThrow();
+  });
 });

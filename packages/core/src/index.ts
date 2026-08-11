@@ -493,6 +493,79 @@ export interface ProjectState {
   interview: InterviewState;
 }
 
+export type CardModeSelection = "zhuji" | "palette" | "both";
+
+export interface BuildPlanEntry {
+  key: string;
+  artifact_id: string;
+  kind: ArtifactRecord["kind"];
+  revision: string;
+}
+
+/**
+ * The single immutable plan of artifacts a publish would consume: derived from
+ * the latest Blueprint, the export mode selection and the current latest-by-key
+ * projection. Gate, review, blocking-issue and compiler checks all consume this
+ * same plan so that "reviewed" and "packed" always refer to the same artifact set.
+ */
+export interface BuildPlan {
+  mode_selection?: CardModeSelection;
+  world_enabled: boolean;
+  relationships_enabled: boolean;
+  entries: BuildPlanEntry[];
+}
+
+const NON_PLAN_ARTIFACT_KINDS: ReadonlySet<ArtifactRecord["kind"]> = new Set([
+  "review",
+  "source_research",
+  "fact_curation",
+  "fact_review",
+  "conversion",
+  "import_analysis",
+  "director_routing",
+  "unknown",
+  "draft_note",
+]);
+
+function planRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+export function computeBuildPlan(state: ProjectState, modeSelection?: CardModeSelection): BuildPlan {
+  const latestByKey = new Map<string, ArtifactRecord>();
+  for (const artifact of state.artifacts) latestByKey.set(artifact.key, artifact);
+  const latest = [...latestByKey.values()];
+
+  const blueprint = [...latest].reverse().find((artifact) => artifact.kind === "blueprint");
+  let worldEnabled = true;
+  let relationshipsEnabled = true;
+  if (blueprint !== undefined) {
+    const parsed = planRecord(parseArtifactValue(blueprint));
+    const world = planRecord(parsed?.world);
+    if (world !== undefined) worldEnabled = world.enabled === true;
+    const relationships = planRecord(parsed?.relationships);
+    if (relationships !== undefined) relationshipsEnabled = relationships.enabled === true;
+  }
+
+  const entries: BuildPlanEntry[] = [];
+  for (const artifact of latest) {
+    if (NON_PLAN_ARTIFACT_KINDS.has(artifact.kind)) continue;
+    if (artifact.kind === "world_lore" && !worldEnabled) continue;
+    if (artifact.kind === "relationship" && !relationshipsEnabled) continue;
+    if (artifact.kind === "zhuji" || artifact.kind === "palette") {
+      if (modeSelection === undefined) continue;
+      if (modeSelection !== "both" && modeSelection !== artifact.kind) continue;
+    }
+    entries.push({ key: artifact.key, artifact_id: artifact.id, kind: artifact.kind, revision: artifact.revision });
+  }
+  return {
+    ...(modeSelection === undefined ? {} : { mode_selection: modeSelection }),
+    world_enabled: worldEnabled,
+    relationships_enabled: relationshipsEnabled,
+    entries,
+  };
+}
+
 const sourceCandidateSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
@@ -1523,7 +1596,7 @@ export class FileProjectRepository implements ProjectRepository {
     const keep = new Set<string>();
     if (latest !== undefined) {
       keep.add(path.basename(latest.export_json_path ?? publishedCardExportPath(migratedState.project_name, migratedState.project_id, migratedState.artifacts)));
-      if (latest.png_base64 !== undefined) keep.add(path.basename(latest.export_png_path ?? publishedCardPngExportPath(migratedState.project_name, migratedState.project_id, migratedState.artifacts)));
+      if (latest.png_base64 !== undefined || latest.png_ref !== undefined) keep.add(path.basename(latest.export_png_path ?? publishedCardPngExportPath(migratedState.project_name, migratedState.project_id, migratedState.artifacts)));
     }
     for (const entry of present) {
       if (entry === exportsDirectory) {
@@ -1570,7 +1643,7 @@ export class FileProjectRepository implements ProjectRepository {
       const keep = new Set<string>();
       if (latest !== undefined) {
         keep.add(path.basename(latest.export_json_path ?? publishedCardExportPath(state.project_name, state.project_id, state.artifacts)));
-        if (latest.png_base64 !== undefined) keep.add(path.basename(latest.export_png_path ?? publishedCardPngExportPath(state.project_name, state.project_id, state.artifacts)));
+        if (latest.png_base64 !== undefined || latest.png_ref !== undefined) keep.add(path.basename(latest.export_png_path ?? publishedCardPngExportPath(state.project_name, state.project_id, state.artifacts)));
       }
       for (const entry of entries) {
         if (!keep.has(entry.name)) candidates.push(path.join(exportsDirectory, entry.name));
@@ -1597,7 +1670,7 @@ export class FileProjectRepository implements ProjectRepository {
 
   private async reconcileMaterializedFiles(state: ProjectState): Promise<void> {
     const expected = new Map<string, RepositoryFile>();
-    for (const file of this.materializedFiles(state)) expected.set(normalizeRepositoryPath(file.path), file);
+    for (const file of await this.materializedFiles(state)) expected.set(normalizeRepositoryPath(file.path), file);
     for (const [relativePath, file] of expected) {
       const targetPath = path.join(this.projectDirectory, relativePath);
       const expectedContent = typeof file.content === "string" ? Buffer.from(file.content, "utf8") : Buffer.from(file.content);
@@ -1621,7 +1694,7 @@ export class FileProjectRepository implements ProjectRepository {
     const files = new Map<string, Uint8Array | string>();
     files.set(normalizeRepositoryPath(path.relative(this.projectDirectory, this.stateFile)), `${canonicalJson(state)}\n`);
     if (this.materializeEnabled) {
-      for (const file of this.materializedFiles(state)) files.set(normalizeRepositoryPath(file.path), file.content);
+      for (const file of await this.materializedFiles(state)) files.set(normalizeRepositoryPath(file.path), file.content);
     }
     for (const file of writeSet.files ?? []) files.set(normalizeRepositoryPath(file.path), file.content);
 
@@ -1964,7 +2037,7 @@ export class FileProjectRepository implements ProjectRepository {
     }
   }
 
-  private materializedFiles(state: ProjectState): RepositoryFile[] {
+  private async materializedFiles(state: ProjectState): Promise<RepositoryFile[]> {
     const files: RepositoryFile[] = [];
     const characterFolders = characterFolderById(state.artifacts);
     const worldArtifactCounts = new Map<string, number>();
@@ -2028,12 +2101,29 @@ export class FileProjectRepository implements ProjectRepository {
           path: latestPublish.export_json_path ?? publishedCardExportPath(state.project_name, state.project_id, state.artifacts),
           content: publishedContent,
         });
+      } else if (latestPublish.content_ref !== undefined) {
+        const blob = await this.blobs.get(latestPublish.content_ref.hash);
+        if (blob !== undefined) {
+          const decoded = new TextDecoder("utf-8", { fatal: false }).decode(blob);
+          files.push({
+            path: latestPublish.export_json_path ?? publishedCardExportPath(state.project_name, state.project_id, state.artifacts),
+            content: decoded.endsWith("\n") ? decoded : `${decoded}\n`,
+          });
+        }
       }
       if (latestPublish.png_base64 !== undefined) {
         files.push({
           path: latestPublish.export_png_path ?? publishedCardPngExportPath(state.project_name, state.project_id, state.artifacts),
           content: Buffer.from(latestPublish.png_base64, "base64"),
         });
+      } else if (latestPublish.png_ref !== undefined) {
+        const blob = await this.blobs.get(latestPublish.png_ref.hash);
+        if (blob !== undefined) {
+          files.push({
+            path: latestPublish.export_png_path ?? publishedCardPngExportPath(state.project_name, state.project_id, state.artifacts),
+            content: blob,
+          });
+        }
       }
     }
     return files;

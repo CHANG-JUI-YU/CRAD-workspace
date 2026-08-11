@@ -159,7 +159,7 @@ function latestCharacterFor(state: ProjectState, characterId: string, label: str
     if (document?.display_name === label) score += 1;
     if (artifact.name === characterId) score += 1;
     if (artifact.key === `character:${characterId}`) score += 1;
-    if (score > bestScore) {
+    if (bestScore === 0 ? score > 0 : score >= bestScore) {
       bestScore = score;
       best = { artifact, document: document ?? {} };
     }

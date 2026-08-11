@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MemoryProjectRepository, contentHash, createProjectState, qualityProfileForLevel, type ArtifactRecord, type BlueprintPrecheckRecord, type FactRecord, type IssueSeverity, type OperationRecord } from "@st-workspace/core";
-import { AuthoringService, validateWorkflow } from "../src/index.js";
+import { AuthoringService, buildRequiredArtifactManifest, validateWorkflow } from "../src/index.js";
 
 const now = new Date().toISOString();
 
@@ -497,6 +497,47 @@ describe("workflow gates and editable publish", () => {
       operations: [operation("op-fresh")],
     }));
     const result = validateWorkflow(await repository.read(), "publish");
+    expect(result.diagnostics.map((item) => item.code)).not.toContain("BLUEPRINT_BINDING_STALE");
+  });
+
+  it("binds the required-artifact manifest to the newest revision of a character", async () => {
+    const repository = new MemoryProjectRepository("manifest-latest");
+    const precheck = { id: "precheck-latest", schema_version: 1, project_id: "manifest-latest", operation_id: "interview", collaboration_mode: "assisted", candidate_blueprint: { project_id: "manifest-latest", characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "zhuji" }] }, candidate_blueprint_revision: contentHash("current"), checks: [{ subject_id: "demo", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }], status: "recorded" as const, created_at: new Date().toISOString(), created_by: "director" };
+    const blueprint = artifact("blueprint-latest", "blueprint:manifest", "blueprint", "Manifest", { kind: "blueprint", flow: "character", characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "zhuji" }] }, "director", "interview");
+    const boundBlueprint = { ...blueprint, blueprint_precheck_id: precheck.id, blueprint_precheck_revision: precheck.candidate_blueprint_revision };
+    const oldRevision = artifact("character-old", "character:demo", "character", "Demo", character());
+    const newRevision = artifact("character-new", "character:demo", "character", "Demo", { ...character(), document: { ...character().document, summary: "A complete character, revised." } });
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      artifacts: [oldRevision, newRevision, boundBlueprint],
+      blueprint_prechecks: [precheck],
+      operations: [operation("op-manifest")],
+    }));
+    const manifest = buildRequiredArtifactManifest(await repository.read());
+    expect(manifest?.in_scope_artifact_ids).toContain(newRevision.id);
+    expect(manifest?.in_scope_artifact_ids).not.toContain(oldRevision.id);
+  });
+
+  it("does not require reviews for world lore excluded by the build plan", async () => {
+    const repository = new MemoryProjectRepository("plan-scope");
+    const precheck = { id: "precheck-plan", schema_version: 1, project_id: "plan-scope", operation_id: "interview", collaboration_mode: "assisted", candidate_blueprint: { project_id: "plan-scope" }, candidate_blueprint_revision: contentHash("current"), checks: [{ subject_id: "demo", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }], status: "recorded" as const, created_at: new Date().toISOString(), created_by: "director" };
+    const blueprint = artifact("blueprint-plan", "blueprint:plan", "blueprint", "Plan", { kind: "blueprint", flow: "character", characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "zhuji" }], world: { enabled: false } }, "director", "interview");
+    const characterArtifact = artifact("character-plan", "character:demo", "character", "Demo", character());
+    const boundCharacter = { ...characterArtifact, blueprint_precheck_id: precheck.id, blueprint_precheck_revision: precheck.candidate_blueprint_revision };
+    const worldLore = artifact("world-plan", "world:unused", "world_lore", "unused", { kind: "world", entries: [{ schema_version: 1, id: "unused", category: "geography", title: "Unused", content: "Not part of the build plan." }] });
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "character" },
+      artifacts: [boundCharacter, worldLore, blueprint],
+      blueprint_prechecks: [precheck],
+      reviews: [{ id: "review-plan", artifact_id: boundCharacter.id, artifact_revision: boundCharacter.revision, reviewer: "critic", status: "passed", issue_ids: [], created_at: new Date().toISOString() }],
+      operations: [operation("op-plan")],
+    }));
+    const result = validateWorkflow(await repository.read(), "publish");
+    expect(result.diagnostics.map((item) => item.code)).not.toContain("ARTIFACT_REVIEW_REQUIRED");
     expect(result.diagnostics.map((item) => item.code)).not.toContain("BLUEPRINT_BINDING_STALE");
   });
 });

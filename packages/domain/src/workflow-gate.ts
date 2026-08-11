@@ -1,4 +1,4 @@
-import { parseWardrobeMarkdown, type ArtifactRecord, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
+import { computeBuildPlan, parseWardrobeMarkdown, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "./required-artifacts.js";
 import { contradictingAcceptedFacts } from "./knowledge.js";
 
@@ -141,14 +141,15 @@ function referenceSet(artifacts: ArtifactRecord[]): Set<string> {
   return ids;
 }
 
-function inScopeArtifacts(artifacts: ArtifactRecord[], manifest: RequiredArtifactManifest | undefined): ArtifactRecord[] {
-  if (manifest === undefined) return artifacts;
-  const scoped = new Set(manifest.in_scope_artifact_ids);
+function inScopeArtifacts(artifacts: ArtifactRecord[], manifest: RequiredArtifactManifest | undefined, planIds?: Set<string>): ArtifactRecord[] {
+  if (manifest === undefined && planIds === undefined) return artifacts;
+  const scoped = new Set(manifest?.in_scope_artifact_ids ?? []);
+  for (const id of planIds ?? []) scoped.add(id);
   return artifacts.filter((artifact) => scoped.has(artifact.id));
 }
 
-function reportMissingReferences(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], manifest?: RequiredArtifactManifest): void {
-  artifacts = inScopeArtifacts(artifacts, manifest);
+function reportMissingReferences(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], manifest?: RequiredArtifactManifest, planIds?: Set<string>): void {
+  artifacts = inScopeArtifacts(artifacts, manifest, planIds);
   const characters = referenceSet(artifacts);
   const worldIds = new Set<string>();
   for (const artifact of artifacts.filter((item) => item.kind === "world_lore")) {
@@ -216,8 +217,8 @@ function reportMissingReferences(state: ProjectState, artifacts: ArtifactRecord[
   }
 }
 
-function reportReviews(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], manifest?: RequiredArtifactManifest): void {
-  const reviewable = inScopeArtifacts(artifacts, manifest).filter((artifact) => contentKinds.has(artifact.kind));
+function reportReviews(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], manifest?: RequiredArtifactManifest, planIds?: Set<string>): void {
+  const reviewable = inScopeArtifacts(artifacts, manifest, planIds).filter((artifact) => contentKinds.has(artifact.kind));
   for (const artifact of reviewable) {
     const reviewed = state.reviews.some((review) => review.artifact_id === artifact.id && review.artifact_revision === artifact.revision);
     if (!reviewed) {
@@ -239,8 +240,8 @@ function currentEffectiveSeverity(state: ProjectState, issue: ProjectState["issu
   return severityRank(target) < severityRank(baseline) ? target : baseline;
 }
 
-function reportBlockingIssues(state: ProjectState, content: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], manifest?: RequiredArtifactManifest): void {
-  const artifactIds = new Set(inScopeArtifacts(content, manifest).map((artifact) => artifact.id));
+function reportBlockingIssues(state: ProjectState, content: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], manifest?: RequiredArtifactManifest, planIds?: Set<string>): void {
+  const artifactIds = new Set(inScopeArtifacts(content, manifest, planIds).map((artifact) => artifact.id));
   const blockingIssues = state.issues.filter((issue) => issue.status === "open" && artifactIds.has(issue.artifact_id) && severityRank(currentEffectiveSeverity(state, issue)) >= blockingRank(state.quality_profile.blocking_severity));
   if (blockingIssues.length > 0) {
     add(diagnostics, {
@@ -252,8 +253,8 @@ function reportBlockingIssues(state: ProjectState, content: ArtifactRecord[], di
   }
 }
 
-function reportWardrobe(artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], manifest?: RequiredArtifactManifest): void {
-  for (const artifact of inScopeArtifacts(artifacts, manifest).filter((item) => item.kind === "wardrobe")) {
+function reportWardrobe(artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], manifest?: RequiredArtifactManifest, planIds?: Set<string>): void {
+  for (const artifact of inScopeArtifacts(artifacts, manifest, planIds).filter((item) => item.kind === "wardrobe")) {
     const parsed = parseWardrobeMarkdown(artifact.content);
     for (const error of parsed.errors) {
       add(diagnostics, {
@@ -500,11 +501,14 @@ function reportDerivedLinks(state: ProjectState, artifacts: ArtifactRecord[], di
   }
 }
 
-function reportBlueprintBindings(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[]): void {
+function reportBlueprintBindings(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], plan: BuildPlan): void {
   const precheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
   if (precheck === undefined) return;
   const bindingKinds = new Set(["character", "relationship", "world_lore", "greeting", "zhuji", "palette", "wardrobe", "plugin"]);
+  const planKeys = new Set(plan.entries.map((entry) => entry.key));
   for (const artifact of artifacts) {
+    if (!bindingKinds.has(artifact.kind)) continue;
+    if (!planKeys.has(artifact.key)) continue;
     if (!bindingKinds.has(artifact.kind)) continue;
     if (artifact.blueprint_precheck_id !== precheck.id || artifact.blueprint_precheck_revision !== precheck.candidate_blueprint_revision) {
       add(diagnostics, {
@@ -534,6 +538,8 @@ export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase):
   const artifacts = latestArtifacts(state);
   const content = artifacts.filter((artifact) => contentKinds.has(artifact.kind));
   const manifest = buildRequiredArtifactManifest(state);
+  const plan = computeBuildPlan(state);
+  const planIds = new Set(plan.entries.map((entry) => entry.artifact_id));
   if (managed) {
     if (state.project_status === "interviewing" || state.interview.status === "active") {
       add(diagnostics, { code: "INTERVIEW_REQUIRED", message: "The project interview must be complete before publishing.", severity: "error" });
@@ -548,14 +554,14 @@ export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase):
         add(diagnostics, { code: item.code, message: item.message, severity: item.severity });
       }
     }
-    reportReviews(state, artifacts, diagnostics, manifest);
+    reportReviews(state, artifacts, diagnostics, manifest, planIds);
   }
-  reportWardrobe(artifacts, diagnostics, manifest);
+  reportWardrobe(artifacts, diagnostics, manifest, planIds);
   reportSourceResearch(state, artifacts, diagnostics);
-  reportMissingReferences(state, artifacts, diagnostics, manifest);
+  reportMissingReferences(state, artifacts, diagnostics, manifest, planIds);
   reportFacts(state, diagnostics);
-  reportBlueprintBindings(state, artifacts, diagnostics);
+  reportBlueprintBindings(state, artifacts, diagnostics, plan);
   reportDerivedLinks(state, artifacts, diagnostics);
-  reportBlockingIssues(state, content, diagnostics, manifest);
+  reportBlockingIssues(state, content, diagnostics, manifest, planIds);
   return { ok: diagnostics.length === 0, diagnostics };
 }
