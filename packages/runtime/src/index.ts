@@ -84,21 +84,6 @@ import {
 } from "@st-workspace/domain";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
 
-const sourceSelectionDecisionSchema = z.object({
-  candidate_id: z.string().min(1),
-  decision: z.enum(["approve", "reject", "approved", "rejected"]).transform((val) => {
-    if (val === "approved") return "approve" as const;
-    if (val === "rejected") return "reject" as const;
-    return val;
-  }),
-  reason: z.string().optional(),
-});
-
-const sourceSelectPayloadSchema = z.union([
-  z.object({ decisions: z.array(sourceSelectionDecisionSchema) }),
-  z.array(sourceSelectionDecisionSchema).transform((arr: z.infer<typeof sourceSelectionDecisionSchema>[]) => ({ decisions: arr })),
-]);
-
 function now(): string {
   return new Date().toISOString();
 }
@@ -951,6 +936,13 @@ export interface WorkspaceRuntimeOptions {
   attachmentStore?: AttachmentStore;
 }
 
+type OperationCommandHandler = (
+  operation: OperationRecord,
+  command: OperationCommand,
+  context: WorkspaceContext,
+  agent?: string,
+) => Promise<RequestResult>;
+
 export class WorkspaceRuntime {
   public readonly sourceSearchMode: SourceSearchMode;
   private readonly sources: SourceService;
@@ -964,6 +956,37 @@ export class WorkspaceRuntime {
   private readonly interviewRequired: boolean;
   private readonly attachmentStore: AttachmentStore;
   private readonly agents = new AgentRouter();
+  /** One typed handler registry is shared by request, resume and recovery. */
+  private readonly operationCommandHandlers: Record<OperationCommand["type"], OperationCommandHandler> = {
+    invalid: (operation, command) => command.type === "invalid"
+      ? this.markNeedsInput(operation, command.payload.original_type === "source_select"
+        ? `source_select payload 格式無效或缺失（${command.payload.code}）`
+        : `${command.payload.code}: ${command.payload.message}`)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID"),
+    template_proposal: (operation, command, context, agent) => command.type === "template_proposal"
+      ? this.replayTemplateProposal(operation, command.payload, context.actor, agent)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID"),
+    zhuji_proposal: (operation, command, context, agent) => command.type === "zhuji_proposal"
+      ? this.replayZhujiProposal(operation, command.payload, context.actor, agent)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID"),
+    source_select: (operation, command, _context, agent) => command.type === "source_select"
+      ? this.replaySourceSelection(operation, command, agent)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID"),
+    source_search: (operation, command, context, agent) => command.type === "source_search"
+      ? this.replaySourceSearch(operation, context, agent)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID"),
+    issue_update: (operation, command, _context, agent) => command.type === "issue_update"
+      ? this.replayIssueUpdate(operation, command, agent)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID"),
+    import: (operation, command, context, agent) => command.type === "import"
+      ? this.replayImport(operation, command, context, agent)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID"),
+    source_resume: (operation, command, context, agent) => command.type === "source_resume"
+      ? this.replaySource(operation, context, agent)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID"),
+    request: (operation, _command, context, agent) => this.replayRequest(operation, context, agent),
+    fact_review: (operation, _command, context, agent) => this.replayRequest(operation, context, agent),
+  };
 
   constructor(private readonly repository: ProjectRepository, options: WorkspaceRuntimeOptions = {}) {
     this.sourceSearchMode = options.sourceSearchMode ?? (options.searcher !== undefined ? "runtime_provider" : "agent_managed");
@@ -1544,7 +1567,7 @@ export class WorkspaceRuntime {
     if (definition === undefined) return false;
     const command = operation.command;
     if (command?.type === "template_proposal") {
-      const payload = command.payload as TemplateProposalValue;
+      const payload = command.payload;
       return this.agents.registryView().canSubmitProposal(agent, payload.kind, proposalCapability(payload));
     }
     if (command?.type === "zhuji_proposal") return this.agents.registryView().canSubmitProposal(agent, "zhuji");
@@ -1661,13 +1684,9 @@ export class WorkspaceRuntime {
 
   private async replayOperation(operation: OperationRecord, context: WorkspaceContext, agent?: string): Promise<RequestResult> {
     const command = operation.command;
-    if (command?.type === "template_proposal") return this.replayTemplateProposal(operation, command.payload as TemplateProposalValue, context.actor, agent);
-    if (command?.type === "zhuji_proposal") return this.replayZhujiProposal(operation, command.payload as ZhujiProposalValue, context.actor, agent);
-    if (command?.type === "source_select") return this.replaySourceSelection(operation, command, agent);
-    if (command?.type === "source_search") return this.replaySourceSearch(operation, context, agent);
-    if (command?.type === "issue_update") return this.replayIssueUpdate(operation, command, agent);
-    if (command?.type === "import" || operation.kind === "import") return this.replayImport(operation, command, context, agent);
-    if (command?.type === "source_resume" || operation.kind === "source") return this.replaySource(operation, context, agent);
+    if (command !== undefined) return this.operationCommandHandlers[command.type](operation, command, context, agent);
+    if (operation.kind === "import") return this.replayImport(operation, undefined, context, agent);
+    if (operation.kind === "source") return this.replaySource(operation, context, agent);
     return this.replayRequest(operation, context, agent);
   }
 
@@ -1886,24 +1905,24 @@ export class WorkspaceRuntime {
     return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.completed, blocked: result.blocked, ...(agent === undefined ? {} : { agent_id: agent }) };
   }
 
-  private async replaySourceSelection(operation: OperationRecord, command: OperationCommand, agent?: string): Promise<RequestResult> {
+  private async replaySourceSelection(operation: OperationRecord, command: Extract<OperationCommand, { type: "source_select" }>, agent?: string): Promise<RequestResult> {
     const state = await this.repository.read();
     if (this.hasAuditMarker(operation.id, "source.selection.updated", state) || this.hasAuditMarker(operation.id, "source.ingested", state)) {
       return responseFromOperation(await this.completeReplayedOperation(operation));
     }
-    const parsed = sourceSelectPayloadSchema.safeParse(command.payload);
-    if (!parsed.success || parsed.data.decisions.length === 0) {
+    const parsed = { success: true as const, data: { decisions: command.payload.decisions } };
+    if (!parsed.success) {
       return this.markNeedsInput(operation, "無法還原來源選擇操作，payload 格式無效或缺失，請重新提交候選來源選擇。");
     }
     const result = await this.sources.selectCandidates(operation.id, parsed.data.decisions, operation.actor ?? "worker");
     return { operation_id: operation.id, status: result.status, summary: result.summary, completed: [...result.approved, ...result.rejected], blocked: [], ...(agent === undefined ? {} : { agent_id: agent }) };
   }
 
-  private async replayIssueUpdate(operation: OperationRecord, command: OperationCommand, agent?: string): Promise<RequestResult> {
+  private async replayIssueUpdate(operation: OperationRecord, command: Extract<OperationCommand, { type: "issue_update" }>, agent?: string): Promise<RequestResult> {
     const state = await this.repository.read();
     if (this.hasAuditMarker(operation.id, "review.issue.updated", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
-    const input = command.payload as IssueUpdateInput | undefined;
-    if (input === undefined || typeof input !== "object" || typeof (input as IssueUpdateInput).action !== "string" || typeof (input as IssueUpdateInput).issue_id !== "string") {
+    const input = command.payload;
+    if (input.action.length === 0 || input.issue_id.length === 0) {
       return this.markNeedsInput(operation, "無法還原 issue 更新操作，請重新提交。");
     }
     const result = await this.review.updateIssue(operation.id, input, agent ?? "director", operation.actor ?? "worker");

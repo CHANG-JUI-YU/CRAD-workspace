@@ -7,6 +7,8 @@ export { z };
 import { createInterviewState, type InterviewFlow, type InterviewState } from "./interview.js";
 import type { AdaptationDecision } from "./authoring-context.js";
 import { FileBlobStore, MemoryBlobStore, type BlobStore } from "./blob-store.js";
+import { factDecisionSchema, templateProposalValueSchema } from "./templates.js";
+import { zhujiProposalValueSchema } from "./zhuji.js";
 
 export type OperationStatus =
   | "created"
@@ -428,12 +430,104 @@ export interface OperationAttachmentRef {
   media_type?: string;
 }
 
-/** Versioned typed command persisted with the operation so crash recovery can replay the original payload. */
-export interface OperationCommand {
-  version: 1;
-  type: "template_proposal" | "zhuji_proposal" | "import" | "source_resume" | "source_search" | "source_select" | "issue_update" | "request" | "fact_review";
-  payload?: unknown;
-  attachment_refs?: OperationAttachmentRef[];
+export const sourceSelectionCommandDecisionSchema = z.object({
+  candidate_id: z.string().min(1),
+  decision: z.enum(["approve", "reject", "approved", "rejected"]).transform((value) => value === "approved" ? "approve" as const : value === "rejected" ? "reject" as const : value),
+}).strict();
+
+export const sourceSelectCommandPayloadSchema = z.object({
+  decisions: z.array(sourceSelectionCommandDecisionSchema).min(1),
+}).strict();
+
+export const issueUpdateCommandPayloadSchema = z.object({
+  issue_id: z.string().min(1),
+  action: z.enum(["resolve", "ignore", "override"]),
+  reason: z.string().min(1),
+  severity: z.enum(["info", "warning", "error", "critical"]).optional(),
+}).strict().transform((value): IssueUpdateCommandPayload => value.severity === undefined
+  ? { issue_id: value.issue_id, action: value.action, reason: value.reason }
+  : { issue_id: value.issue_id, action: value.action, reason: value.reason, severity: value.severity });
+
+export const factReviewCommandPayloadSchema = z.object({
+  decisions: z.array(factDecisionSchema).min(1).optional(),
+}).strict();
+
+const emptyOperationCommandPayloadSchema = z.object({}).strict();
+const operationAttachmentRefsSchema = z.array(z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  media_type: z.string().optional(),
+}).strict()).transform((refs): OperationAttachmentRef[] => refs.map((ref) => ref.media_type === undefined
+  ? { id: ref.id, name: ref.name }
+  : { id: ref.id, name: ref.name, media_type: ref.media_type }));
+
+export interface OperationCommandInvalidPayload {
+  code: "OPERATION_COMMAND_INVALID";
+  message: string;
+  recoverable: true;
+  original_type?: string;
+}
+
+export type SourceSelectionCommandDecision = z.infer<typeof sourceSelectionCommandDecisionSchema>;
+export type SourceSelectCommandPayload = z.infer<typeof sourceSelectCommandPayloadSchema>;
+export interface IssueUpdateCommandPayload {
+  issue_id: string;
+  action: "resolve" | "ignore" | "override";
+  reason: string;
+  severity?: IssueSeverity;
+}
+export type FactReviewCommandPayload = z.infer<typeof factReviewCommandPayloadSchema>;
+
+export const operationCommandSchema = z.discriminatedUnion("type", [
+  z.object({ version: z.literal(1), type: z.literal("template_proposal"), payload: templateProposalValueSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("zhuji_proposal"), payload: zhujiProposalValueSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("import"), payload: emptyOperationCommandPayloadSchema.optional(), attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("source_resume"), payload: emptyOperationCommandPayloadSchema.optional(), attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("source_search"), payload: emptyOperationCommandPayloadSchema.optional(), attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("source_select"), payload: sourceSelectCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("issue_update"), payload: issueUpdateCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("request"), payload: emptyOperationCommandPayloadSchema.optional(), attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("fact_review"), payload: factReviewCommandPayloadSchema.optional(), attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("invalid"), payload: z.object({ code: z.literal("OPERATION_COMMAND_INVALID"), message: z.string().min(1), recoverable: z.literal(true), original_type: z.string().min(1).optional() }).strict(), attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+]);
+
+/** Versioned discriminated command persisted with an operation. */
+export type OperationCommand = z.infer<typeof operationCommandSchema>;
+
+function operationCommandRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+/** Normalize known persisted shapes before the single command schema boundary. */
+function migrateLegacyOperationCommand(value: unknown): Record<string, unknown> | undefined {
+  const record = operationCommandRecord(value);
+  if (record === undefined) return undefined;
+  const type = record.type === "source_selection" ? "source_select" : record.type;
+  const normalized: Record<string, unknown> = { ...record, version: 1, ...(type === undefined ? {} : { type }) };
+  if (type === "source_select" && Array.isArray(record.payload)) normalized.payload = { decisions: record.payload };
+  return normalized;
+}
+
+/**
+ * Decode persisted input once. Invalid or untranslatable commands become a
+ * typed recoverable command so recovery can ask for input instead of guessing
+ * or crashing while reading project state.
+ */
+export function decodeOperationCommand(value: unknown): OperationCommand {
+  const migrated = migrateLegacyOperationCommand(value);
+  const parsed = operationCommandSchema.safeParse(migrated);
+  if (parsed.success) return parsed.data;
+  const original = operationCommandRecord(value)?.type;
+  return {
+    version: 1,
+    type: "invalid",
+    payload: {
+      code: "OPERATION_COMMAND_INVALID",
+      message: parsed.error.message,
+      recoverable: true,
+      ...(typeof original === "string" && original.length > 0 ? { original_type: original } : {}),
+    },
+  };
 }
 
 export interface InternalExecutionSnapshot {
@@ -1131,16 +1225,9 @@ const operationSchema = z.object({
   progress: z.array(operationProgressSchema),
   question: z.string().optional(),
   result_summary: z.string().optional(),
-  command: z.object({
-    version: z.literal(1),
-    type: z.enum(["template_proposal", "zhuji_proposal", "import", "source_resume", "source_search", "source_select", "issue_update", "request", "fact_review"]),
-    payload: z.unknown().optional(),
-    attachment_refs: z.array(z.object({
-      id: z.string().min(1),
-      name: z.string().min(1),
-      media_type: z.string().optional(),
-    }).strict()).optional(),
-  }).strict().optional(),
+  // The only unknown input is at this persisted boundary; decodeOperationCommand
+  // immediately normalizes it into the typed union or a typed recovery command.
+  command: z.unknown().optional().transform((value) => value === undefined ? undefined : decodeOperationCommand(value)),
   idempotency_key: z.string().optional(),
   lease_owner: z.string().min(1).optional(),
   lease_token: z.string().min(1).optional(),
