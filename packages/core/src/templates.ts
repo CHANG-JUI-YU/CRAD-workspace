@@ -195,6 +195,7 @@ export const relationshipNetworkSummarySchema = z
 export const relationshipsDocumentSchema = z
   .object({
     schema_version: z.literal(1),
+    document_id: templateIdSchema,
     team_code: relationshipTeamCodeSchema,
     character_ids: z.array(templateIdSchema).min(2),
     character_summaries: z.array(relationshipCharacterSummarySchema),
@@ -261,7 +262,7 @@ export const worldEntrySchema = z
   .strict();
 
 export const worldProposalValueSchema = z
-  .object({ kind: z.literal("world"), entries: z.array(worldEntrySchema).min(1) })
+  .object({ kind: z.literal("world"), document_id: templateIdSchema, entries: z.array(worldEntrySchema).min(1) })
   .strict();
 
 export const authoringModeSchema = z.enum(["zhuji", "palette"]);
@@ -576,7 +577,7 @@ export const TEMPLATE_GUIDES: Readonly<Record<TemplateKind, { skill: string; tit
   wardrobe: { skill: "wardrobe-creation", title: "Cross-mode wardrobe", required: ["character_id", "content"], example: { kind: "wardrobe", character_id: "demo", content: "wardrobe.md tables must include 款式、顏色、材質、數量、主要場合、狀態、備註; same cut in different colors must be separate rows with concrete fit, care, storage and use notes" } },
   greetings: { skill: "greetings-creation", title: "Greetings document", required: ["document.greetings", "one greeting.kind=primary"], example: { kind: "greetings", document: { schema_version: 1, greetings: [{ id: "arrival", kind: "primary", content: "Hello.", character_ids: ["demo"] }] } } },
   relationships: { skill: "relationship-creation", title: "Relationship network", required: ["document.character_ids", "document.character_summaries", "document.perspectives", "document.summary"], example: { kind: "relationships", document: "include every participant pair in perspectives" } },
-  world: { skill: "world-lore-creation", title: "World lore entries", required: ["entries", "entries[].category", "entries[].title", "entries[].content"], example: { kind: "world", entries: [{ schema_version: 1, id: "harbor", category: "geography", title: "Harbor", content: "A coastal city" }] } },
+  world: { skill: "world-lore-creation", title: "World lore entries", required: ["document_id", "entries", "entries[].category", "entries[].title", "entries[].content"], example: { kind: "world", document_id: "harbor-network", entries: [{ schema_version: 1, id: "harbor", category: "geography", title: "Harbor", content: "A coastal city" }] } },
   conversion: { skill: "mode-conversion", title: "Mode conversion", required: ["character_id", "source_mode", "target_mode", "modules", "mappings"], example: { kind: "conversion", character_id: "demo", source_mode: "zhuji", target_mode: "palette", modules: [], mappings: [{ source: "appearance", target: "basic_information", summary: "maps appearance to basic information" }] } },
   import_analysis: { skill: "card-import-analysis", title: "Card import mapping", required: ["mappings", "losses", "recommendations"], example: { kind: "import_analysis", mappings: [{ source_field: "/name", target_contract: "character", target_field: "/display_name", summary: "direct mapping" }] } },
   review: { skill: "*-critique", title: "Review report", required: ["target", "findings[].severity", "findings[].evidence", "summary"], example: { kind: "review", target: { kind: "greetings", name: "current" }, findings: [], summary: "No blocking findings" } },

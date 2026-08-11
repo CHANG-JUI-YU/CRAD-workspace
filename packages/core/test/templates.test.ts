@@ -57,6 +57,7 @@ const paletteModule = {
 
 const relationshipDocument = {
   schema_version: 1 as const,
+  document_id: "alice-beth-network",
   team_code: "ABC123",
   character_ids: ["alice", "beth"],
   character_summaries: [
@@ -93,7 +94,7 @@ describe("structured template contracts", () => {
       { kind: "wardrobe", character_id: "demo", content: wardrobeMarkdown },
       { kind: "greetings", document: { schema_version: 1, greetings: [{ id: "arrival", kind: "primary", content: "Hello.", character_ids: ["demo"] }] } },
       { kind: "relationships", document: relationshipDocument },
-      { kind: "world", entries: [{ schema_version: 1, id: "harbor", category: "geography", title: "Harbor", content: "A coastal city." }] },
+      { kind: "world", document_id: "harbor-world", entries: [{ schema_version: 1, id: "harbor", category: "geography", title: "Harbor", content: "A coastal city." }] },
       { kind: "conversion", character_id: "demo", source_mode: "zhuji", target_mode: "palette", modules: [paletteModule], mappings: [{ source: "appearance", target: "basic_information", summary: "Maps appearance." }] },
       { kind: "import_analysis", mappings: [{ source_field: "/name", target_contract: "character", target_field: "/display_name", summary: "Direct mapping." }] },
       { kind: "review", target: { kind: "character", name: "Demo" }, findings: [], summary: "No findings." },

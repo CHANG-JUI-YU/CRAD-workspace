@@ -251,7 +251,7 @@ describe("runtime template boundary", () => {
     const blueprintContent = (authoringTiming: string) => JSON.stringify({ kind: "blueprint", flow: "world", world: { enabled: true, authoring_timing: authoringTiming } });
     const blueprint = (timing: string) => ({ id: "blueprint-1", key: "blueprint:world-order", kind: "blueprint" as const, name: "project-blueprint", content: blueprintContent(timing), media_type: "application/json", content_hash: contentHash(blueprintContent(timing)), revision: contentHash(blueprintContent(timing)), status: "draft" as const, created_at: timestamp, updated_at: timestamp, created_by: "director", operation_id: "interview", blueprint_precheck_id: "precheck" });
     const characterProposal = { kind: "character" as const, document: { schema_version: 1 as const, id: "yukino", display_name: "Yukino", summary: "A calm character." } };
-    const worldProposal = { kind: "world" as const, entries: [{ schema_version: 1 as const, id: "harbor", category: "geography" as const, title: "Harbor", content: "A coastal city" }] };
+    const worldProposal = { kind: "world" as const, document_id: "harbor-world" as const, entries: [{ schema_version: 1 as const, id: "harbor", category: "geography" as const, title: "Harbor", content: "A coastal city" }] };
 
     await repository.commit(0, (state) => ({ ...state, interview: { schema_version: 1, status: "complete" as const, flow: "world" as const, answers: [], values: {} }, blueprint_prechecks: [precheck], artifacts: [blueprint("before_characters")] }));
     const before = new WorkspaceRuntime(repository, { interviewRequired: true });

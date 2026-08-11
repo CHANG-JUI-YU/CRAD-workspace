@@ -77,7 +77,8 @@ function inferName(request: string, kind: ArtifactKind): string {
 }
 
 function keyFor(kind: ArtifactKind, name: string): string {
-  return `${kind}:${name.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/gu, "") || "default"}`;
+  const escaped = name.toLocaleLowerCase().replace(/[^a-z0-9-]/gu, (char) => `_${char.codePointAt(0)!.toString(16).padStart(4, "0")}`).replace(/-{2,}/gu, "-");
+  return `${kind}:${escaped || "default"}`;
 }
 
 function blueprintBinding(state: { blueprint_prechecks: readonly { id: string; candidate_blueprint_revision: string; status: string }[] }): Pick<ArtifactRecord, "blueprint_precheck_id" | "blueprint_precheck_revision"> {
@@ -114,8 +115,8 @@ function templateName(value: Exclude<TemplateProposalValue, { kind: "zhuji" }>):
     case "palette": return `${value.character_id}/${value.module.module}`;
     case "wardrobe": return `${value.character_id}/wardrobe`;
     case "greetings": return "greetings";
-    case "relationships": return `team-${value.document.team_code}`;
-    case "world": return value.entries[0]?.id ?? "world";
+    case "relationships": return value.document.document_id;
+    case "world": return value.document_id;
     case "conversion": return `${value.character_id}-${value.source_mode}-to-${value.target_mode}`;
     case "import_analysis": return "import-analysis";
     case "review": return `${value.target.kind}-${value.target.id ?? value.target.name}`;

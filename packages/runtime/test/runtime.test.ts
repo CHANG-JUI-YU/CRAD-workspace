@@ -100,6 +100,7 @@ describe("natural language runtime boundary", () => {
     const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
     await expect(runtime.submitTemplateProposal({
       kind: "world",
+      document_id: "magic-system-world",
       entries: [{ schema_version: 1, id: "magic-system", category: "systems", title: "魔法規則", content: "魔法遵循清楚且可追溯的規則。" }],
     }, { actor: "world-lore-creator", attachments: [] })).rejects.toMatchObject({ code: "SOURCE_FACTS_REQUIRED" });
   });

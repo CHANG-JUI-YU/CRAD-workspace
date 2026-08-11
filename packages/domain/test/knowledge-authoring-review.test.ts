@@ -265,7 +265,7 @@ describe("knowledge, authoring and review services", () => {
     await expect(service.createZhuji("op-zhuji-invalid", { ...zhujiProposal(), module: { ...zhujiProposal().module, module: "bad" } } as never, "writer")).rejects.toMatchObject({ code: "ZHUJI_SCHEMA_INVALID" });
   });
 
-  it("creates a new revision from an existing key and normalizes punctuation-only names", async () => {
+  it("creates a new revision from an existing key and escapes punctuation-only names", async () => {
     const repository = new MemoryProjectRepository("demo");
     await repository.commit(0, (state) => ({ ...state, operations: [operation("op-rev-1", "authoring"), operation("op-rev-2", "authoring"), operation("op-punctuation", "authoring")] }));
     const service = new AuthoringService(repository);
@@ -273,7 +273,7 @@ describe("knowledge, authoring and review services", () => {
     const second = await service.create("op-rev-2", "draft character name: Yukino。 Second complete content.", "writer");
     expect(first.artifact_id).not.toBe(second.artifact_id);
     expect((await service.create("op-punctuation", "draft name: !!!。 character content is complete.", "writer")).status).toBe("completed");
-    expect((await repository.read()).artifacts.find((item) => item.key.endsWith(":default"))?.key).toContain("default");
+    expect((await repository.read()).artifacts.map((item) => item.key)).toContain("draft_note:_0021_0021_0021");
   });
 
   it("blocks self-review and lets a different reviewer record issues", async () => {
@@ -645,5 +645,42 @@ describe("knowledge, authoring and review services", () => {
     expect(state.facts).toHaveLength(1);
     expect(state.facts[0]?.source_ids).toEqual(["source-a", "source-b"]);
     expect(state.facts[0]?.fact_revision).toBe(2);
+  });
+
+  it("keeps distinct artifact keys for names that differ only in punctuation", async () => {
+    const repository = new MemoryProjectRepository("key-escape");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-ka", "authoring"), operation("op-kb", "authoring"), operation("op-kc", "authoring")] }));
+    const service = new AuthoringService(repository);
+    const first = await service.createTemplate("op-ka", { kind: "character", document: { schema_version: 1, id: "alice.a", display_name: "A", summary: "One." } }, "writer");
+    const second = await service.createTemplate("op-kb", { kind: "character", document: { schema_version: 1, id: "alice_a", display_name: "B", summary: "Two." } }, "writer");
+    const third = await service.createTemplate("op-kc", { kind: "character", document: { schema_version: 1, id: "alice-a", display_name: "C", summary: "Three." } }, "writer");
+    expect(first.artifact_key).not.toBe(second.artifact_key);
+    expect(second.artifact_key).not.toBe(third.artifact_key);
+    expect(first.artifact_key).not.toBe(third.artifact_key);
+    const state = await repository.read();
+    const keys = state.artifacts.map((item) => item.key);
+    expect(keys).toContain("character:alice_002ea");
+    expect(keys).toContain("character:alice_005fa");
+    expect(keys).toContain("character:alice-a");
+    const aliceDot = state.artifacts.filter((item) => item.key === "character:alice_002ea");
+    expect(aliceDot).toHaveLength(1);
+    expect(aliceDot[0]?.name).toBe("A");
+    expect(keys).toHaveLength(3);
+  });
+
+  it("updates a world artifact by its stable document id instead of the first entry", async () => {
+    const repository = new MemoryProjectRepository("world-id");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-w1", "authoring"), operation("op-w2", "authoring"), operation("op-w3", "authoring")] }));
+    const service = new AuthoringService(repository);
+    const world = (entries: Array<{ id: string; title: string }>) => ({ kind: "world" as const, document_id: "harbor-network", entries: entries.map((entry) => ({ schema_version: 1, id: entry.id, category: "geography", title: entry.title, content: `${entry.title} content.` })) });
+    const first = await service.createTemplate("op-w1", world([{ id: "harbor", title: "Harbor" }]), "world-lore-creator");
+    const second = await service.createTemplate("op-w2", world([{ id: "docks", title: "Docks" }, { id: "harbor", title: "Harbor" }]), "world-lore-creator");
+    expect(second.artifact_key).toBe(first.artifact_key);
+    let state = await repository.read();
+    expect(state.artifacts.filter((item) => item.key === first.artifact_key)).toHaveLength(2);
+    const different = await service.createTemplate("op-w3", { kind: "world", document_id: "coastal-network", entries: [{ schema_version: 1, id: "harbor", category: "geography", title: "Harbor", content: "Same entry, new world." }] }, "world-lore-creator");
+    expect(different.artifact_key).not.toBe(first.artifact_key);
+    state = await repository.read();
+    expect(state.artifacts.map((item) => item.key)).toContain("world_lore:coastal-network");
   });
 });
