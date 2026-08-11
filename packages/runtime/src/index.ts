@@ -22,6 +22,7 @@ import {
   zhujiProposalValueSchema,
   sourceContextFromRecord,
   workflow_answer_interview,
+  z,
   type BlueprintPrecheckDimension,
   type OperationRecord,
   type ArtifactRecord,
@@ -71,6 +72,21 @@ import {
   type WorkflowGateResult,
 } from "@st-workspace/domain";
 import { AgentRouter } from "./agent-router.js";
+
+const sourceSelectionDecisionSchema = z.object({
+  candidate_id: z.string().min(1),
+  decision: z.enum(["approve", "reject", "approved", "rejected"]).transform((val) => {
+    if (val === "approved") return "approve" as const;
+    if (val === "rejected") return "reject" as const;
+    return val;
+  }),
+  reason: z.string().optional(),
+});
+
+const sourceSelectPayloadSchema = z.union([
+  z.object({ decisions: z.array(sourceSelectionDecisionSchema) }),
+  z.array(sourceSelectionDecisionSchema).transform((arr: z.infer<typeof sourceSelectionDecisionSchema>[]) => ({ decisions: arr })),
+]);
 
 function now(): string {
   return new Date().toISOString();
@@ -557,6 +573,8 @@ function responseFromOperation(operation: OperationRecord): RequestResult {
     completed,
     blocked,
     ...(operation.question === undefined ? {} : { question: operation.question }),
+    ...(operation.execution_snapshot?.execution_agent_id === undefined ? {} : { agent_id: operation.execution_snapshot.execution_agent_id }),
+    ...(operation.execution_snapshot?.execution_agent_role === undefined ? {} : { agent_role: operation.execution_snapshot.execution_agent_role }),
   };
 }
 
@@ -1137,8 +1155,18 @@ export class WorkspaceRuntime {
         ? { ...item, actor, status: "running", updated_at: now() }
         : item),
     }));
-    const resolution = this.agents.resolve(operation.request, options.agent);
-    return this.replayOperation(operation, effectiveContext, resolution.agent_id);
+    let agentId: string | undefined = options.agent ?? operation.execution_snapshot?.execution_agent_id;
+    if (agentId === undefined) {
+      const createdAudit = state.audit.find((item) => item.operation_id === operationId && item.event === "operation.created");
+      const auditAgent = (createdAudit?.details.agent_id as string | undefined) ?? (createdAudit?.details.proposal_agent as string | undefined);
+      if (auditAgent !== undefined) {
+        agentId = auditAgent;
+      } else {
+        const resolved = this.agents.resolve(operation.request);
+        agentId = resolved.agent_id;
+      }
+    }
+    return this.replayOperation(operation, effectiveContext, agentId);
   }
 
   /** Mark an operation failed after the worker exhausted its retry budget. */
@@ -1352,12 +1380,14 @@ export class WorkspaceRuntime {
 
   private async replaySourceSelection(operation: OperationRecord, command: OperationCommand, agent?: string): Promise<RequestResult> {
     const state = await this.repository.read();
-    if (this.hasAuditMarker(operation.id, "source.selection.updated", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
-    const decisions = command.payload as SourceSelectionDecision[] | undefined;
-    if (decisions === undefined || decisions.length === 0) {
-      return this.markNeedsInput(operation, "無法還原來源選擇操作，請重新提交候選來源選擇。");
+    if (this.hasAuditMarker(operation.id, "source.selection.updated", state) || this.hasAuditMarker(operation.id, "source.ingested", state)) {
+      return responseFromOperation(await this.completeReplayedOperation(operation));
     }
-    const result = await this.sources.selectCandidates(operation.id, decisions, operation.actor ?? "worker");
+    const parsed = sourceSelectPayloadSchema.safeParse(command.payload);
+    if (!parsed.success || parsed.data.decisions.length === 0) {
+      return this.markNeedsInput(operation, "無法還原來源選擇操作，payload 格式無效或缺失，請重新提交候選來源選擇。");
+    }
+    const result = await this.sources.selectCandidates(operation.id, parsed.data.decisions, operation.actor ?? "worker");
     return { operation_id: operation.id, status: result.status, summary: result.summary, completed: [...result.approved, ...result.rejected], blocked: [], ...(agent === undefined ? {} : { agent_id: agent }) };
   }
 
@@ -1511,6 +1541,13 @@ export class WorkspaceRuntime {
       lease_owner: context.actor,
       lease_token: internalId("lease"),
       lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
+      execution_snapshot: {
+        execution_agent_id: "source-researcher",
+        execution_agent_role: "researcher",
+        initiated_by: context.actor,
+        route_kind: "source",
+        created_at: now(),
+      },
     };
     await this.repository.commit(initial.revision, (current) => ({
       ...current,
@@ -1620,6 +1657,14 @@ export class WorkspaceRuntime {
       lease_owner: context.actor,
       lease_token: internalId("lease"),
       lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
+      execution_snapshot: {
+        execution_agent_id: resolution.agent_id,
+        execution_agent_role: resolution.agent_role,
+        initiated_by: context.actor,
+        capabilities: [proposalCapability(parsed.data)].filter((c): c is string => c !== undefined),
+        route_kind: resolution.kind,
+        created_at: now(),
+      },
     };
     await this.repository.commit(initial.revision, (current) => ({
       ...current,
@@ -1808,6 +1853,13 @@ export class WorkspaceRuntime {
       lease_owner: context.actor,
       lease_token: internalId("lease"),
       lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
+      execution_snapshot: {
+        execution_agent_id: resolution.agent_id,
+        execution_agent_role: resolution.agent_role,
+        initiated_by: context.actor,
+        route_kind: "review",
+        created_at: now(),
+      },
     };
     const created = await this.repository.commit(initial.revision, (current) => ({
       ...current,
@@ -2044,6 +2096,13 @@ export class WorkspaceRuntime {
       lease_owner: context.actor,
       lease_token: internalId("lease"),
       lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
+      execution_snapshot: {
+        execution_agent_id: resolution.agent_id,
+        execution_agent_role: resolution.agent_role,
+        initiated_by: context.actor,
+        route_kind: resolution.kind,
+        created_at: now(),
+      },
     };
     const created = await this.repository.commit(state.revision, (current) => ({
       ...current,

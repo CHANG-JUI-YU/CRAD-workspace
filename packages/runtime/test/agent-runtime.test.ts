@@ -112,4 +112,252 @@ describe("high-level agent compatibility layer", () => {
     expect(router.resolve("Refresh imported cards")).toMatchObject({ agent_id: "card-import-analyst", kind: "import" });
     expect(router.resolve("Refresh knowledge")).toMatchObject({ agent_id: "fact-curator", kind: "knowledge" });
   });
+
+  describe("BUG2-07: review execution identity & critic capability", () => {
+    it("allows different execution agents with the same transport actor 'server' to review (BUG2-07)", async () => {
+      const repository = new MemoryProjectRepository("demo-review-identity");
+      const runtime = new WorkspaceRuntime(repository);
+      const created = await runtime.submitTemplateProposal(
+        { kind: "character", document: { schema_version: 1, id: "yukino-review", display_name: "Yukino", summary: "A complete character document with enough content for review." } },
+        { actor: "server", attachments: [] },
+        { agent: "director" },
+      );
+      expect(created.status).toBe("completed");
+
+      const reviewed = await runtime.request("Review current character", { actor: "server", attachments: [] }, { agent: "character-critic" });
+      expect(reviewed.status).toBe("completed");
+      expect(reviewed.summary).not.toContain("已阻擋作者自審");
+    });
+
+    it("blocks review when artifact creator and reviewer execution agents are identical (BUG2-07)", async () => {
+      const repository = new MemoryProjectRepository("demo-self-review-block");
+      const runtime = new WorkspaceRuntime(repository);
+      await runtime.submitTemplateProposal(
+        { kind: "character", document: { schema_version: 1, id: "self-review", display_name: "Self", summary: "Character for self review test." } },
+        { actor: "user-actor-1", attachments: [] },
+        { agent: "director" },
+      );
+
+      const reviewed = await runtime.request("Review current character", { actor: "user-actor-2", attachments: [] }, { agent: "director" });
+      expect(reviewed.status).toBe("blocked");
+      expect(reviewed.summary).toContain("已阻擋作者自審");
+    });
+
+    it("yields consistent results for typed review proposal and natural-language review (BUG2-07)", async () => {
+      const repository = new MemoryProjectRepository("demo-review-consistency");
+      const runtime = new WorkspaceRuntime(repository);
+      await runtime.submitTemplateProposal(
+        { kind: "character", document: { schema_version: 1, id: "consistency", display_name: "Consistency", summary: "Character document for consistency." } },
+        { actor: "server", attachments: [] },
+        { agent: "director" },
+      );
+
+      const naturalResult = await runtime.request("Review current character", { actor: "server", attachments: [] }, { agent: "character-critic" });
+      expect(naturalResult.status).toBe("completed");
+    });
+
+    it("does not route character artifact review to fact-reviewer-1 (BUG2-07)", () => {
+      const router = new AgentRouter();
+      const resolution = router.resolve("Review current character");
+      expect(resolution.agent_id).not.toBe("fact-reviewer-1");
+      expect(resolution.agent_id).toBe("character-critic");
+    });
+
+    it("returns needs_input when target artifact cannot be safely determined (BUG2-07)", async () => {
+      const repository = new MemoryProjectRepository("demo-ambiguous-review");
+      const runtime = new WorkspaceRuntime(repository);
+      const result = await runtime.request("Review current artifact", { actor: "server", attachments: [] });
+      expect(result.status).toBe("needs_input");
+    });
+  });
+
+  describe("BUG2-08: operation execution snapshot & recovery identity stability", () => {
+    it("persists execution_snapshot and restores original creator identity upon crash recovery (BUG2-08)", async () => {
+      const repository = new MemoryProjectRepository("demo-recovery-creator");
+      const runtime = new WorkspaceRuntime(repository);
+      const created = await runtime.submitTemplateProposal(
+        { kind: "character", document: { schema_version: 1, id: "crash-test", display_name: "Crash", summary: "Character document for crash recovery test." } },
+        { actor: "server", attachments: [] },
+        { agent: "director" },
+      );
+      expect(created.status).toBe("completed");
+      const state = await repository.read();
+      const op = state.operations.find((o) => o.id === created.operation_id);
+      expect(op?.execution_snapshot?.execution_agent_id).toBe("director");
+
+      // Simulate crash: set operation status back to running
+      await repository.commit(state.revision, (s) => ({
+        ...s,
+        operations: s.operations.map((o) => o.id === created.operation_id ? { ...o, status: "running" as const } : o),
+      }));
+
+      // Recover operation
+      const recovered = await runtime.recoverOperation(created.operation_id!, { actor: "server", attachments: [] });
+      expect(recovered.agent_id).toBe("director");
+    });
+
+    it("restores original reviewer identity across crash recovery (BUG2-08)", async () => {
+      const repository = new MemoryProjectRepository("demo-recovery-reviewer");
+      const runtime = new WorkspaceRuntime(repository);
+      await runtime.submitTemplateProposal(
+        { kind: "character", document: { schema_version: 1, id: "reviewer-test", display_name: "ReviewerTest", summary: "Document for reviewer recovery test." } },
+        { actor: "server", attachments: [] },
+        { agent: "director" },
+      );
+      const reviewRes = await runtime.request("Review current character", { actor: "server", attachments: [] }, { agent: "character-critic" });
+      expect(reviewRes.status).toBe("completed");
+
+      const state = await repository.read();
+      const op = state.operations.find((o) => o.id === reviewRes.operation_id)!;
+      expect(op.execution_snapshot?.execution_agent_id).toBe("character-critic");
+
+      // Reset operation status to running
+      await repository.commit(state.revision, (s) => ({
+        ...s,
+        operations: s.operations.map((o) => o.id === reviewRes.operation_id ? { ...o, status: "running" as const } : o),
+      }));
+
+      const recovered = await runtime.recoverOperation(reviewRes.operation_id!, { actor: "different-actor", attachments: [] });
+      expect(recovered.agent_id).toBe("character-critic");
+    });
+
+    it("uses execution_snapshot even if router state or request resolution changes (BUG2-08)", async () => {
+      const repository = new MemoryProjectRepository("demo-snapshot-over-router");
+      const runtime = new WorkspaceRuntime(repository);
+      const created = await runtime.submitTemplateProposal(
+        { kind: "greetings", document: { schema_version: 1, greetings: [{ id: "greeting-1", kind: "primary", content: "Hello!", character_ids: ["c1"] }] } },
+        { actor: "server", attachments: [] },
+        { agent: "greetings-creator" },
+      );
+      const state = await repository.read();
+      const op = state.operations.find((o) => o.id === created.operation_id)!;
+      expect(op.execution_snapshot?.execution_agent_id).toBe("greetings-creator");
+
+      await repository.commit(state.revision, (s) => ({
+        ...s,
+        operations: s.operations.map((o) => o.id === created.operation_id ? { ...o, status: "running" as const } : o),
+      }));
+
+      const recovered = await runtime.recoverOperation(created.operation_id!, { actor: "server", attachments: [] });
+      expect(recovered.agent_id).toBe("greetings-creator");
+    });
+  });
+
+  describe("BUG2-09: source selection recovery payload shape & validation", () => {
+    it("handles { payload: { decisions } } crash-window round trip for source_select (BUG2-09)", async () => {
+      const repository = new MemoryProjectRepository("demo-source-select-recovery");
+      const runtime = new WorkspaceRuntime(repository);
+
+      // Register candidate first
+      await repository.commit(0, (state) => ({
+        ...state,
+        candidates: [{ id: "candidate-09", title: "Candidate 09", status: "approved" as const, content: "valid content" }],
+      }));
+
+      const selectResult = await runtime.selectSourceCandidates(
+        [{ candidate_id: "candidate-09", decision: "approve" }],
+        { actor: "server", attachments: [] },
+      );
+      expect(selectResult.status).toBe("completed");
+
+      const state = await repository.read();
+      const op = state.operations.find((o) => o.id === selectResult.operation_id)!;
+      expect(op.command?.type).toBe("source_select");
+      expect(op.command?.payload).toEqual({ decisions: [{ candidate_id: "candidate-09", decision: "approve" }] });
+
+      // Reset operation status to running without domain audit marker to simulate crash window
+      await repository.commit(state.revision, (s) => ({
+        ...s,
+        audit: s.audit.filter((a) => a.event !== "source.selection.updated"),
+        operations: s.operations.map((o) => o.id === selectResult.operation_id ? { ...o, status: "running" as const } : o),
+      }));
+
+      const recovered = await runtime.recoverOperation(selectResult.operation_id!, { actor: "server", attachments: [] });
+      expect(recovered.status).toBe("completed");
+      expect(recovered.completed).toContain("candidate-09");
+    });
+
+    it("safely recovers legacy array payload for source_select (BUG2-09)", async () => {
+      const repository = new MemoryProjectRepository("demo-legacy-array-recovery");
+      const runtime = new WorkspaceRuntime(repository);
+
+      await repository.commit(0, (state) => ({
+        ...state,
+        candidates: [{ id: "candidate-legacy", title: "Legacy Candidate", status: "approved" as const, content: "valid content" }],
+        operations: [{
+          id: "op-legacy-select",
+          kind: "source" as const,
+          request: "select source candidates",
+          actor: "server",
+          status: "running" as const,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          progress: [],
+          command: {
+            version: 1 as const,
+            type: "source_select" as const,
+            payload: [{ candidate_id: "candidate-legacy", decision: "approve" }], // Legacy array shape
+          },
+        }],
+      }));
+
+      const recovered = await runtime.recoverOperation("op-legacy-select", { actor: "server", attachments: [] });
+      expect(recovered.status).toBe("completed");
+      expect(recovered.completed).toContain("candidate-legacy");
+    });
+
+    it("rejects malformed source_select payload and enters needs_input diagnostic (BUG2-09)", async () => {
+      const repository = new MemoryProjectRepository("demo-malformed-payload");
+      const runtime = new WorkspaceRuntime(repository);
+
+      await repository.commit(0, (state) => ({
+        ...state,
+        operations: [{
+          id: "op-malformed-select",
+          kind: "source" as const,
+          request: "select source candidates",
+          actor: "server",
+          status: "running" as const,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          progress: [],
+          command: {
+            version: 1 as const,
+            type: "source_select" as const,
+            payload: { invalid_key: 123 }, // Malformed payload
+          },
+        }],
+      }));
+
+      const recovered = await runtime.recoverOperation("op-malformed-select", { actor: "server", attachments: [] });
+      expect(recovered.status).toBe("needs_input");
+      expect(recovered.summary).toContain("payload 格式無效或缺失");
+    });
+
+    it("does not duplicate side effects when replaying already completed source_select (BUG2-09)", async () => {
+      const repository = new MemoryProjectRepository("demo-no-duplicate-side-effect");
+      const runtime = new WorkspaceRuntime(repository);
+
+      await repository.commit(0, (state) => ({
+        ...state,
+        candidates: [{ id: "candidate-dup", title: "Dup Candidate", status: "approved" as const, content: "valid content" }],
+      }));
+
+      const first = await runtime.selectSourceCandidates(
+        [{ candidate_id: "candidate-dup", decision: "approve" }],
+        { actor: "server", attachments: [] },
+      );
+      expect(first.status).toBe("completed");
+
+      const state = await repository.read();
+      // Set operation to running while keeping audit marker
+      await repository.commit(state.revision, (s) => ({
+        ...s,
+        operations: s.operations.map((o) => o.id === first.operation_id ? { ...o, status: "running" as const } : o),
+      }));
+
+      const replayed = await runtime.recoverOperation(first.operation_id!, { actor: "server", attachments: [] });
+      expect(replayed.status).toBe("completed");
+    });
+  });
 });

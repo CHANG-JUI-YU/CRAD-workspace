@@ -503,7 +503,7 @@ describe("natural language runtime boundary", () => {
     );
     expect(created.status).toBe("completed");
     expect((await repository.read()).artifacts[0]?.name).toBe("Yukino");
-    const selfReview = await runtime.request("Review current character", { actor: "writer", attachments: [] });
+    const selfReview = await runtime.request("Review current character", { actor: "writer", attachments: [] }, { agent: "director" });
     expect(selfReview.status).toBe("blocked");
     const peerReview = await runtime.request("Review current character", { actor: "reviewer", attachments: [] });
     expect(peerReview.status).toBe("completed");

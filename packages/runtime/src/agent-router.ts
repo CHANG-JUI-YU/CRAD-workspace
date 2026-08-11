@@ -27,7 +27,8 @@ function specialistFor(kind: RoutedKind, request: string, registry: AgentRegistr
     if (matches(text, /ejs/u)) return choose("ejs-critic");
     if (matches(text, /html/u)) return choose("html-critic");
     if (matches(text, /character|角色|人物/u)) return choose("character-critic");
-    return choose("fact-reviewer-1");
+    if (matches(text, /fact|知識|事實|數據/u)) return choose("fact-reviewer-1");
+    return choose("character-critic");
   }
   if (kind === "authoring") {
     if (matches(text, /conversion|convert|mode-conversion|轉換/iu)) return choose("mode-conversion");

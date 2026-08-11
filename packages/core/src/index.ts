@@ -3,6 +3,7 @@ import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
+export { z };
 import { createInterviewState, type InterviewFlow, type InterviewState } from "./interview.js";
 import type { AdaptationDecision } from "./authoring-context.js";
 import { FileBlobStore, MemoryBlobStore, type BlobStore } from "./blob-store.js";
@@ -434,6 +435,17 @@ export interface OperationCommand {
   attachment_refs?: OperationAttachmentRef[];
 }
 
+export interface InternalExecutionSnapshot {
+  execution_agent_id: string;
+  execution_agent_role?: string;
+  initiated_by?: string;
+  capabilities?: string[];
+  route_kind?: string;
+  target_artifact_id?: string;
+  target_artifact_kind?: string;
+  created_at: string;
+}
+
 export interface OperationRecord {
   id: string;
   kind: "source" | "knowledge" | "authoring" | "review" | "build" | "import" | "interview" | "status" | "unknown";
@@ -452,6 +464,7 @@ export interface OperationRecord {
   lease_expires_at?: string;
   attempt?: number;
   last_error?: string;
+  execution_snapshot?: InternalExecutionSnapshot;
 }
 
 export interface AuditEvent {
@@ -898,6 +911,17 @@ const operationProgressSchema = z.object({
   artifact_id: z.string().optional(),
 }).strict();
 
+const internalExecutionSnapshotSchema = z.object({
+  execution_agent_id: z.string().min(1),
+  execution_agent_role: z.string().optional(),
+  initiated_by: z.string().optional(),
+  capabilities: z.array(z.string()).optional(),
+  route_kind: z.string().optional(),
+  target_artifact_id: z.string().optional(),
+  target_artifact_kind: z.string().optional(),
+  created_at: z.string().datetime({ offset: true }),
+}).strict();
+
 const operationSchema = z.object({
   id: z.string().min(1),
   kind: z.enum(["source", "knowledge", "authoring", "review", "build", "import", "interview", "status", "unknown"]),
@@ -925,6 +949,7 @@ const operationSchema = z.object({
   lease_expires_at: z.string().datetime({ offset: true }).optional(),
   attempt: z.number().int().nonnegative().optional(),
   last_error: z.string().optional(),
+  execution_snapshot: internalExecutionSnapshotSchema.optional(),
 }).strict();
 
 const auditEventSchema = z.object({
