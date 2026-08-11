@@ -258,6 +258,18 @@ const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
     impact: "此來源無法入庫。",
     next_actions: ["改用正確編碼的檔案或文字。"],
   },
+  SOURCE_SEARCH_PROVIDER_UNAVAILABLE: {
+    category: "source",
+    message_zh: "Runtime 尚未注入 SourceSearchProvider。",
+    impact: "無法在 runtime_provider 模式下執行自動搜尋。",
+    next_actions: ["在 Runtime 配置注入搜尋 Provider，或將搜尋模式切換為 agent_managed 由 Source Researcher Agent 搜尋。"],
+  },
+  SOURCE_SEARCH_DISABLED: {
+    category: "source",
+    message_zh: "來源搜尋功能已停用。",
+    impact: "無法執行任何來源搜尋。",
+    next_actions: ["直接提供來源 URL 或上傳附件材料。"],
+  },
   TEMPLATE_SCHEMA_INVALID: {
     category: "template",
     message_zh: "提交的結構化內容不符合 schema。",

@@ -943,20 +943,32 @@ export interface TavernCompatibilityReport {
   summary: string;
 }
 
+export type SourceSearchMode = "agent_managed" | "runtime_provider" | "disabled";
+
+export interface WorkspaceRuntimeOptions {
+  searcher?: (request: string) => Promise<Array<{ title: string; url: string; snippet?: string; content?: string; media_type?: string; domain?: string; official?: boolean }>>;
+  sourceSearchMode?: SourceSearchMode;
+  fetcher?: SourceFetcher;
+  interviewRequired?: boolean;
+  attachmentStore?: AttachmentStore;
+}
+
 export class WorkspaceRuntime {
+  public readonly sourceSearchMode: SourceSearchMode;
   private readonly sources: SourceService;
   private readonly knowledge: KnowledgeService;
   private readonly authoring: AuthoringService;
   private readonly review: ReviewService;
   private readonly build: BuildService;
   private readonly importer: ImportService;
-  private readonly searcher: ((request: string) => Promise<Array<{ title: string; url: string; snippet?: string; content?: string; media_type?: string }>>) | undefined;
+  private readonly searcher: ((request: string) => Promise<Array<{ title: string; url: string; snippet?: string; content?: string; media_type?: string; domain?: string; official?: boolean }>>) | undefined;
   private readonly fetcher: SourceFetcher | undefined;
   private readonly interviewRequired: boolean;
   private readonly attachmentStore: AttachmentStore;
   private readonly agents = new AgentRouter();
 
-  constructor(private readonly repository: ProjectRepository, options: { searcher?: (request: string) => Promise<Array<{ title: string; url: string; snippet?: string; content?: string; media_type?: string; domain?: string; official?: boolean }>>; fetcher?: SourceFetcher; interviewRequired?: boolean; attachmentStore?: AttachmentStore } = {}) {
+  constructor(private readonly repository: ProjectRepository, options: WorkspaceRuntimeOptions = {}) {
+    this.sourceSearchMode = options.sourceSearchMode ?? (options.searcher !== undefined ? "runtime_provider" : "agent_managed");
     this.sources = new SourceService(repository);
     this.knowledge = new KnowledgeService(repository);
     this.authoring = new AuthoringService(repository);
@@ -1764,9 +1776,94 @@ export class WorkspaceRuntime {
   private async replaySourceSearch(operation: OperationRecord, context: WorkspaceContext, agent?: string): Promise<RequestResult> {
     const state = await this.repository.read();
     if (this.hasAuditMarker(operation.id, "source.candidates_registered", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
-    const results = this.searcher === undefined ? [] : await this.searcher(operation.request);
-    const searched = await this.sources.registerCandidates(operation.id, results, context.actor);
-    return { operation_id: operation.id, status: searched.status, summary: searched.summary, completed: searched.completed, blocked: searched.blocked, ...(agent === undefined ? {} : { agent_id: agent }) };
+    return this.executeSourceSearch(operation, context, operation.request, agent);
+  }
+
+  private async executeSourceSearch(operation: OperationRecord, context: WorkspaceContext, query: string, agent?: string): Promise<RequestResult> {
+    const mode = operation.execution_snapshot?.source_search_mode ?? this.sourceSearchMode;
+
+    if (mode === "disabled") {
+      const latest = await this.repository.read();
+      const question = "來源搜尋功能已停用。請直接提供來源 URL 或上傳附件材料。";
+      const summary = "來源搜尋功能已停用（SOURCE_SEARCH_DISABLED）。";
+      await this.repository.commit(latest.revision, (current) => ({
+        ...current,
+        operations: current.operations.map((item) => item.id === operation.id
+          ? { ...item, status: "needs_input", question, result_summary: summary, updated_at: now() }
+          : item),
+        audit: [...current.audit, {
+          id: internalId("audit"),
+          operation_id: operation.id,
+          event: "source.search.disabled",
+          actor: context.actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: { query, code: "SOURCE_SEARCH_DISABLED" },
+        }],
+      }));
+      return { operation_id: operation.id, status: "needs_input", summary, question, completed: [], blocked: [operation.id], ...(agent === undefined ? {} : { agent_id: agent }) };
+    }
+
+    if (mode === "runtime_provider") {
+      if (this.searcher === undefined) {
+        const latest = await this.repository.read();
+        const question = "Runtime 尚未注入 SourceSearchProvider。請在 Runtime 配置注入搜尋 Provider，或將搜尋模式切換為 agent_managed。";
+        const summary = "尚未注入 Runtime 搜尋 Provider（SOURCE_SEARCH_PROVIDER_UNAVAILABLE）。";
+        await this.repository.commit(latest.revision, (current) => ({
+          ...current,
+          operations: current.operations.map((item) => item.id === operation.id
+            ? { ...item, status: "needs_input", question, result_summary: summary, updated_at: now() }
+            : item),
+          audit: [...current.audit, {
+            id: internalId("audit"),
+            operation_id: operation.id,
+            event: "source.search.provider_unavailable",
+            actor: context.actor,
+            occurred_at: now(),
+            project_revision: current.revision + 1,
+            details: { query, code: "SOURCE_SEARCH_PROVIDER_UNAVAILABLE" },
+          }],
+        }));
+        return { operation_id: operation.id, status: "needs_input", summary, question, completed: [], blocked: [operation.id], ...(agent === undefined ? {} : { agent_id: agent }) };
+      }
+      const results = context.research_results ?? await this.searcher(query);
+      const searched = await this.sources.registerCandidates(operation.id, results, context.actor);
+      return { operation_id: operation.id, status: searched.status, summary: searched.summary, completed: searched.completed, blocked: searched.blocked, ...(agent === undefined ? {} : { agent_id: agent }) };
+    }
+
+    // agent_managed mode (default)
+    if (context.research_results !== undefined && context.research_results.length > 0) {
+      const searched = await this.sources.registerCandidates(operation.id, context.research_results, context.actor);
+      return { operation_id: operation.id, status: searched.status, summary: searched.summary, completed: searched.completed, blocked: searched.blocked, ...(agent === undefined ? {} : { agent_id: agent }) };
+    }
+
+    const latest = await this.repository.read();
+    const question = "目前為 Agent 託管搜尋模式。請由具備聯網能力的 Source Researcher Agent 搜尋並提交 source_research 提案，或由使用者直接提供來源 URL/附件。";
+    const summary = "目前為 Agent 託管搜尋模式（agent_managed）。需要聯網 Source Researcher Agent 執行搜尋並提交 typed source_research proposal，或直接提供 URL。";
+    await this.repository.commit(latest.revision, (current) => ({
+      ...current,
+      operations: current.operations.map((item) => item.id === operation.id
+        ? { ...item, status: "needs_input", question, result_summary: summary, updated_at: now() }
+        : item),
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "source.search.agent_managed_required",
+        actor: context.actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { query, code: "SOURCE_SEARCH_AGENT_MANAGED" },
+      }],
+    }));
+    return {
+      operation_id: operation.id,
+      status: "needs_input",
+      summary,
+      question,
+      completed: [],
+      blocked: [],
+      ...(agent === undefined ? {} : { agent_id: agent }),
+    };
   }
 
   private async replaySource(operation: OperationRecord, context: WorkspaceContext, agent?: string): Promise<RequestResult> {
@@ -2516,6 +2613,7 @@ export class WorkspaceRuntime {
         execution_agent_role: resolution.agent_role,
         initiated_by: context.actor,
         route_kind: resolution.kind,
+        source_search_mode: this.sourceSearchMode,
         created_at: now(),
       },
     };
@@ -2538,9 +2636,7 @@ export class WorkspaceRuntime {
         operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "running", updated_at: now() } : item),
       }));
       if (isSourceSearch) {
-        const results = context.research_results ?? (this.searcher === undefined ? [] : await this.searcher(trimmed));
-        const searched = await this.sources.registerCandidates(operation.id, results, context.actor);
-        return { operation_id: operation.id, status: searched.status, summary: searched.summary, completed: searched.completed, blocked: searched.blocked };
+        return this.executeSourceSearch(operation, context, trimmed, resolution.agent_id);
       }
       const executionContext = this.fetcher === undefined ? context : { ...context, fetcher: this.fetcher };
       if (context.attachments.length > 0 || /https?:\/\//iu.test(trimmed)) {

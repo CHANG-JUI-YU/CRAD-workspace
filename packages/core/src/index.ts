@@ -443,6 +443,7 @@ export interface InternalExecutionSnapshot {
   route_kind?: string;
   target_artifact_id?: string;
   target_artifact_kind?: string;
+  source_search_mode?: "agent_managed" | "runtime_provider" | "disabled";
   created_at: string;
 }
 
@@ -971,6 +972,7 @@ const internalExecutionSnapshotSchema = z.object({
   route_kind: z.string().optional(),
   target_artifact_id: z.string().optional(),
   target_artifact_kind: z.string().optional(),
+  source_search_mode: z.enum(["agent_managed", "runtime_provider", "disabled"]).optional(),
   created_at: z.string().datetime({ offset: true }),
 }).strict();
 

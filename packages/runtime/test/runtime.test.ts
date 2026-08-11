@@ -1524,5 +1524,135 @@ describe("artifact workbench groups", () => {
     expect(resolution.agent_id).toBe("zhuji-creator");
     expect(resolution.agent_role).toBe("creator");
   });
+
+  it("BUG3-10: A. default agent_managed without searcher returns needs_input diagnostic instead of empty results", async () => {
+    const repository = new MemoryProjectRepository("bug3-10-a");
+    const runtime = new WorkspaceRuntime(repository);
+    expect(runtime.sourceSearchMode).toBe("agent_managed");
+    const result = await runtime.request("搜尋官方來源", { actor: "user", attachments: [] });
+    expect(result.status).toBe("needs_input");
+    expect(result.summary).toContain("agent_managed");
+    expect(result.question).toContain("Source Researcher Agent");
+    const state = await repository.read();
+    expect(state.candidates.length).toBe(0);
+    expect(state.audit.some((item) => item.event === "source.search.agent_managed_required")).toBe(true);
+  });
+
+  it("BUG3-10: B. agent_managed proposal registers pending candidates and supports runtime fetch without writing facts directly", async () => {
+    const repository = new MemoryProjectRepository("bug3-10-b");
+    const fetcher = async () => ({ content: new TextEncoder().encode("fetched page content"), media_type: "text/plain" });
+    const runtime = new WorkspaceRuntime(repository, { sourceSearchMode: "agent_managed", fetcher });
+
+    const proposalResult = await runtime.submitTemplateProposal({
+      kind: "source_research",
+      query: "搜尋官方來源",
+      candidates: [
+        { title: "Agent Candidate", url: "https://example.test/agent-source", snippet: "agent snippet" },
+      ],
+    }, { actor: "source-researcher" });
+
+    expect(proposalResult.status).toBe("completed");
+    const stateAfterProposal = await repository.read();
+    expect(stateAfterProposal.candidates.length).toBe(1);
+    expect(stateAfterProposal.candidates[0]?.status).toBe("pending");
+    expect(stateAfterProposal.facts.length).toBe(0);
+
+    const candidateId = stateAfterProposal.candidates[0]!.id;
+    await runtime.selectSourceCandidates([{ candidate_id: candidateId, decision: "approve" }], { actor: "user", attachments: [] });
+    const stateAfterApprove = await repository.read();
+    expect(stateAfterApprove.candidates[0]?.status).toBe("approved");
+
+    const fetchResult = await runtime.request("抓取批准的來源", { actor: "user", attachments: [] });
+    expect(fetchResult.status).toBe("completed");
+    const stateAfterFetch = await repository.read();
+    expect(stateAfterFetch.sources.length).toBe(1);
+    expect(stateAfterFetch.sources[0]?.canonical_text).toBe("fetched page content");
+  });
+
+  it("BUG3-10: C. runtime_provider mode without provider returns SOURCE_SEARCH_PROVIDER_UNAVAILABLE", async () => {
+    const repository = new MemoryProjectRepository("bug3-10-c");
+    const runtime = new WorkspaceRuntime(repository, { sourceSearchMode: "runtime_provider" });
+    const result = await runtime.request("搜尋官方來源", { actor: "user", attachments: [] });
+    expect(result.status).toBe("needs_input");
+    expect(result.summary).toContain("SOURCE_SEARCH_PROVIDER_UNAVAILABLE");
+    expect(result.question).toContain("SourceSearchProvider");
+    const state = await repository.read();
+    expect(state.candidates.length).toBe(0);
+  });
+
+  it("BUG3-10: D. runtime_provider mode with provider executes searcher and registers candidates", async () => {
+    const repository = new MemoryProjectRepository("bug3-10-d");
+    const runtime = new WorkspaceRuntime(repository, {
+      sourceSearchMode: "runtime_provider",
+      searcher: async (query) => [{ title: `Result for ${query}`, url: "https://example.test/search-result" }],
+    });
+    const result = await runtime.request("搜尋關鍵字", { actor: "user", attachments: [] });
+    expect(result.status).toBe("completed");
+    expect(result.summary).toContain("1 個候選來源");
+    const state = await repository.read();
+    expect(state.candidates.length).toBe(1);
+    expect(state.candidates[0]?.title).toBe("Result for 搜尋關鍵字");
+  });
+
+  it("BUG3-10: E. disabled mode returns SOURCE_SEARCH_DISABLED and creates no candidates", async () => {
+    let searcherCalled = false;
+    const repository = new MemoryProjectRepository("bug3-10-e");
+    const runtime = new WorkspaceRuntime(repository, {
+      sourceSearchMode: "disabled",
+      searcher: async () => { searcherCalled = true; return []; },
+    });
+    const result = await runtime.request("搜尋官方來源", { actor: "user", attachments: [] });
+    expect(result.status).toBe("needs_input");
+    expect(result.summary).toContain("SOURCE_SEARCH_DISABLED");
+    expect(searcherCalled).toBe(false);
+    const state = await repository.read();
+    expect(state.candidates.length).toBe(0);
+  });
+
+  it("BUG3-10: F. direct URL submission works normally under agent_managed mode", async () => {
+    const repository = new MemoryProjectRepository("bug3-10-f");
+    const fetcher = async (url: string) => ({ content: new TextEncoder().encode(`content from ${url}`), media_type: "text/plain" });
+    const runtime = new WorkspaceRuntime(repository, { sourceSearchMode: "agent_managed", fetcher });
+    const result = await runtime.request("加入來源 https://example.test/direct-page", { actor: "user", attachments: [] });
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    expect(state.sources.length).toBe(1);
+    expect(state.sources[0]?.title).toBe("https://example.test/direct-page");
+    expect(state.candidates[0]?.url).toBe("https://example.test/direct-page");
+  });
+
+  it("BUG3-10: G. recovery/resume preserves source_search_mode from operation snapshot and avoids side effects", async () => {
+    const repository = new MemoryProjectRepository("bug3-10-g");
+    const timestamp = new Date().toISOString();
+    await repository.commit(0, (state) => ({
+      ...state,
+      operations: [
+        {
+          id: "op-search-managed",
+          kind: "source",
+          request: "搜尋歷史資料",
+          actor: "user",
+          status: "running",
+          created_at: timestamp,
+          updated_at: timestamp,
+          progress: [],
+          command: { version: 1, type: "source_search" },
+          execution_snapshot: {
+            execution_agent_id: "source-researcher",
+            execution_agent_role: "researcher",
+            source_search_mode: "agent_managed",
+            created_at: timestamp,
+          },
+        },
+      ],
+    }));
+
+    const runtime = new WorkspaceRuntime(repository);
+    const result = await runtime.recoverOperation("op-search-managed", { actor: "user", attachments: [] });
+    expect(result.status).toBe("needs_input");
+    expect(result.summary).toContain("agent_managed");
+    const state = await repository.read();
+    expect(state.candidates.length).toBe(0);
+  });
 });
 
