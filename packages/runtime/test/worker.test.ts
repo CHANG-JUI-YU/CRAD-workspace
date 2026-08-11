@@ -19,9 +19,10 @@ async function waitFor(check: () => Promise<boolean>, timeoutMs = 1_000): Promis
 describe("background workspace worker", () => {
   it("recovers an unfinished operation after startup", async () => {
     const repository = new MemoryProjectRepository("demo");
+    const timestamp = new Date().toISOString();
     await repository.commit(0, (state) => ({
       ...state,
-      operations: [operation("op-recover", "Draft note: Create character: Resume. Personality: calm and clear.")],
+      operations: [{ ...operation("op-recover", "Draft note: Create character: Resume. Personality: calm and clear."), execution_snapshot: { execution_agent_id: "director", execution_agent_role: "orchestrator", initiated_by: "writer", created_at: timestamp } }],
     }));
     const events: string[] = [];
     const worker = new WorkspaceWorker(new WorkspaceRuntime(repository), { pollIntervalMs: 10, retryDelayMs: 1, onEvent: (event) => events.push(event.type) });
@@ -136,7 +137,7 @@ describe("background workspace worker", () => {
     const runtime = new WorkspaceRuntime(repository);
     expect((await runtime.recoverOperation("op-source", { actor: "worker", attachments: [] }, { agent: "source-researcher" })).status).toBe("completed");
     expect((await runtime.recoverOperation("op-knowledge", { actor: "worker", attachments: [] })).status).toBe("completed");
-    expect((await runtime.recoverOperation("op-review", { actor: "reviewer", attachments: [] })).status).toBe("completed");
+    expect((await runtime.recoverOperation("op-review", { actor: "reviewer", attachments: [] }, { agent: "character-critic" })).status).toBe("completed");
     expect((await runtime.recoverOperation("op-build", { actor: "builder", attachments: [] })).status).toBe("completed");
     expect((await runtime.recoverOperation("op-import", { actor: "importer", attachments: [{ name: "card.json", content: new TextEncoder().encode(JSON.stringify({ name: "Imported", description: "A complete imported card" })) }] })).status).toBe("completed");
     expect((await repository.read()).operations.every((item) => item.status === "completed")).toBe(true);
@@ -154,7 +155,7 @@ describe("background workspace worker", () => {
     await repository.commit((await repository.read()).revision, (state) => ({
       ...state,
       operations: [
-        { ...operation("op-fallback-actor", "Draft note: Create character: Fallback. Personality: calm."), actor: undefined },
+        { ...operation("op-fallback-actor", "Draft note: Create character: Fallback. Personality: calm."), actor: undefined, execution_snapshot: { execution_agent_id: "director", execution_agent_role: "orchestrator", initiated_by: "writer", created_at: new Date().toISOString() } },
       ],
     }));
     expect((await runtime.recoverOperation("op-fallback-actor", { actor: "", attachments: [] })).status).toBe("completed");
@@ -217,7 +218,7 @@ describe("background workspace worker", () => {
     const repository = new MemoryProjectRepository("demo");
     const now = new Date().toISOString();
     const stale = new Date(Date.now() - 5_000).toISOString();
-    const expired: OperationRecord = { ...operation("op-stale", "Draft note: Create character: Stale. Personality: calm."), lease_owner: "dead-worker", lease_token: "stale-token", lease_expires_at: stale };
+    const expired: OperationRecord = { ...operation("op-stale", "Draft note: Create character: Stale. Personality: calm."), lease_owner: "dead-worker", lease_token: "stale-token", lease_expires_at: stale, execution_snapshot: { execution_agent_id: "director", execution_agent_role: "orchestrator", initiated_by: "writer", created_at: now } };
     await repository.commit(0, (state) => ({ ...state, operations: [expired] }));
     const runtime = new WorkspaceRuntime(repository);
     const claimed = await runtime.claimOperation("op-stale", "worker-2");

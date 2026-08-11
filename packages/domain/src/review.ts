@@ -231,11 +231,11 @@ export class ReviewService {
     return { issue_id: issue.id, action: input.action, status: "completed", summary };
   }
 
-  async review(operationId: string, request: string, actor: string, auditActor = actor): Promise<ReviewExecutionResult> {
+  async review(operationId: string, request: string, actor: string, auditActor = actor, targetId?: string): Promise<ReviewExecutionResult> {
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
-    const target = this.pickTarget(initial.artifacts, request);
+    const target = targetId === undefined ? this.pickTarget(initial.artifacts, request) : initial.artifacts.find((artifact) => artifact.id === targetId);
     if (target === undefined) {
       await this.repository.commit(initial.revision, (current) => ({
         ...current,

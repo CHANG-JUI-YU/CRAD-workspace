@@ -70,8 +70,9 @@ import {
   type SourceSelectionDecision,
   type SourceFetcher,
   type WorkflowGateResult,
+  type ReviewExecutionResult,
 } from "@st-workspace/domain";
-import { AgentRouter } from "./agent-router.js";
+import { AgentRouter, type AgentResolution } from "./agent-router.js";
 
 const sourceSelectionDecisionSchema = z.object({
   candidate_id: z.string().min(1),
@@ -1155,16 +1156,27 @@ export class WorkspaceRuntime {
         ? { ...item, actor, status: "running", updated_at: now() }
         : item),
     }));
-    let agentId: string | undefined = options.agent ?? operation.execution_snapshot?.execution_agent_id;
+    const identityRequired = this.operationRequiresIdentity(operation);
+    let agentId: string | undefined = operation.execution_snapshot?.execution_agent_id;
+    if (agentId !== undefined) {
+      if (options.agent !== undefined && options.agent !== agentId) {
+        await this.recordAudit(operationId, "recovery.identity.snapshot_authoritative", {
+          snapshot_agent: agentId,
+          requested_agent: options.agent,
+        }, actor);
+      }
+    } else if (options.agent !== undefined) {
+      agentId = options.agent;
+    }
     if (agentId === undefined) {
       const createdAudit = state.audit.find((item) => item.operation_id === operationId && item.event === "operation.created");
       const auditAgent = (createdAudit?.details.agent_id as string | undefined) ?? (createdAudit?.details.proposal_agent as string | undefined);
-      if (auditAgent !== undefined) {
+      if (auditAgent !== undefined && this.auditAgentSuitable(auditAgent, operation)) {
         agentId = auditAgent;
-      } else {
-        const resolved = this.agents.resolve(operation.request);
-        agentId = resolved.agent_id;
       }
+    }
+    if (identityRequired && agentId === undefined) {
+      return this.markNeedsInput(operation, "EXECUTION_IDENTITY_RECOVERY_REQUIRED: 無法還原此操作的原執行代理（缺少 execution snapshot 與可信 audit 記錄）。請重新指定執行代理後重試。");
     }
     return this.replayOperation(operation, effectiveContext, agentId);
   }
@@ -1210,6 +1222,108 @@ export class WorkspaceRuntime {
         : item),
     }));
     return { operation_id: operation.id, status: "needs_input", summary: question, completed: [], blocked: [], question };
+  }
+
+  private operationRequiresIdentity(operation: OperationRecord): boolean {
+    const command = operation.command;
+    if (command?.type === "template_proposal" || command?.type === "zhuji_proposal" || command?.type === "issue_update") return true;
+    return operation.kind === "authoring" || operation.kind === "review";
+  }
+
+  private auditAgentSuitable(agent: string, operation: OperationRecord): boolean {
+    const definition = this.agents.registryView().get(agent);
+    if (definition === undefined) return false;
+    const command = operation.command;
+    if (command?.type === "template_proposal") {
+      const payload = command.payload as TemplateProposalValue;
+      return this.agents.registryView().canSubmitProposal(agent, payload.kind, proposalCapability(payload));
+    }
+    if (command?.type === "zhuji_proposal") return this.agents.registryView().canSubmitProposal(agent, "zhuji");
+    if (command?.type === "issue_update") return this.agents.registryView().canUpdateIssue(agent);
+    if (operation.kind === "review") return definition.role === "critic" || definition.role === "reviewer";
+    if (operation.kind === "authoring") return definition.role === "creator" || definition.role === "converter" || definition.role === "orchestrator";
+    return true;
+  }
+
+  private async recordAudit(operationId: string, event: string, details: Record<string, unknown>, actor = "worker"): Promise<void> {
+    const state = await this.repository.read();
+    await this.repository.commit(state.revision, (current) => ({
+      ...current,
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operationId,
+        event,
+        actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details,
+      }],
+    }));
+  }
+
+  private async updateExecutionSnapshot(operationId: string, patch: { execution_agent_id: string; execution_agent_role: string; capabilities: string[]; target_artifact_id: string; target_artifact_kind: string }): Promise<void> {
+    const state = await this.repository.read();
+    await this.repository.commit(state.revision, (current) => ({
+      ...current,
+      operations: current.operations.map((item) => item.id === operationId
+        ? { ...item, execution_snapshot: { ...(item.execution_snapshot ?? { created_at: now() }), ...patch } }
+        : item),
+    }));
+  }
+
+  private async replayReview(operation: OperationRecord, context: WorkspaceContext, agent?: string): Promise<ReviewExecutionResult> {
+    const snapshotTargetId = operation.execution_snapshot?.target_artifact_id;
+    if (snapshotTargetId !== undefined) {
+      const state = await this.repository.read();
+      const snapshotTarget = state.artifacts.find((artifact) => artifact.id === snapshotTargetId);
+      const snapshotKind = operation.execution_snapshot?.target_artifact_kind;
+      if (snapshotTarget === undefined || (snapshotKind !== undefined && snapshotTarget.kind !== snapshotKind)) {
+        const question = "EXECUTION_IDENTITY_RECOVERY_REQUIRED: 無法還原審查目標（snapshot 記錄的 target artifact 不存在或類型不符）。";
+        await this.repository.commit(state.revision, (current) => ({
+          ...current,
+          operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "needs_input" as const, question, updated_at: now() } : item),
+        }));
+        return { issue_ids: [], status: "needs_input" as const, summary: question };
+      }
+    }
+    const reviewer = agent ?? operation.execution_snapshot?.execution_agent_id ?? context.actor;
+    return this.review.review(operation.id, operation.request, reviewer, context.actor, snapshotTargetId);
+  }
+
+  private async runNaturalReview(operation: OperationRecord, request: string, resolution: AgentResolution, artifacts: readonly ArtifactRecord[], actor: string): Promise<{ result: RequestResult; reviewer: string; reviewer_role: string }> {
+    const targetResolution = resolveNaturalReviewTarget(request, artifacts);
+    if (targetResolution === "ambiguous") {
+      return { result: await this.markNeedsInput(operation, "審查目標不明確：存在多個可審查的產物，請指名要審查的角色、世界觀或開場白。"), reviewer: resolution.agent_id, reviewer_role: resolution.agent_role };
+    }
+    if (targetResolution === undefined) {
+      return { result: await this.reviewResult(operation, request, resolution.agent_id, actor), reviewer: resolution.agent_id, reviewer_role: resolution.agent_role };
+    }
+    const target = targetResolution.target;
+    const expected = reviewCriticForArtifactKind(target.kind, target.content);
+    let reviewer = resolution.agent_id;
+    let reviewerRole = resolution.agent_role;
+    if (reviewer !== expected) {
+      if (resolution.explicit) {
+        throw new CoreError("AGENT_CAPABILITY_DENIED", `Agent ${reviewer} cannot review ${target.kind} artifacts; expected ${expected}.`, true, { agent_id: reviewer, expected_agent: expected, artifact_kind: target.kind, artifact_id: target.id });
+      }
+      const corrected = this.agents.resolve(request, expected);
+      reviewer = corrected.agent_id;
+      reviewerRole = corrected.agent_role;
+    }
+    await this.recordAudit(operation.id, "review.target.resolved", { target_artifact_id: target.id, target_artifact_kind: target.kind, reviewer }, actor);
+    await this.updateExecutionSnapshot(operation.id, { execution_agent_id: reviewer, execution_agent_role: reviewerRole, capabilities: [target.kind], target_artifact_id: target.id, target_artifact_kind: target.kind });
+    return { result: await this.reviewResult(operation, request, reviewer, actor, target.id), reviewer, reviewer_role: reviewerRole };
+  }
+
+  private async reviewResult(operation: OperationRecord, request: string, reviewer: string, actor: string, targetId?: string): Promise<RequestResult> {
+    const reviewed = await this.review.review(operation.id, request, reviewer, actor, targetId);
+    return {
+      operation_id: operation.id,
+      status: reviewed.status,
+      summary: reviewed.summary,
+      completed: reviewed.review_id === undefined ? [] : [reviewed.review_id],
+      blocked: reviewed.status === "blocked" ? [operation.id] : [],
+    };
   }
 
   private async loadOperationAttachments(operation: OperationRecord, command: OperationCommand | undefined): Promise<SourceAttachment[] | undefined> {
@@ -1433,10 +1547,11 @@ export class WorkspaceRuntime {
     if (kind === "authoring") {
       const state = await this.repository.read();
       if (this.hasAuditMarker(operation.id, "artifact.created", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
-      const result = await this.authoring.create(operation.id, operation.request, context.actor);
+      const creator = agent ?? operation.execution_snapshot?.execution_agent_id ?? context.actor;
+      const result = await this.authoring.create(operation.id, operation.request, creator, context.actor);
       const latest = await this.repository.read();
       const finalOperation = latest.operations.find((item) => item.id === operation.id);
-      return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.artifact_id === undefined ? [] : [result.artifact_id], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
+      return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.artifact_id === undefined ? [] : [result.artifact_id], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(creator === undefined ? {} : { agent_id: creator }) };
     }
     if (kind === "review") {
       if (/^issue /iu.test(operation.request)) {
@@ -1448,7 +1563,7 @@ export class WorkspaceRuntime {
       if (this.hasAuditMarker(operation.id, "artifact.reviewed", state) || this.hasAuditMarker(operation.id, "review.reevaluated", state)) return responseFromOperation(await this.completeReplayedOperation(operation));
       const result = /re-?evaluate|quality profile/iu.test(operation.request)
         ? await this.review.reevaluate(operation.id, context.actor)
-        : await this.review.review(operation.id, operation.request, context.actor);
+        : await this.replayReview(operation, context, agent);
       const latest = await this.repository.read();
       const finalOperation = latest.operations.find((item) => item.id === operation.id);
       return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.review_id === undefined ? [] : [result.review_id], blocked: result.status === "blocked" ? [operation.id] : [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
@@ -1770,6 +1885,14 @@ export class WorkspaceRuntime {
       lease_owner: context.actor,
       lease_token: internalId("lease"),
       lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
+      execution_snapshot: {
+        execution_agent_id: resolution.agent_id,
+        execution_agent_role: resolution.agent_role,
+        initiated_by: context.actor,
+        capabilities: ["zhuji"],
+        route_kind: resolution.kind,
+        created_at: now(),
+      },
     };
     await this.repository.commit(initial.revision, (current) => ({
       ...current,
@@ -2176,21 +2299,24 @@ export class WorkspaceRuntime {
           agent_role: resolution.agent_role,
         };
       }
-      const result = /重新評估|re-?evaluate|quality profile/iu.test(trimmed)
-        ? await this.review.reevaluate(operation.id, context.actor)
-        : await this.review.review(operation.id, trimmed, resolution.agent_id, context.actor);
-      const latest = await this.repository.read();
-      const finalOperation = latest.operations.find((item) => item.id === operation.id);
-      return {
-        operation_id: operation.id,
-        status: result.status,
-        summary: result.summary,
-        completed: result.review_id === undefined ? [] : [result.review_id],
-        blocked: result.status === "blocked" ? [operation.id] : [],
-        ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
-        agent_id: resolution.agent_id,
-        agent_role: resolution.agent_role,
-      };
+      if (kind === "review") {
+        const natural = /重新評估|re-?evaluate|quality profile/iu.test(trimmed)
+          ? { result: await this.review.reevaluate(operation.id, context.actor), reviewer: resolution.agent_id, reviewer_role: resolution.agent_role }
+          : await this.runNaturalReview(operation, trimmed, resolution, state.artifacts, context.actor);
+        const latest = await this.repository.read();
+        const finalOperation = latest.operations.find((item) => item.id === operation.id);
+        const reviewId = "review_id" in natural.result ? natural.result.review_id : undefined;
+        return {
+          operation_id: operation.id,
+          status: natural.result.status,
+          summary: natural.result.summary,
+          completed: reviewId === undefined ? [] : [reviewId],
+          blocked: natural.result.status === "blocked" ? [operation.id] : [],
+          ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+          agent_id: natural.reviewer,
+          agent_role: natural.reviewer_role,
+        };
+      }
     }
     if (kind === "build" || kind === "import") {
       await this.repository.commit(created.revision, (current) => ({
@@ -2760,6 +2886,61 @@ export class WorkspaceRuntime {
       throw new CoreError("BLUEPRINT_PRECHECK_REQUIRED", "Blueprint precheck needs a short confirmation before authoring can continue.", true);
     }
   }
+}
+
+const TECHNICAL_REVIEW_ARTIFACT_KINDS: ReadonlySet<ArtifactKind> = new Set(["review", "source_research", "fact_curation", "fact_review"]);
+
+function pluginIdOf(content: string): string | undefined {
+  try {
+    const parsed = JSON.parse(content) as { plugin_id?: unknown };
+    return typeof parsed.plugin_id === "string" ? parsed.plugin_id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function reviewCriticForArtifactKind(kind: ArtifactKind, content: string): string {
+  if (kind === "greeting") return "greetings-critic";
+  if (kind === "world_lore") return "world-lore-critic";
+  if (kind === "plugin") {
+    const pluginId = pluginIdOf(content);
+    if (pluginId === "official.ejs") return "ejs-critic";
+    if (pluginId === "official.html") return "html-critic";
+    return "mvu-critic";
+  }
+  return "character-critic";
+}
+
+type NaturalReviewTarget = { target: ArtifactRecord } | "ambiguous" | undefined;
+
+const REVIEW_KIND_HINTS: Array<{ pattern: RegExp; matches: (artifact: ArtifactRecord) => boolean }> = [
+  { pattern: /character|角色|人物/iu, matches: (artifact) => artifact.kind === "character" },
+  { pattern: /world|lore|世界|設定/iu, matches: (artifact) => artifact.kind === "world_lore" },
+  { pattern: /greeting|開場|問候/iu, matches: (artifact) => artifact.kind === "greeting" },
+  { pattern: /mvu/iu, matches: (artifact) => artifact.kind === "plugin" && (pluginIdOf(artifact.content) ?? "").includes("mvu") },
+  { pattern: /ejs/iu, matches: (artifact) => artifact.kind === "plugin" && (pluginIdOf(artifact.content) ?? "").includes("ejs") },
+  { pattern: /html/iu, matches: (artifact) => artifact.kind === "plugin" && (pluginIdOf(artifact.content) ?? "").includes("html") },
+];
+
+function resolveNaturalReviewTarget(request: string, artifacts: readonly ArtifactRecord[]): NaturalReviewTarget {
+  const pool = artifacts.filter((artifact) => !TECHNICAL_REVIEW_ARTIFACT_KINDS.has(artifact.kind));
+  const named = request.match(/(?:審查|review|檢查|inspect)\s*[:：]?\s*([^\n，,。；;]+)/iu)?.[1]?.trim();
+  if (named !== undefined) {
+    const matches = pool.filter((artifact) => artifact.name.includes(named) || artifact.key.includes(named));
+    if (matches.length === 1) return { target: matches[0]! };
+    if (matches.length > 1) return "ambiguous";
+  }
+  for (const hint of REVIEW_KIND_HINTS) {
+    if (hint.pattern.test(request)) {
+      const matches = pool.filter(hint.matches);
+      if (matches.length === 1) return { target: matches[0]! };
+      if (matches.length > 1) return "ambiguous";
+      return undefined;
+    }
+  }
+  if (pool.length === 1) return { target: pool[0]! };
+  if (pool.length > 1) return "ambiguous";
+  return undefined;
 }
 
 function defaultAgentForTemplate(proposal: TemplateProposalValue): string {

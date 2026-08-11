@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MemoryProjectRepository } from "@st-workspace/core";
+import { MemoryProjectRepository, contentHash } from "@st-workspace/core";
 import { AgentAdapter, AgentRegistry, AgentRouter, WorkspaceRuntime, type AgentDefinition, classifyIntent } from "../src/index.js";
 
 describe("high-level agent compatibility layer", () => {
@@ -132,13 +132,29 @@ describe("high-level agent compatibility layer", () => {
     it("blocks review when artifact creator and reviewer execution agents are identical (BUG2-07)", async () => {
       const repository = new MemoryProjectRepository("demo-self-review-block");
       const runtime = new WorkspaceRuntime(repository);
-      await runtime.submitTemplateProposal(
-        { kind: "character", document: { schema_version: 1, id: "self-review", display_name: "Self", summary: "Character for self review test." } },
-        { actor: "user-actor-1", attachments: [] },
-        { agent: "director" },
-      );
+      const initial = await repository.read();
+      const content = JSON.stringify({ document: { schema_version: 1, id: "self-review", display_name: "Self", summary: "Character for self review test." } });
+      const hash = contentHash(content);
+      await repository.commit(initial.revision, (state) => ({
+        ...state,
+        artifacts: [...state.artifacts, {
+          id: "artifact-self-review",
+          key: "character:self-review",
+          kind: "character",
+          name: "Self",
+          content,
+          media_type: "application/json",
+          content_hash: hash,
+          revision: hash,
+          status: "draft",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          created_by: "character-critic",
+          operation_id: "op-self-review",
+        }],
+      }));
 
-      const reviewed = await runtime.request("Review current character", { actor: "user-actor-2", attachments: [] }, { agent: "director" });
+      const reviewed = await runtime.request("Review current character", { actor: "user-actor-2", attachments: [] }, { agent: "character-critic" });
       expect(reviewed.status).toBe("blocked");
       expect(reviewed.summary).toContain("已阻擋作者自審");
     });
@@ -358,6 +374,297 @@ describe("high-level agent compatibility layer", () => {
 
       const replayed = await runtime.recoverOperation(first.operation_id!, { actor: "server", attachments: [] });
       expect(replayed.status).toBe("completed");
+    });
+  });
+
+  describe("BUG2-07-08 review findings regressions", () => {
+    it("keeps the snapshot execution agent authoritative over options.agent (finding 1)", async () => {
+      const repository = new MemoryProjectRepository("demo-snapshot-authoritative");
+      const runtime = new WorkspaceRuntime(repository);
+      await runtime.submitTemplateProposal(
+        { kind: "character", document: { schema_version: 1, id: "authority", display_name: "Authority", summary: "Document for snapshot authority test." } },
+        { actor: "server", attachments: [] },
+        { agent: "director" },
+      );
+      const reviewRes = await runtime.request("Review current character", { actor: "server", attachments: [] }, { agent: "character-critic" });
+      expect(reviewRes.status).toBe("completed");
+
+      const state = await repository.read();
+      await repository.commit(state.revision, (s) => ({
+        ...s,
+        operations: s.operations.map((o) => o.id === reviewRes.operation_id ? { ...o, status: "running" as const } : o),
+      }));
+
+      const recovered = await runtime.recoverOperation(reviewRes.operation_id!, { actor: "server", attachments: [] }, { agent: "fact-reviewer-1" });
+      expect(recovered.agent_id).toBe("character-critic");
+      const after = await repository.read();
+      expect(after.reviews.at(-1)?.reviewer).toBe("character-critic");
+      expect(after.audit.some((event) => event.event === "recovery.identity.snapshot_authoritative")).toBe(true);
+    });
+
+    it("restores the snapshot creator for natural authoring recovery (finding 3)", async () => {
+      const repository = new MemoryProjectRepository("demo-authoring-recovery");
+      const runtime = new WorkspaceRuntime(repository);
+      const now = new Date().toISOString();
+      await repository.commit(0, (state) => ({
+        ...state,
+        operations: [{
+          id: "op-authoring-recover",
+          kind: "authoring" as const,
+          request: "Draft note: Create character: Resume. Personality: calm and clear.",
+          actor: "server",
+          status: "running" as const,
+          created_at: now,
+          updated_at: now,
+          progress: [],
+          execution_snapshot: {
+            execution_agent_id: "director",
+            execution_agent_role: "orchestrator",
+            initiated_by: "server",
+            route_kind: "authoring",
+            created_at: now,
+          },
+        }],
+      }));
+
+      const recovered = await runtime.recoverOperation("op-authoring-recover", { actor: "server", attachments: [] });
+      expect(recovered.status).toBe("completed");
+      const after = await repository.read();
+      expect(after.artifacts.at(-1)?.created_by).toBe("director");
+    });
+
+    it("restores the snapshot reviewer for natural review recovery (finding 3)", async () => {
+      const repository = new MemoryProjectRepository("demo-review-recovery");
+      const runtime = new WorkspaceRuntime(repository);
+      const now = new Date().toISOString();
+      const content = JSON.stringify({ document: { schema_version: 1, id: "review-target", display_name: "ReviewTarget", summary: "Document for review recovery." } });
+      const hash = contentHash(content);
+      await repository.commit(0, (state) => ({
+        ...state,
+        artifacts: [{
+          id: "artifact-review-target",
+          key: "character:review-target",
+          kind: "character",
+          name: "ReviewTarget",
+          content,
+          media_type: "application/json",
+          content_hash: hash,
+          revision: hash,
+          status: "draft",
+          created_at: now,
+          updated_at: now,
+          created_by: "director",
+          operation_id: "op-review-create",
+        }],
+        operations: [{
+          id: "op-review-recover",
+          kind: "review" as const,
+          request: "Review current character",
+          actor: "server",
+          status: "running" as const,
+          created_at: now,
+          updated_at: now,
+          progress: [],
+          execution_snapshot: {
+            execution_agent_id: "character-critic",
+            execution_agent_role: "critic",
+            initiated_by: "server",
+            route_kind: "review",
+            target_artifact_id: "artifact-review-target",
+            target_artifact_kind: "character",
+            created_at: now,
+          },
+        }],
+      }));
+
+      const recovered = await runtime.recoverOperation("op-review-recover", { actor: "server", attachments: [] });
+      expect(recovered.status).toBe("completed");
+      const after = await repository.read();
+      expect(after.reviews.at(-1)?.reviewer).toBe("character-critic");
+    });
+
+    it("asks for identity recovery when neither snapshot nor audit agent exists (finding 2)", async () => {
+      const repository = new MemoryProjectRepository("demo-identity-recovery-required");
+      const runtime = new WorkspaceRuntime(repository);
+      const now = new Date().toISOString();
+      await repository.commit(0, (state) => ({
+        ...state,
+        operations: [{
+          id: "op-legacy-authoring",
+          kind: "authoring" as const,
+          request: "Draft note: Create character: Orphan. Personality: quiet.",
+          actor: "server",
+          status: "running" as const,
+          created_at: now,
+          updated_at: now,
+          progress: [],
+        }],
+      }));
+
+      const recovered = await runtime.recoverOperation("op-legacy-authoring", { actor: "server", attachments: [] });
+      expect(recovered.status).toBe("needs_input");
+      expect(recovered.summary).toContain("EXECUTION_IDENTITY_RECOVERY_REQUIRED");
+      const after = await repository.read();
+      expect(after.artifacts).toHaveLength(0);
+    });
+
+    it("persists a zhuji snapshot and keeps the creator across crash recovery (finding 4)", async () => {
+      const repository = new MemoryProjectRepository("demo-zhuji-snapshot");
+      const runtime = new WorkspaceRuntime(repository);
+      await runtime.submitTemplateProposal(
+        { kind: "character", document: { schema_version: 1, id: "demo", display_name: "Demo", summary: "Zhuji host character." } },
+        { actor: "server", attachments: [] },
+        { agent: "director" },
+      );
+      const zhuji = await runtime.submitZhujiProposal({
+        kind: "zhuji",
+        character_id: "demo",
+        module: {
+          schema_version: 1,
+          mode: "zhuji",
+          module: "trait_dialogue",
+          title: "特質對話",
+          data: {
+            人物說話節奏: "冷靜、直接，句子短而有明確停頓。",
+            人物語言習慣: { 自稱: "我", 口頭禪: "嗯", 特殊詞彙偏好: "精準詞彙", 方言痕跡: "無", 語氣助詞使用: "克制", 語言情感程度: "低調", 用詞程度選擇: "正式" },
+            扮演關鍵要點: ["先觀察再回答"],
+            Traits: Array.from({ length: 5 }, (_, index) => ({ Trait_Name: `特質${index + 1}`, Embodiments: ["在壓力下保持清晰"], instant: ["這是一段符合語料條件、包含自然標點的角色話語。"], Results: ["對話保持角色一致"] })),
+          },
+        },
+      }, { actor: "server", attachments: [] }, { agent: "zhuji-creator" });
+      expect(zhuji.status).toBe("completed");
+
+      const state = await repository.read();
+      const op = state.operations.find((o) => o.id === zhuji.operation_id);
+      expect(op?.execution_snapshot?.execution_agent_id).toBe("zhuji-creator");
+      await repository.commit(state.revision, (s) => ({
+        ...s,
+        operations: s.operations.map((o) => o.id === zhuji.operation_id ? { ...o, status: "running" as const } : o),
+      }));
+
+      const recovered = await runtime.recoverOperation(zhuji.operation_id!, { actor: "server", attachments: [] });
+      expect(recovered.agent_id).toBe("zhuji-creator");
+    });
+
+    it("routes a generic review to the world-lore critic when only a world artifact exists (finding 5)", async () => {
+      const repository = new MemoryProjectRepository("demo-world-only-review");
+      const runtime = new WorkspaceRuntime(repository);
+      const now = new Date().toISOString();
+      const content = JSON.stringify({ document: { schema_version: 1, id: "world", display_name: "World", summary: "World lore document." } });
+      const hash = contentHash(content);
+      await repository.commit(0, (state) => ({
+        ...state,
+        artifacts: [{
+          id: "artifact-world",
+          key: "world_lore:world",
+          kind: "world_lore",
+          name: "World",
+          content,
+          media_type: "application/json",
+          content_hash: hash,
+          revision: hash,
+          status: "draft",
+          created_at: now,
+          updated_at: now,
+          created_by: "director",
+          operation_id: "op-world-create",
+        }],
+      }));
+
+      const reviewed = await runtime.request("Review current artifact", { actor: "server", attachments: [] });
+      expect(reviewed.status).toBe("completed");
+      const after = await repository.read();
+      expect(after.reviews.at(-1)?.reviewer).toBe("world-lore-critic");
+    });
+
+    it("selects the critic that matches each artifact kind (finding 5)", async () => {
+      const cases: Array<{ key: string; kind: "greeting" | "world_lore" | "character" | "plugin"; content: string; expected: string }> = [
+        { key: "greeting:g1", kind: "greeting", content: JSON.stringify({ document: { schema_version: 1, greetings: [{ id: "g1", kind: "primary", content: "Hello!", character_ids: ["c1"] }] } }), expected: "greetings-critic" },
+        { key: "world_lore:w1", kind: "world_lore", content: JSON.stringify({ document: { schema_version: 1, id: "w1", display_name: "World", summary: "World lore." } }), expected: "world-lore-critic" },
+        { key: "character:c1", kind: "character", content: JSON.stringify({ document: { schema_version: 1, id: "c1", display_name: "Char", summary: "Character." } }), expected: "character-critic" },
+        { key: "plugin:mvu", kind: "plugin", content: JSON.stringify({ plugin_id: "official.mvu-zod", document: { schema_version: 1 } }), expected: "mvu-critic" },
+        { key: "plugin:ejs", kind: "plugin", content: JSON.stringify({ plugin_id: "official.ejs", document: { schema_version: 1 } }), expected: "ejs-critic" },
+        { key: "plugin:html", kind: "plugin", content: JSON.stringify({ plugin_id: "official.html", document: { schema_version: 1 } }), expected: "html-critic" },
+      ];
+      for (const item of cases) {
+        const repository = new MemoryProjectRepository(`demo-critic-${item.key}`);
+        const runtime = new WorkspaceRuntime(repository);
+        const now = new Date().toISOString();
+        const hash = contentHash(item.content);
+        await repository.commit(0, (state) => ({
+          ...state,
+          artifacts: [{
+            id: `artifact-${item.key}`,
+            key: item.key,
+            kind: item.kind,
+            name: item.key,
+            content: item.content,
+            media_type: "application/json",
+            content_hash: hash,
+            revision: hash,
+            status: "draft",
+            created_at: now,
+            updated_at: now,
+            created_by: "director",
+            operation_id: `op-${item.key}`,
+          }],
+        }));
+
+        const reviewed = await runtime.request("Review current artifact", { actor: "server", attachments: [] });
+        expect(reviewed.status).toBe("completed");
+        const after = await repository.read();
+        expect(after.reviews.at(-1)?.reviewer).toBe(item.expected);
+      }
+    });
+
+    it("rejects an explicit critic that cannot review the target kind (finding 5)", async () => {
+      const repository = new MemoryProjectRepository("demo-explicit-wrong-critic");
+      const runtime = new WorkspaceRuntime(repository);
+      const now = new Date().toISOString();
+      const content = JSON.stringify({ document: { schema_version: 1, id: "target", display_name: "Target", summary: "Character to review." } });
+      const hash = contentHash(content);
+      await repository.commit(0, (state) => ({
+        ...state,
+        artifacts: [{
+          id: "artifact-target",
+          key: "character:target",
+          kind: "character",
+          name: "Target",
+          content,
+          media_type: "application/json",
+          content_hash: hash,
+          revision: hash,
+          status: "draft",
+          created_at: now,
+          updated_at: now,
+          created_by: "director",
+          operation_id: "op-target-create",
+        }],
+      }));
+
+      await expect(runtime.request("Review current character", { actor: "server", attachments: [] }, { agent: "world-lore-critic" }))
+        .rejects.toMatchObject({ code: "AGENT_CAPABILITY_DENIED" });
+    });
+
+    it("asks for a specific target when a generic review is ambiguous (finding 5)", async () => {
+      const repository = new MemoryProjectRepository("demo-ambiguous-multi-target");
+      const runtime = new WorkspaceRuntime(repository);
+      const now = new Date().toISOString();
+      const character = JSON.stringify({ document: { schema_version: 1, id: "char", display_name: "Char", summary: "Character." } });
+      const greeting = JSON.stringify({ document: { schema_version: 1, greetings: [{ id: "g1", kind: "primary", content: "Hello!", character_ids: ["char"] }] } });
+      const hashC = contentHash(character);
+      const hashG = contentHash(greeting);
+      await repository.commit(0, (state) => ({
+        ...state,
+        artifacts: [
+          { id: "artifact-char", key: "character:char", kind: "character", name: "Char", content: character, media_type: "application/json", content_hash: hashC, revision: hashC, status: "draft", created_at: now, updated_at: now, created_by: "director", operation_id: "op-char" },
+          { id: "artifact-greet", key: "greeting:g1", kind: "greeting", name: "Greet", content: greeting, media_type: "application/json", content_hash: hashG, revision: hashG, status: "draft", created_at: now, updated_at: now, created_by: "director", operation_id: "op-greet" },
+        ],
+      }));
+
+      const reviewed = await runtime.request("Review current artifact", { actor: "server", attachments: [] });
+      expect(reviewed.status).toBe("needs_input");
+      expect(reviewed.summary).toContain("審查目標不明確");
     });
   });
 });
