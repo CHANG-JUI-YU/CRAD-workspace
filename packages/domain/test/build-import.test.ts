@@ -775,4 +775,102 @@ describe("build, publish and import", () => {
     expect(diagnostics.some((item) => item.startsWith("CARD_IMAGE_MISSING"))).toBe(true);
     expect(diagnostics.join(" ")).toContain("blob");
   });
+
+  it("parses quoted hashes, block scalars and indented list-of-map continuations in YAML", async () => {
+    const repository = new MemoryProjectRepository("yaml-import");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-yaml", "import")] }));
+    const yaml = [
+      'name: "Yukino #1"',
+      "description: |",
+      "  Line one.",
+      "  Line #two.",
+      "personality: >",
+      "  First line.",
+      "  Second line.",
+      "world:",
+      "  - key: value",
+      "    other: nested",
+      "  - key: two",
+      "",
+    ].join("\n");
+    const result = await new ImportService(repository).run("op-yaml", "import card", "importer", [{ name: "card.yaml", content: new TextEncoder().encode(yaml), media_type: "text/yaml" }]);
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    const character = state.artifacts.find((item) => item.kind === "character");
+    expect(character).toBeDefined();
+    const document = JSON.parse(character!.content) as { document: { display_name: string; sections: Array<{ id: string; content: string }> } };
+    expect(document.document.display_name).toBe("Yukino #1");
+    expect(document.document.sections.find((item) => item.id === "personality")?.content).toBe("First line. Second line.");
+    const source = JSON.parse(character!.content) as { document: { extensions: Record<string, { import_source: Record<string, unknown> }> } };
+    const raw = source.document.extensions["card-workspace"]?.import_source;
+    expect(raw.description).toBe("Line one.\nLine #two.\n");
+    const world = raw.world as Array<{ key: string; other?: string }>;
+    expect(world[0]).toEqual({ key: "value", other: "nested" });
+    expect(world[1]).toEqual({ key: "two" });
+  });
+
+  it("maps CCv3 data fields, greetings and character_book into dedicated artifacts", async () => {
+    const repository = new MemoryProjectRepository("ccv3-import");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-ccv3", "import")] }));
+    const card = {
+      spec: "chara_card_v3",
+      spec_version: "3.0",
+      data: {
+        name: "Snow Queen",
+        description: "A cold but caring student.",
+        personality: "Calm and direct.",
+        scenario: "The student council room.",
+        system_prompt: "Act as Yukino.",
+        mes_example: "<START>",
+        first_mes: "Hello.",
+        alternate_greetings: ["Hi.", "Yo."],
+        group_only_greetings: ["Everyone."],
+        character_book: {
+          name: "Snow World",
+          entries: [
+            { keys: ["council"], content: "The council room.", insertion_order: 1 },
+            { keys: ["snow"], content: "Snow falls at noon.", insertion_order: 2 },
+          ],
+        },
+      },
+    };
+    const result = await new ImportService(repository).run("op-ccv3", "import card", "importer", [{ name: "snow.json", content: new TextEncoder().encode(JSON.stringify(card)) }]);
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    expect(state.artifacts.map((item) => item.kind).sort()).toEqual(["character", "greeting", "world_lore"]);
+    const character = state.artifacts.find((item) => item.kind === "character")!;
+    const document = JSON.parse(character.content) as { document: { sections: Array<{ id: string; content: string }> } };
+    expect(document.document.sections.map((item) => item.id).sort()).toEqual(["message-examples", "personality", "scenario", "system-prompt"]);
+    const greeting = state.artifacts.find((item) => item.kind === "greeting")!;
+    const greetings = (JSON.parse(greeting.content) as { document: { greetings: Array<{ kind: string; content: string }> } }).document.greetings;
+    expect(greetings).toEqual([
+      { kind: "primary", content: "Hello.", character_ids: ["snow-queen"] },
+      { kind: "alternate", content: "Hi.", character_ids: ["snow-queen"] },
+      { kind: "alternate", content: "Yo.", character_ids: ["snow-queen"] },
+      { kind: "group_only", content: "Everyone.", character_ids: ["snow-queen"] },
+    ]);
+    const world = state.artifacts.find((item) => item.kind === "world_lore")!;
+    const entries = (JSON.parse(world.content) as { entries: Array<{ id: string; title: string; content: string; aliases: string[] }> }).entries;
+    expect(entries.map((item) => item.title)).toEqual(["council", "snow"]);
+    expect(entries[0]?.content).toBe("The council room.");
+    const report = state.imports[0]?.report.join(" ");
+    expect(report).toContain("→Character(sections: 已建立 4 節)");
+    expect(report).toContain("→Greeting(primary: 已建立)");
+    expect(report).toContain("alternate: 2 組");
+    expect(report).toContain("World(entries: 2 條，書名「Snow World」)");
+    expect(state.operations.find((item) => item.id === "op-ccv3")?.status).toBe("completed");
+  });
+
+  it("imports a V1 top-level first_mes as a primary greeting artifact", async () => {
+    const repository = new MemoryProjectRepository("v1-import");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-v1", "import")] }));
+    const result = await new ImportService(repository).run("op-v1", "import card", "importer", [{ name: "v1.json", content: new TextEncoder().encode(JSON.stringify({ name: "V1 Card", first_mes: "Hi there." })) }]);
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    expect(state.artifacts.map((item) => item.kind).sort()).toEqual(["character", "greeting"]);
+    const greeting = state.artifacts.find((item) => item.kind === "greeting")!;
+    const greetings = (JSON.parse(greeting.content) as { document: { greetings: Array<{ kind: string; content: string }> } }).document.greetings;
+    expect(greetings).toEqual([{ kind: "primary", content: "Hi there.", character_ids: ["v1-card"] }]);
+    expect(state.imports[0]?.report.join(" ")).toContain("Greeting(primary: 已建立)");
+  });
 });
