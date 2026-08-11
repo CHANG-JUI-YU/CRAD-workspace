@@ -49,6 +49,8 @@ import {
   type ZhujiModuleKind,
   type ZhujiProposalValue,
   type ArtifactKind,
+  type RepairInspection,
+  type RepairReport,
 } from "@st-workspace/core";
 import {
   AuthoringService,
@@ -60,9 +62,12 @@ import {
   inferAuthoringKind,
   PALETTE_REQUIRED_MODULES,
   ZHUJI_REQUIRED_MODULES,
+  validateWorkflow,
+  buildRequiredArtifactManifest,
   type IssueUpdateInput,
   type SourceSelectionDecision,
   type SourceFetcher,
+  type WorkflowGateResult,
 } from "@st-workspace/domain";
 import { AgentRouter } from "./agent-router.js";
 
@@ -603,6 +608,108 @@ function isBarePrecheckConfirmation(answer: string): boolean {
   const trimmed = answer.trim();
   if (trimmed.length === 0) return false;
   return /^(確認|是|對|好|可以|沒問題|就用|這樣就好|不用|沒有|暫用)/iu.test(trimmed) || trimmed.length <= 4;
+}
+
+export interface DashboardProjectView {
+  project_id: string;
+  project_name?: string;
+  project_status: string;
+  revision: number;
+  interview_status: string;
+  interview_flow?: string;
+  answers_count: number;
+}
+
+export interface DashboardBlueprint {
+  revision: string;
+  characters: Array<{ id: string; label: string; mode: string }>;
+  world?: Record<string, unknown>;
+}
+
+export interface DashboardArtifactView {
+  id: string;
+  key: string;
+  kind: string;
+  name: string;
+  revision: string;
+  status: string;
+  created_by?: string;
+  based_on?: string;
+  content_hash: string;
+  blueprint_precheck_id?: string;
+  blueprint_precheck_revision?: string;
+}
+
+export interface DashboardFactView {
+  id: string;
+  statement: string;
+  status: string;
+  subject?: string;
+  predicate?: string;
+  value?: string;
+  classification?: string;
+  coverage?: string[];
+  source_ids: string[];
+  review_run_id?: string;
+  decision_id?: string;
+}
+
+export interface DashboardOperationView {
+  id: string;
+  kind: string;
+  status: string;
+  request: string;
+  actor?: string;
+  question?: string;
+  lease_owner?: string;
+  lease_expires_at?: string;
+  attempt?: number;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+  progress_count: number;
+}
+
+export interface DashboardIssueView {
+  id: string;
+  artifact_id: string;
+  code: string;
+  message: string;
+  severity: string;
+  effective_severity: string;
+  status: string;
+  created_at: string;
+}
+
+export interface DashboardSnapshot {
+  project: DashboardProjectView;
+  blueprint?: DashboardBlueprint;
+  prechecks: Array<{ id: string; status: string; candidate_blueprint_revision: string; checks_count: number }>;
+  artifacts: DashboardArtifactView[];
+  facts: DashboardFactView[];
+  sources: Array<{ id: string; candidate_id: string; title: string; revision: string }>;
+  candidates: Array<{ id: string; title: string; url?: string; status: string; official?: boolean }>;
+  operations: DashboardOperationView[];
+  issues: DashboardIssueView[];
+  quality: { level?: string; blocking_severity: string; overrides: Record<string, string> };
+  review_runs: Array<{ id: string; status: string; candidate_occurrence_ids: string[] }>;
+  publishes: Array<{ id: string; content_hash: string; created_at: string; export_json_path?: string; export_png_path?: string }>;
+  builds: Array<{ id: string; status: string; content_hash: string; created_at: string }>;
+  repair: RepairInspection;
+}
+
+export interface DashboardBuildReadiness {
+  modes: { zhuji: boolean; palette: boolean };
+  primary_character?: { id: string; label: string; mode: string };
+  export_modes?: string;
+  entries: Array<{ kind: string; name: string }>;
+  missing: string[];
+  diagnostics: Array<{ code: string; severity: string; message: string }>;
+}
+
+export interface TavernCompatibilityReport {
+  available: boolean;
+  report: string[];
 }
 
 export class WorkspaceRuntime {
@@ -2075,6 +2182,208 @@ export class WorkspaceRuntime {
       completed: state.sources.map((source) => source.id),
       blocked: state.candidates.filter((candidate) => candidate.status === "blocked_external" || candidate.status === "failed").map((candidate) => candidate.id),
     };
+  }
+
+  async dashboardSnapshot(): Promise<DashboardSnapshot> {
+    const state = await this.repository.read();
+    const repair = await this.repository.inspectRepair();
+    const blueprintArtifact = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint");
+    let blueprint: DashboardBlueprint | undefined;
+    if (blueprintArtifact !== undefined) {
+      try {
+        const parsed = JSON.parse(blueprintArtifact.content) as Record<string, unknown>;
+        const characters = Array.isArray(parsed.characters) ? parsed.characters.map((item: unknown) => {
+          const record = item as { id?: unknown; label?: unknown; mode?: unknown };
+          return { id: String(record.id ?? ""), label: String(record.label ?? record.id ?? ""), mode: String(record.mode ?? "") };
+        }) : [];
+        const worldValue = parsed.world !== null && typeof parsed.world === "object" && !Array.isArray(parsed.world) ? parsed.world as Record<string, unknown> : undefined;
+        blueprint = { revision: blueprintArtifact.revision, characters, ...(worldValue === undefined ? {} : { world: worldValue }) };
+      } catch {
+        blueprint = undefined;
+      }
+    }
+    return {
+      project: {
+        project_id: state.project_id,
+        ...(state.project_name === undefined ? {} : { project_name: state.project_name }),
+        project_status: state.project_status,
+        revision: state.revision,
+        interview_status: state.interview.status,
+        ...(state.interview.flow === undefined ? {} : { interview_flow: state.interview.flow }),
+        answers_count: state.interview.answers.length,
+      },
+      ...(blueprint === undefined ? {} : { blueprint }),
+      prechecks: state.blueprint_prechecks.map((precheck) => ({ id: precheck.id, status: precheck.status, candidate_blueprint_revision: precheck.candidate_blueprint_revision, checks_count: precheck.checks.length })),
+      artifacts: state.artifacts.map((artifact) => ({
+        id: artifact.id,
+        key: artifact.key,
+        kind: artifact.kind,
+        name: artifact.name,
+        revision: artifact.revision,
+        status: artifact.status,
+        ...(artifact.created_by === undefined ? {} : { created_by: artifact.created_by }),
+        ...(artifact.based_on === undefined ? {} : { based_on: artifact.based_on }),
+        content_hash: artifact.content_hash,
+        ...(artifact.blueprint_precheck_id === undefined ? {} : { blueprint_precheck_id: artifact.blueprint_precheck_id }),
+        ...(artifact.blueprint_precheck_revision === undefined ? {} : { blueprint_precheck_revision: artifact.blueprint_precheck_revision }),
+      })),
+      facts: state.facts.map((fact) => ({
+        id: fact.id,
+        statement: fact.statement,
+        status: fact.status,
+        ...(fact.subject === undefined ? {} : { subject: fact.subject }),
+        ...(fact.predicate === undefined ? {} : { predicate: fact.predicate }),
+        ...(fact.value === undefined ? {} : { value: fact.value }),
+        ...(fact.classification === undefined ? {} : { classification: fact.classification }),
+        ...(fact.coverage === undefined ? {} : { coverage: fact.coverage }),
+        source_ids: fact.source_ids,
+        ...(fact.review_run_id === undefined ? {} : { review_run_id: fact.review_run_id }),
+        ...(fact.decision_id === undefined ? {} : { decision_id: fact.decision_id }),
+      })),
+      sources: state.sources.map((source) => ({ id: source.id, candidate_id: source.candidate_id, title: source.title, revision: source.revision })),
+      candidates: state.candidates.map((candidate) => ({ id: candidate.id, title: candidate.title, ...(candidate.url === undefined ? {} : { url: candidate.url }), status: candidate.status, ...(candidate.official === undefined ? {} : { official: candidate.official }) })),
+      operations: state.operations.map((operation) => ({
+        id: operation.id,
+        kind: operation.kind,
+        status: operation.status,
+        request: operation.request,
+        ...(operation.actor === undefined ? {} : { actor: operation.actor }),
+        ...(operation.question === undefined ? {} : { question: operation.question }),
+        ...(operation.lease_owner === undefined ? {} : { lease_owner: operation.lease_owner }),
+        ...(operation.lease_expires_at === undefined ? {} : { lease_expires_at: operation.lease_expires_at }),
+        ...(operation.attempt === undefined ? {} : { attempt: operation.attempt }),
+        ...(operation.last_error === undefined ? {} : { last_error: operation.last_error }),
+        created_at: operation.created_at,
+        updated_at: operation.updated_at,
+        progress_count: operation.progress.length,
+      })),
+      issues: state.issues.map((issue) => ({
+        id: issue.id,
+        artifact_id: issue.artifact_id,
+        code: issue.code,
+        message: issue.message,
+        severity: issue.severity,
+        effective_severity: issue.effective_severity,
+        status: issue.status,
+        created_at: issue.created_at,
+      })),
+      quality: { ...(state.quality_profile.level === undefined ? {} : { level: state.quality_profile.level }), blocking_severity: state.quality_profile.blocking_severity, overrides: state.quality_profile.overrides },
+      review_runs: state.fact_review_runs.map((run) => ({ id: run.id, status: run.status, candidate_occurrence_ids: run.candidate_occurrence_ids })),
+      publishes: state.publishes.map((publish) => ({ id: publish.id, content_hash: publish.content_hash, created_at: publish.created_at, ...(publish.export_json_path === undefined ? {} : { export_json_path: publish.export_json_path }), ...(publish.export_png_path === undefined ? {} : { export_png_path: publish.export_png_path }) })),
+      builds: state.builds.map((build) => ({ id: build.id, status: build.status, content_hash: build.content_hash, created_at: build.created_at })),
+      repair,
+    };
+  }
+
+  async publishPreview(): Promise<WorkflowGateResult> {
+    const state = await this.repository.read();
+    return validateWorkflow(state, "publish");
+  }
+
+  async buildReadiness(): Promise<DashboardBuildReadiness> {
+    const state = await this.repository.read();
+    const manifest = buildRequiredArtifactManifest(state);
+    const blueprintArtifact = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint");
+    let primary: { id: string; label: string; mode: string } | undefined;
+    let modes: { zhuji: boolean; palette: boolean } = { zhuji: false, palette: false };
+    if (blueprintArtifact !== undefined) {
+      try {
+        const parsed = JSON.parse(blueprintArtifact.content) as { characters?: Array<{ id?: unknown; label?: unknown; mode?: unknown }> };
+        const characters = Array.isArray(parsed.characters) ? parsed.characters : [];
+        const first = characters[0];
+        if (first !== undefined) primary = { id: String(first.id ?? ""), label: String(first.label ?? first.id ?? ""), mode: String(first.mode ?? "") };
+        for (const character of characters) {
+          const mode = String(character.mode ?? "");
+          if (mode === "zhuji") modes.zhuji = true;
+          if (mode === "palette") modes.palette = true;
+        }
+      } catch {
+        primary = undefined;
+      }
+    }
+    const entries = state.artifacts.filter((artifact) => ["world_lore", "relationship", "greeting", "wardrobe", "plugin"].includes(artifact.kind)).map((artifact) => ({ kind: artifact.kind, name: artifact.name }));
+    const missing = manifest === undefined ? [] : manifest.characters.flatMap((character) => character.missing_modules.map((module) => `${character.character_id}:${module}`));
+    return {
+      modes,
+      ...(primary === undefined ? {} : { primary_character: primary }),
+      ...(manifest === undefined ? {} : { export_modes: manifest.export_modes }),
+      entries,
+      missing,
+      diagnostics: manifest?.diagnostics ?? [],
+    };
+  }
+
+  async tavernCompat(): Promise<TavernCompatibilityReport> {
+    const state = await this.repository.read();
+    const latest = state.publishes.at(-1);
+    if (latest === undefined) return { available: false, report: ["尚未有 publish 記錄，先完成打包再檢查相容性。"] };
+    const report: string[] = [];
+    let jsonText: string | undefined;
+    if (latest.content_ref !== undefined) {
+      const blob = await this.repository.readBlob(latest.content_ref.hash);
+      if (blob === undefined) report.push("content blob 遺失，請執行專案修復。");
+      else jsonText = new TextDecoder("utf-8").decode(blob);
+    } else {
+      jsonText = latest.content;
+    }
+    if (jsonText !== undefined) {
+      try {
+        const card = JSON.parse(jsonText) as Record<string, unknown>;
+        const data = card.data !== null && typeof card.data === "object" && !Array.isArray(card.data) ? card.data as Record<string, unknown> : {};
+        report.push(`spec=${String(card.spec ?? "未知")} spec_version=${String(card.spec_version ?? "未知")}`);
+        const book = data.character_book !== null && typeof data.character_book === "object" && !Array.isArray(data.character_book) ? data.character_book as Record<string, unknown> : undefined;
+        report.push(book === undefined ? "無 character_book 條目。" : `character_book「${String(book.name ?? "未命名")}」共 ${Array.isArray(book.entries) ? book.entries.length : 0} 條目。`);
+        let greetings = 0;
+        if (typeof data.first_mes === "string" && data.first_mes.length > 0) greetings += 1;
+        if (Array.isArray(data.alternate_greetings)) greetings += data.alternate_greetings.filter((item) => typeof item === "string" && item.length > 0).length;
+        report.push(`greeting 首發＋備選共 ${greetings} 組。`);
+        const extensions = data.extensions !== null && typeof data.extensions === "object" && !Array.isArray(data.extensions) ? data.extensions as Record<string, unknown> : {};
+        const pluginIds = Object.keys(extensions).filter((key) => key.startsWith("plugin."));
+        report.push(pluginIds.length === 0 ? "無 plugin 依賴。" : `plugin 需求：${pluginIds.join(", ")}。`);
+      } catch (error) {
+        report.push(`內容 JSON 解析失敗：${error instanceof Error ? error.message : String(error)}。`);
+      }
+    } else {
+      report.push("無內容 JSON（publish 只含 PNG 或 blob 遺失）。");
+    }
+    let pngBytes: Uint8Array | undefined;
+    if (latest.png_ref !== undefined) pngBytes = await this.repository.readBlob(latest.png_ref.hash);
+    else if (latest.png_base64 !== undefined) pngBytes = Buffer.from(latest.png_base64, "base64");
+    if (pngBytes !== undefined) {
+      const bytes = pngBytes;
+      if (bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+        const width = (((bytes[16] ?? 0) << 24) | ((bytes[17] ?? 0) << 16) | ((bytes[18] ?? 0) << 8) | (bytes[19] ?? 0)) >>> 0;
+        const height = (((bytes[20] ?? 0) << 24) | ((bytes[21] ?? 0) << 16) | ((bytes[22] ?? 0) << 8) | (bytes[23] ?? 0)) >>> 0;
+        report.push(`PNG 尺寸 ${width}x${height}px。`);
+      } else {
+        report.push("PNG 簽名不符（可能不是有效 PNG）。");
+      }
+      try {
+        const decoded = readCardFromPng(bytes);
+        report.push(`PNG 內嵌卡片以 ${decoded.authority} 解析成功。`);
+        if (jsonText !== undefined) {
+          try {
+            const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+            report.push(JSON.stringify(decoded.card) === JSON.stringify(parsed.data ?? parsed) ? "PNG 內嵌卡片與 JSON 內容一致。" : "PNG 內嵌卡片與 JSON 內容不一致（欄位順序或版本差異）。");
+          } catch {
+            report.push("JSON 無法解析，無法比對 PNG 內嵌卡片。");
+          }
+        }
+      } catch (error) {
+        report.push(`PNG 卡片解析失敗：${error instanceof Error ? error.message : String(error)}。`);
+      }
+    } else {
+      report.push("無 PNG 輸出。");
+    }
+    return { available: true, report };
+  }
+
+  async repairPreview(): Promise<RepairInspection> {
+    return this.repository.inspectRepair();
+  }
+
+  async repairRun(): Promise<RepairReport> {
+    return this.repository.runRepair();
   }
 
   private async resumePendingIfAnswered(pending: OperationRecord, trimmed: string, context: WorkspaceContext, kind: string): Promise<RequestResult | undefined> {

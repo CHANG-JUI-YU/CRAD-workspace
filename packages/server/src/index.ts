@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { TextDecoder } from "node:util";
 import { HttpSourceFetcher } from "@st-workspace/adapters";
-import { FileAttachmentStore, FileProjectRepository, templateProposalJsonSchema, type AdaptationDecision, type RequestResult, type SourceAttachment, zhujiProposalJsonSchema } from "@st-workspace/core";
+import { CoreError, FileAttachmentStore, FileProjectRepository, templateProposalJsonSchema, type AdaptationDecision, type IssueSeverity, type RequestResult, type SourceAttachment, zhujiProposalJsonSchema } from "@st-workspace/core";
 import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
 import { dashboard } from "./dashboard.js";
 
@@ -281,6 +281,18 @@ function agentValue(value: unknown): string | undefined {
   return typeof agent === "string" && agent.trim().length > 0 ? agent : undefined;
 }
 
+function operationIdValue(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const operationId = (value as { operation_id?: unknown }).operation_id;
+  return typeof operationId === "string" && operationId.trim().length > 0 ? operationId : undefined;
+}
+
+function qualityLevelValue(value: unknown): "none" | "light" | "normal" | "strict" | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const level = (value as { level?: unknown }).level;
+  return level === "none" || level === "light" || level === "normal" || level === "strict" ? level : undefined;
+}
+
 function characterIdValue(value: unknown): string | undefined {
   if (value === null || typeof value !== "object") return undefined;
   const characterId = (value as { character_id?: unknown }).character_id;
@@ -389,6 +401,26 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       }
       if (request.method === "GET" && url.pathname === "/workspace/status") {
         json(response, 200, options.projectManager === undefined ? await options.runtime!.status() : await options.projectManager.status());
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/data") {
+        json(response, 200, await (await getRuntime()).dashboardSnapshot());
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/publish/preview") {
+        json(response, 200, await (await getRuntime()).publishPreview());
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/tavern/compat") {
+        json(response, 200, await (await getRuntime()).tavernCompat());
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/build/preview") {
+        json(response, 200, await (await getRuntime()).buildReadiness());
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/repair/preview") {
+        json(response, 200, await (await getRuntime()).repairPreview());
         return;
       }
       if (request.method === "GET" && url.pathname === "/workspace/health") {
@@ -518,6 +550,47 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         }
         const { agent, ...issue } = input;
         json(response, 200, await (await getRuntime()).updateIssue(issue, { actor, attachments: [] }, agent === undefined ? {} : { agent }));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/quality/profile") {
+        const parsed = await body(request);
+        const level = qualityLevelValue(parsed);
+        if (level === undefined) {
+          json(response, 400, { error: "QUALITY_LEVEL_REQUIRED" });
+          return;
+        }
+        const overrides: Record<string, IssueSeverity> = {};
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && "overrides" in parsed && parsed.overrides !== null && typeof parsed.overrides === "object" && !Array.isArray(parsed.overrides)) {
+          for (const [key, value] of Object.entries(parsed.overrides as Record<string, unknown>)) {
+            if (value === "critical" || value === "error" || value === "warning" || value === "info") overrides[key] = value;
+          }
+        }
+        json(response, 200, await (await getRuntime()).configureQualityProfile(level, { actor, attachments: [] }, overrides));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/operation/recover") {
+        const parsed = await body(request);
+        const operationId = operationIdValue(parsed);
+        if (operationId === undefined) {
+          json(response, 400, { error: "OPERATION_ID_REQUIRED" });
+          return;
+        }
+        json(response, 200, await (await getRuntime()).recoverOperation(operationId, { actor, attachments: [] }));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/operation/fail") {
+        const parsed = await body(request);
+        const operationId = operationIdValue(parsed);
+        if (operationId === undefined) {
+          json(response, 400, { error: "OPERATION_ID_REQUIRED" });
+          return;
+        }
+        await (await getRuntime()).failOperation(operationId, new CoreError("OPERATION_CANCELLED", "The operation was cancelled from the workspace console", true), actor);
+        json(response, 200, { status: "cancelled", operation_id: operationId });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/repair/run") {
+        json(response, 200, await (await getRuntime()).repairRun());
         return;
       }
       if (request.method === "POST" && url.pathname === "/mcp") {

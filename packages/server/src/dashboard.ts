@@ -302,6 +302,129 @@ export function dashboard(): string {
       </details>
     </section>
 
+    <section class="panel panel-wide" aria-labelledby="precheck-heading">
+      <div class="panel-heading">
+        <div>
+          <h2 id="precheck-heading">Blueprint 預檢矩陣</h2>
+          <p class="muted">訪談預檢的逐角色 × 逐維度狀態；不要求輸入 precheck ID 或 revision。</p>
+        </div>
+      </div>
+      <div id="prechecks-message" class="panel-message" aria-live="polite">尚未取得預檢資料。</div>
+      <div id="precheck-matrix" class="precheck-matrix"></div>
+    </section>
+
+    <section class="panel panel-wide" aria-labelledby="readiness-heading">
+      <div class="panel-heading">
+        <div>
+          <h2 id="readiness-heading">Publish 就緒檢查</h2>
+          <p class="muted">正式裁決來自既有 workflow gate；顯示每條診斷的 code 與嚴重度。</p>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button id="check-readiness" class="primary" type="button">重新檢查</button>
+      </div>
+      <div id="readiness-message" class="panel-message" aria-live="polite">尚未執行就緒檢查。</div>
+      <div id="readiness-list" class="readiness-list"></div>
+    </section>
+
+    <section class="panel panel-wide" aria-labelledby="artifact-heading">
+      <div class="panel-heading">
+        <div>
+          <h2 id="artifact-heading">Artifact 工作台</h2>
+          <p class="muted">顯示 revision、Blueprint binding、建立者與狀態；原始內容展開查看。</p>
+        </div>
+      </div>
+      <div id="artifact-message" class="panel-message" aria-live="polite">尚未取得 artifact 資料。</div>
+      <div id="artifact-list" class="artifact-list"></div>
+      <details class="raw-json">
+        <summary>查看目前 Blueprint 原始 JSON</summary>
+        <pre id="blueprint-json">{}</pre>
+      </details>
+    </section>
+
+    <section class="panel" aria-labelledby="quality-heading">
+      <div class="panel-heading">
+        <h2 id="quality-heading">品質門檻</h2>
+      </div>
+      <label for="quality-level">Quality level</label>
+      <select id="quality-level">
+        <option value="none">none（不阻擋）</option>
+        <option value="light">light（只擋 critical）</option>
+        <option value="normal">normal（擋 error 以上）</option>
+        <option value="strict">strict（擋 warning 以上）</option>
+      </select>
+      <div class="form-actions">
+        <button id="apply-quality" class="primary" type="button">套用品質設定</button>
+      </div>
+      <div id="quality-message" class="panel-message" aria-live="polite">尚未取得品質設定。</div>
+      <details class="raw-json">
+        <summary>查看品質原始 JSON</summary>
+        <pre id="quality-json">{}</pre>
+      </details>
+    </section>
+
+    <section class="panel panel-wide" aria-labelledby="source-fact-heading">
+      <div class="panel-heading">
+        <div>
+          <h2 id="source-fact-heading">來源與事實</h2>
+          <p class="muted">候選來源、已入庫來源與知識事實的目前狀態。</p>
+        </div>
+      </div>
+      <div id="source-fact-message" class="panel-message" aria-live="polite">尚未取得來源與事實資料。</div>
+      <div id="candidate-list" class="candidate-list"></div>
+      <div id="source-list" class="source-list"></div>
+      <div id="fact-list" class="fact-list"></div>
+    </section>
+
+    <section class="panel panel-wide" aria-labelledby="build-heading">
+      <div class="panel-heading">
+        <div>
+          <h2 id="build-heading">打包選擇預覽</h2>
+          <p class="muted">目前可用的打包模式、主要角色與缺少的模組；由既有 manifest 計算。</p>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button id="check-build" class="primary" type="button">更新打包預覽</button>
+      </div>
+      <div id="build-message" class="panel-message" aria-live="polite">尚未取得打包預覽。</div>
+      <div id="build-summary" class="build-summary"></div>
+      <div id="build-diagnostics" class="build-diagnostics"></div>
+    </section>
+
+    <section class="panel panel-wide" aria-labelledby="operation-heading">
+      <div class="panel-heading">
+        <div>
+          <h2 id="operation-heading">Operation 管理</h2>
+          <p class="muted">列出 operation 與 lease/attempt 資訊；可取消卡住的 operation 或重新嘗試。</p>
+        </div>
+      </div>
+      <div id="operation-message" class="panel-message" aria-live="polite">尚未取得 operation 資料。</div>
+      <div id="operation-list" class="operation-list"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="repair-heading">
+      <div class="panel-heading">
+        <h2 id="repair-heading">專案修復</h2>
+      </div>
+      <div class="form-actions">
+        <button id="repair-preview" class="primary" type="button">檢查殘留</button>
+        <button id="repair-run" type="button">執行修復</button>
+      </div>
+      <div id="repair-message" class="panel-message" aria-live="polite">尚未執行修復檢查。</div>
+      <div id="repair-report" class="repair-report"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="tavern-heading">
+      <div class="panel-heading">
+        <h2 id="tavern-heading">Tavern 相容性</h2>
+      </div>
+      <div class="form-actions">
+        <button id="check-tavern" class="primary" type="button">檢查相容性</button>
+      </div>
+      <div id="tavern-message" class="panel-message" aria-live="polite">尚未執行相容性檢查。</div>
+      <div id="tavern-report" class="tavern-report"></div>
+    </section>
+
     <section class="panel panel-wide" aria-labelledby="deferred-heading">
       <div class="panel-heading">
         <h2 id="deferred-heading">後續提供</h2>
@@ -820,7 +943,7 @@ export function dashboard(): string {
         if (state.busy) return;
         setBusy(true);
         setNotice("info", "重新整理中…");
-        var outcomes = await Promise.allSettled([loadProjects(), loadStatus(), loadAgents(), loadInterview()]);
+        var outcomes = await Promise.allSettled([loadProjects(), loadStatus(), loadAgents(), loadInterview(), loadDashboardData()]);
         var failures = outcomes.filter(function (outcome) { return outcome.status === "rejected"; });
         if (failures.length > 0) {
           renderLatestError("重新整理", failures[0].reason, "重新整理有 " + failures.length + " 個區塊失敗");
@@ -909,6 +1032,373 @@ export function dashboard(): string {
         });
       }
 
+      function renderPrecheckMatrix(prechecks) {
+        var target = byId("precheck-matrix");
+        target.textContent = "";
+        if (!Array.isArray(prechecks) || prechecks.length === 0) {
+          byId("prechecks-message").textContent = "目前沒有 Blueprint 預檢記錄。";
+          return;
+        }
+        byId("prechecks-message").textContent = "共 " + prechecks.length + " 筆預檢記錄。";
+        var latest = prechecks[prechecks.length - 1];
+        var checks = Array.isArray(latest.checks) ? latest.checks : [];
+        if (checks.length === 0) {
+          target.textContent = "最新預檢沒有檢查項目。";
+          return;
+        }
+        var rows = [];
+        var seen = {};
+        for (var i = 0; i < checks.length; i += 1) {
+          var check = checks[i];
+          if (!isRecord(check)) continue;
+          var subject = firstString(check, ["subject_id", "subject"]) || "?";
+          var dimension = firstString(check, ["dimension"]) || "?";
+          var uncertainty = firstString(check, ["uncertainty"]) || "?";
+          var impact = firstString(check, ["impact"]) || "?";
+          var basis = firstString(check, ["basis"]) || "?";
+          var action = firstString(check, ["action"]) || "?";
+          var key = subject + "\u0000" + dimension;
+          if (seen[key]) continue;
+          seen[key] = true;
+          var row = document.createElement("div");
+          row.className = "precheck-row";
+          var subjectCell = document.createElement("span");
+          subjectCell.textContent = subject;
+          var dimensionCell = document.createElement("span");
+          dimensionCell.textContent = dimension;
+          var statusCell = document.createElement("span");
+          statusCell.className = "status-badge " + statusClass(check.status || "active");
+          statusCell.textContent = check.status === "resolved" ? "已解決" : (check.status === "confirmed" ? "已確認" : "待處理");
+          var metaCell = document.createElement("span");
+          metaCell.textContent = "uncertainty: " + uncertainty + " / impact: " + impact + " / basis: " + basis + " / action: " + action;
+          row.append(subjectCell, dimensionCell, statusCell, metaCell);
+          rows.push(row);
+        }
+        target.append.apply(target, rows);
+        if (rows.length === 0) target.textContent = "最新預檢沒有可顯示的檢查項目。";
+      }
+
+      function renderReadiness(diagnostics) {
+        var target = byId("readiness-list");
+        target.textContent = "";
+        if (!Array.isArray(diagnostics) || diagnostics.length === 0) {
+          byId("readiness-message").textContent = "就緒：可以發布。";
+          return;
+        }
+        var blocking = diagnostics.filter(function (item) { return item.severity === "error"; });
+        byId("readiness-message").textContent = blocking.length === 0
+          ? "有 " + diagnostics.length + " 條警告，不阻擋發布。"
+          : "有 " + blocking.length + " 條阻擋診斷；修復後再發布。";
+        for (var i = 0; i < diagnostics.length; i += 1) {
+          var item = diagnostics[i];
+          if (!isRecord(item)) continue;
+          var row = document.createElement("div");
+          row.className = "readiness-row";
+          var badge = document.createElement("span");
+          badge.className = "status-badge " + (item.severity === "error" ? "error" : "active");
+          badge.textContent = item.severity === "error" ? "阻擋" : "警告";
+          var text = document.createElement("span");
+          text.textContent = (firstString(item, ["code"]) || "?") + "： " + (firstString(item, ["message"]) || "");
+          row.append(badge, text);
+          target.append(row);
+        }
+      }
+
+      function renderArtifactList(snapshot) {
+        var target = byId("artifact-list");
+        target.textContent = "";
+        var artifacts = Array.isArray(snapshot.artifacts) ? snapshot.artifacts : [];
+        if (artifacts.length === 0) {
+          byId("artifact-message").textContent = "目前沒有 artifact。";
+        } else {
+          byId("artifact-message").textContent = "共 " + artifacts.length + " 個 artifact。";
+        }
+        for (var i = 0; i < artifacts.length; i += 1) {
+          var artifact = artifacts[i];
+          if (!isRecord(artifact)) continue;
+          var row = document.createElement("div");
+          row.className = "artifact-row";
+          var badge = document.createElement("span");
+          badge.className = "status-badge " + statusClass(artifact.status || "draft");
+          badge.textContent = firstString(artifact, ["kind"]) || "?";
+          var name = document.createElement("span");
+          name.textContent = firstString(artifact, ["name"]) || firstString(artifact, ["id"]) || "?";
+          var meta = document.createElement("span");
+          var parts = ["rev " + (firstString(artifact, ["revision"]) || "?")];
+          if (artifact.created_by) parts.push("by " + artifact.created_by);
+          if (artifact.blueprint_precheck_id) parts.push("binding " + artifact.blueprint_precheck_revision || "?");
+          meta.textContent = parts.join(" · ");
+          row.append(badge, name, meta);
+          target.append(row);
+        }
+        var blueprint = snapshot.blueprint;
+        byId("blueprint-json").textContent = blueprint === undefined ? "{}" : jsonText(blueprint);
+      }
+
+      function renderOperationList(operations) {
+        var target = byId("operation-list");
+        target.textContent = "";
+        if (!Array.isArray(operations) || operations.length === 0) {
+          byId("operation-message").textContent = "目前沒有 operation。";
+          return;
+        }
+        byId("operation-message").textContent = "共 " + operations.length + " 個 operation。";
+        for (var i = 0; i < operations.length; i += 1) {
+          var operation = operations[i];
+          if (!isRecord(operation)) continue;
+          var row = document.createElement("div");
+          row.className = "operation-row";
+          var badge = document.createElement("span");
+          badge.className = "status-badge " + statusClass(operation.status || "unknown");
+          badge.textContent = firstString(operation, ["status"]) || "?";
+          var label = document.createElement("span");
+          var labelParts = [firstString(operation, ["kind"]) || "?", firstString(operation, ["request"]) || ""];
+          if (operation.attempt) labelParts.push("attempt " + operation.attempt);
+          if (operation.lease_owner) labelParts.push("lease " + operation.lease_owner + (operation.lease_expires_at ? " ~ " + operation.lease_expires_at : ""));
+          if (operation.last_error) labelParts.push("error: " + operation.last_error);
+          label.textContent = labelParts.join(" · ");
+          row.append(badge, label);
+          var actions = document.createElement("span");
+          actions.className = "inline-actions";
+          var recover = document.createElement("button");
+          recover.type = "button";
+          recover.textContent = "重試";
+          recover.addEventListener("click", function () { postOperation("recover", operation.id); });
+          var fail = document.createElement("button");
+          fail.type = "button";
+          fail.textContent = "取消";
+          fail.addEventListener("click", function () { postOperation("fail", operation.id); });
+          actions.append(recover, fail);
+          row.append(actions);
+          target.append(row);
+        }
+      }
+
+      function renderQuality(snapshot) {
+        var quality = snapshot.quality;
+        if (quality === undefined) {
+          byId("quality-message").textContent = "尚未設定品質門檻。";
+          byId("quality-json").textContent = "{}";
+          return;
+        }
+        var level = firstString(quality, ["level"]) || "normal";
+        byId("quality-level").value = level;
+        byId("quality-message").textContent = "目前門檻： " + level + "（阻擋 " + (firstString(quality, ["blocking_severity"]) || "?") + " 以上）。";
+        byId("quality-json").textContent = jsonText(quality);
+      }
+
+      function renderSourceFact(snapshot) {
+        var candidates = Array.isArray(snapshot.candidates) ? snapshot.candidates : [];
+        var sources = Array.isArray(snapshot.sources) ? snapshot.sources : [];
+        var facts = Array.isArray(snapshot.facts) ? snapshot.facts : [];
+        var candidateTarget = byId("candidate-list");
+        candidateTarget.textContent = "";
+        candidateTarget.textContent = candidates.length === 0 ? "沒有候選來源。" : "候選來源 " + candidates.length + " 筆";
+        for (var i = 0; i < candidates.length; i += 1) {
+          var candidate = candidates[i];
+          if (!isRecord(candidate)) continue;
+          var row = document.createElement("div");
+          row.className = "fact-row";
+          var badge = document.createElement("span");
+          badge.className = "status-badge " + statusClass(candidate.status || "pending");
+          badge.textContent = firstString(candidate, ["status"]) || "?";
+          var text = document.createElement("span");
+          text.textContent = (firstString(candidate, ["title"]) || "?") + (candidate.official ? "（官方）" : "");
+          row.append(badge, text);
+          candidateTarget.append(row);
+        }
+        var sourceTarget = byId("source-list");
+        sourceTarget.textContent = "";
+        sourceTarget.textContent = sources.length === 0 ? "沒有已入庫來源。" : "已入庫來源 " + sources.length + " 筆";
+        for (var j = 0; j < sources.length; j += 1) {
+          var source = sources[j];
+          if (!isRecord(source)) continue;
+          var sourceRow = document.createElement("div");
+          sourceRow.className = "fact-row";
+          sourceRow.textContent = firstString(source, ["title"]) || "?";
+          sourceTarget.append(sourceRow);
+        }
+        var factTarget = byId("fact-list");
+        factTarget.textContent = "";
+        factTarget.textContent = facts.length === 0 ? "沒有知識事實。" : "知識事實 " + facts.length + " 筆";
+        for (var k = 0; k < facts.length; k += 1) {
+          var fact = facts[k];
+          if (!isRecord(fact)) continue;
+          var factRow = document.createElement("div");
+          factRow.className = "fact-row";
+          var factBadge = document.createElement("span");
+          factBadge.className = "status-badge " + statusClass(fact.status || "candidate");
+          factBadge.textContent = firstString(fact, ["status"]) || "?";
+          var factText = document.createElement("span");
+          factText.textContent = (firstString(fact, ["statement"]) || "");
+          factRow.append(factBadge, factText);
+          factTarget.append(factRow);
+        }
+      }
+
+      function renderBuildReadiness(readiness) {
+        var target = byId("build-summary");
+        target.textContent = "";
+        if (!isRecord(readiness)) {
+          byId("build-message").textContent = "沒有打包預覽資料。";
+          return;
+        }
+        var parts = [];
+        var modes = isRecord(readiness.modes) ? readiness.modes : {};
+        if (modes.zhuji) parts.push("珠璣可用");
+        if (modes.palette) parts.push("調色盤可用");
+        if (parts.length === 0) parts.push("尚無可用打包模式");
+        if (isRecord(readiness.primary_character)) {
+          parts.push("主要角色 " + (firstString(readiness.primary_character, ["label"]) || "?"));
+        }
+        byId("build-message").textContent = parts.join(" · ");
+        var entries = Array.isArray(readiness.entries) ? readiness.entries : [];
+        var entryTarget = document.createElement("div");
+        entryTarget.textContent = entries.length === 0 ? "沒有附加條目。" : "附加條目：" + entries.map(function (entry) { return (isRecord(entry) ? (firstString(entry, ["kind"]) || "?") + ":" + (firstString(entry, ["name"]) || "?") : "?"); }).join("、");
+        target.append(entryTarget);
+        var missing = Array.isArray(readiness.missing) ? readiness.missing : [];
+        var missingTarget = document.createElement("div");
+        missingTarget.textContent = missing.length === 0 ? "模組齊全。" : "缺少模組：" + missing.join("、");
+        target.append(missingTarget);
+        var diagnosticsTarget = byId("build-diagnostics");
+        diagnosticsTarget.textContent = "";
+        var diagnostics = Array.isArray(readiness.diagnostics) ? readiness.diagnostics : [];
+        for (var i = 0; i < diagnostics.length; i += 1) {
+          var item = diagnostics[i];
+          if (!isRecord(item)) continue;
+          var row = document.createElement("div");
+          row.className = "readiness-row";
+          row.textContent = (firstString(item, ["code"]) || "?") + "： " + (firstString(item, ["message"]) || "");
+          diagnosticsTarget.append(row);
+        }
+      }
+
+      function renderTavern(report) {
+        var target = byId("tavern-report");
+        target.textContent = "";
+        if (!isRecord(report)) {
+          byId("tavern-message").textContent = "沒有相容性資料。";
+          return;
+        }
+        byId("tavern-message").textContent = report.available === true ? "相容性檢查完成。" : "目前無法檢查相容性。";
+        var items = Array.isArray(report.report) ? report.report : [];
+        for (var i = 0; i < items.length; i += 1) {
+          var row = document.createElement("div");
+          row.className = "fact-row";
+          row.textContent = items[i];
+          target.append(row);
+        }
+      }
+
+      function renderRepairInspection(inspection) {
+        var target = byId("repair-report");
+        target.textContent = "";
+        if (!isRecord(inspection)) {
+          byId("repair-message").textContent = "沒有修復資料。";
+          return;
+        }
+        var legacy = Array.isArray(inspection.legacy_files) ? inspection.legacy_files : [];
+        var orphan = Array.isArray(inspection.orphan_backups) ? inspection.orphan_backups : [];
+        if (legacy.length === 0 && orphan.length === 0) {
+          byId("repair-message").textContent = "沒有發現殘留 legacy 檔案或孤兒備份。";
+          return;
+        }
+        byId("repair-message").textContent = "發現需要處理的項目。";
+        if (legacy.length > 0) {
+          var legacyRow = document.createElement("div");
+          legacyRow.textContent = "legacy 檔案：" + legacy.join("、");
+          target.append(legacyRow);
+        }
+        if (orphan.length > 0) {
+          var orphanRow = document.createElement("div");
+          orphanRow.textContent = "孤兒備份：" + orphan.join("、");
+          target.append(orphanRow);
+        }
+      }
+
+      function renderRepairReport(report) {
+        var target = byId("repair-report");
+        target.textContent = "";
+        if (!isRecord(report)) {
+          byId("repair-message").textContent = "修復執行沒有回報。";
+          return;
+        }
+        var archived = Array.isArray(report.archived) ? report.archived : [];
+        byId("repair-message").textContent = archived.length === 0 ? "修復完成：沒有需要歸檔的項目。" : "修復完成：已歸檔 " + archived.join("、");
+      }
+
+      async function loadDashboardData() {
+        try {
+          var payload = await requestJson("/workspace/dashboard/data");
+          renderPrecheckMatrix(payload.prechecks);
+          renderArtifactList(payload);
+          renderOperationList(payload.operations);
+          renderQuality(payload);
+          renderSourceFact(payload);
+          renderRepairInspection(payload.repair);
+          return payload;
+        } catch (error) {
+          setAreaError("prechecks-message", error);
+          throw error;
+        }
+      }
+
+      function postOperation(action, operationId) {
+        void runTask(action === "recover" ? "重試 operation" : "取消 operation", async function () {
+          var payload = await postJson("/workspace/operation/" + action, { operation_id: operationId });
+          await Promise.allSettled([loadDashboardData()]);
+          return payload;
+        });
+      }
+
+      function applyQuality() {
+        if (state.busy) return;
+        var level = byId("quality-level").value;
+        void runTask("套用品質設定", async function () {
+          var payload = await postJson("/workspace/quality/profile", { level: level });
+          await Promise.allSettled([loadDashboardData()]);
+          return payload;
+        });
+      }
+
+      function runRepair() {
+        void runTask("執行修復", async function () {
+          var payload = await postJson("/workspace/repair/run", {});
+          renderRepairReport(payload);
+          return payload;
+        });
+      }
+
+      byId("check-readiness").addEventListener("click", function () {
+        void runTask("Publish 就緒檢查", async function () {
+          var payload = await requestJson("/workspace/publish/preview");
+          renderReadiness(payload.diagnostics);
+          return payload;
+        });
+      });
+      byId("check-build").addEventListener("click", function () {
+        void runTask("打包預覽", async function () {
+          var payload = await requestJson("/workspace/build/preview");
+          renderBuildReadiness(payload);
+          return payload;
+        });
+      });
+      byId("check-tavern").addEventListener("click", function () {
+        void runTask("Tavern 相容性", async function () {
+          var payload = await requestJson("/workspace/tavern/compat");
+          renderTavern(payload);
+          return payload;
+        });
+      });
+      byId("repair-preview").addEventListener("click", function () {
+        void runTask("修復檢查", async function () {
+          var payload = await requestJson("/workspace/repair/preview");
+          renderRepairInspection(payload);
+          return payload;
+        });
+      });
+      byId("repair-run").addEventListener("click", runRepair);
+      byId("apply-quality").addEventListener("click", applyQuality);
       byId("refresh").addEventListener("click", function () { void refresh(); });
       byId("submit-request").addEventListener("click", submitRequest);
       byId("select-project").addEventListener("click", selectProject);

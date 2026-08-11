@@ -1041,6 +1041,17 @@ export interface ProjectRepository {
   commit(expectedRevision: number, mutate: (state: ProjectState) => ProjectState, writeSet?: RepositoryWriteSet): Promise<ProjectState>;
   readBlob(hash: string): Promise<Uint8Array | undefined>;
   writeBlob(hash: string, content: Uint8Array): Promise<void>;
+  inspectRepair(): Promise<RepairInspection>;
+  runRepair(): Promise<RepairReport>;
+}
+
+export interface RepairInspection {
+  legacy_files: string[];
+  orphan_backups: string[];
+}
+
+export interface RepairReport {
+  archived: string[];
 }
 
 /** A file path relative to the project directory, committed with the state. */
@@ -1208,6 +1219,14 @@ export class MemoryProjectRepository implements ProjectRepository {
     await this.blobs.put(hash, content);
   }
 
+  async inspectRepair(): Promise<RepairInspection> {
+    return { legacy_files: [], orphan_backups: [] };
+  }
+
+  async runRepair(): Promise<RepairReport> {
+    return { archived: [] };
+  }
+
   async read(): Promise<ProjectState> {
     await this.queue;
     return cloneState(this.state);
@@ -1308,6 +1327,44 @@ export class FileProjectRepository implements ProjectRepository {
 
   async writeBlob(hash: string, content: Uint8Array): Promise<void> {
     await this.blobs.put(hash, content);
+  }
+
+  async inspectRepair(): Promise<RepairInspection> {
+    if (this.layout !== "project") return { legacy_files: [], orphan_backups: [] };
+    const legacy_files: string[] = [];
+    const legacyStatePath = path.join(this.projectDirectory, "state.json");
+    const proposalsPath = path.join(this.projectDirectory, "proposals");
+    const exportsPath = path.join(this.projectDirectory, "exports");
+    for (const entry of [legacyStatePath, proposalsPath, exportsPath]) {
+      try {
+        await stat(entry);
+        legacy_files.push(path.basename(entry));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    const orphan_backups: string[] = [];
+    const backupsPath = path.join(this.projectDirectory, ".workspace", "legacy-layout");
+    try {
+      const entries = await readdir(backupsPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory()) orphan_backups.push(entry.name);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    return { legacy_files, orphan_backups };
+  }
+
+  async runRepair(): Promise<RepairReport> {
+    const inspection = await this.inspectRepair();
+    const archived: string[] = [];
+    if (inspection.legacy_files.length > 0) {
+      const state = await this.read();
+      await this.archiveExistingLegacyLayout(state);
+      for (const entry of inspection.legacy_files) archived.push(entry);
+    }
+    return { archived };
   }
 
   private stateFileFor(projectId: string): string {
