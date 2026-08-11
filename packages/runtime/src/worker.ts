@@ -196,25 +196,44 @@ export class WorkspaceWorker {
     if (claimed === undefined) return;
     const token = claimed.lease_token ?? "";
     const attempt = claimed.attempt ?? 1;
-    const lease = { owner: actor, token };
+    const lease: Readonly<{ owner: string; token: string; generation?: number }> = {
+      owner: actor,
+      token,
+      ...(claimed.fencing_generation === undefined ? {} : { generation: claimed.fencing_generation }),
+    };
     this.attempts.set(operationId, attempt);
     this.activeOperationId = operationId;
     this.onEvent({ type: "operation.started", operation_id: operationId, attempt });
     let leaseLost = false;
+    const abortController = new AbortController();
     const renewer = setInterval(() => {
-      void runtime.renewOperationLease(operationId, actor, token).then((renewed) => {
-        if (!renewed) leaseLost = true;
-      });
+      runtime.renewOperationLease(operationId, actor, token)
+        .then((renewed) => {
+          if (!renewed) {
+            leaseLost = true;
+            abortController.abort();
+          }
+        })
+        .catch(() => {
+          leaseLost = true;
+          abortController.abort();
+        });
     }, this.leaseRenewIntervalMs);
     try {
       const result = await runtime.recoverOperation(operationId, { actor, attachments: [] }, { lease });
-      if (leaseLost) return;
+      if (leaseLost) {
+        this.onEvent({ type: "operation.failed", operation_id: operationId, error: `Operation ${operationId} lost its lease during execution.` });
+        return;
+      }
       await runtime.releaseOperationLease(operationId, actor, token);
       this.attempts.delete(operationId);
       this.lastError = undefined;
       this.onEvent({ type: "operation.completed", operation_id: operationId, result });
     } catch (error) {
-      if (leaseLost) return;
+      if (leaseLost) {
+        this.onEvent({ type: "operation.failed", operation_id: operationId, error: `Operation ${operationId} lost its lease during execution.` });
+        return;
+      }
       const message = errorMessage(error);
       if (this.recoverableError(error) && attempt <= this.maxRetries) {
         await runtime.releaseOperationLease(operationId, actor, token);

@@ -1287,6 +1287,29 @@ export class WorkspaceRuntime {
     return state.operations.filter((operation) => ["created", "resolving", "running"].includes(operation.status));
   }
 
+  resolveExecutionContext(operation: OperationRecord, optionalAgent?: string): { agent_id: string; agent_role: string } {
+    const snapshotAgent = operation.execution_snapshot?.execution_agent_id;
+    const snapshotRole = operation.execution_snapshot?.execution_agent_role;
+    if (snapshotAgent !== undefined && snapshotAgent.trim().length > 0) {
+      return { agent_id: snapshotAgent.trim(), agent_role: snapshotRole ?? "specialist" };
+    }
+    if (optionalAgent !== undefined && optionalAgent.trim().length > 0) {
+      return { agent_id: optionalAgent.trim(), agent_role: "specialist" };
+    }
+    switch (operation.kind) {
+      case "authoring":
+        return { agent_id: "director", agent_role: "orchestrator" };
+      case "review":
+        return { agent_id: "fact-reviewer-1", agent_role: "fact_reviewer" };
+      case "knowledge":
+        return { agent_id: "fact-curator", agent_role: "fact_curator" };
+      case "source":
+        return { agent_id: "source-researcher", agent_role: "source_researcher" };
+      default:
+        return { agent_id: "director", agent_role: "orchestrator" };
+    }
+  }
+
   /**
    * Atomically claim a persisted operation with an ownership lease. Only one
    * caller (synchronous request or worker) may hold an unexpired lease at a
@@ -1303,10 +1326,11 @@ export class WorkspaceRuntime {
       const latest = current.operations.find((item) => item.id === operationId);
       if (latest === undefined || !["created", "resolving", "running"].includes(latest.status)) return current;
       if (latest.lease_owner !== undefined && latest.lease_expires_at !== undefined && Date.parse(latest.lease_expires_at) > Date.now()) return current;
+      const fencingGen = (latest.fencing_generation ?? 0) + 1;
       return {
         ...current,
         operations: current.operations.map((item) => item.id === operationId
-          ? { ...item, lease_owner: owner, lease_token: token, lease_expires_at: leaseExpires, attempt: (item.attempt ?? 0) + 1, updated_at: now() }
+          ? { ...item, lease_owner: owner, lease_token: token, lease_expires_at: leaseExpires, fencing_generation: fencingGen, attempt: (item.attempt ?? 0) + 1, updated_at: now() }
           : item),
       };
     });
@@ -1320,13 +1344,19 @@ export class WorkspaceRuntime {
     const operation = state.operations.find((item) => item.id === operationId);
     if (operation === undefined || operation.lease_owner !== owner || operation.lease_token !== token) return false;
     const leaseExpires = new Date(Date.now() + leaseMs).toISOString();
-    await this.repository.commit(state.revision, (current) => ({
-      ...current,
-      operations: current.operations.map((item) => item.id === operationId
-        ? { ...item, lease_expires_at: leaseExpires, updated_at: now() }
-        : item),
-    }));
-    return true;
+    let renewed = false;
+    await this.repository.commit(state.revision, (current) => {
+      const latest = current.operations.find((item) => item.id === operationId);
+      if (latest === undefined || latest.lease_owner !== owner || latest.lease_token !== token) return current;
+      renewed = true;
+      return {
+        ...current,
+        operations: current.operations.map((item) => item.id === operationId
+          ? { ...item, lease_expires_at: leaseExpires, updated_at: now() }
+          : item),
+      };
+    });
+    return renewed;
   }
 
   /** Clear the lease when the holder still owns it; silently ignores others. */
@@ -1334,19 +1364,23 @@ export class WorkspaceRuntime {
     const state = await this.repository.read();
     const operation = state.operations.find((item) => item.id === operationId);
     if (operation === undefined || operation.lease_owner !== owner || operation.lease_token !== token) return;
-    await this.repository.commit(state.revision, (current) => ({
-      ...current,
-      operations: current.operations.map((item) => item.id === operationId
-        ? { ...stripLease(item), updated_at: now() }
-        : item),
-    }));
+    await this.repository.commit(state.revision, (current) => {
+      const latest = current.operations.find((item) => item.id === operationId);
+      if (latest === undefined || latest.lease_owner !== owner || latest.lease_token !== token) return current;
+      return {
+        ...current,
+        operations: current.operations.map((item) => item.id === operationId
+          ? { ...stripLease(item), updated_at: now() }
+          : item),
+      };
+    });
   }
 
   /**
    * Continue one persisted operation without creating a duplicate operation.
    * Operations that asked a user a question are intentionally excluded from this path.
    */
-  async recoverOperation(operationId: string, context: WorkspaceContext = { actor: "worker", attachments: [] }, options: { agent?: string; lease?: Readonly<{ owner: string; token: string }> } = {}): Promise<RequestResult> {
+  async recoverOperation(operationId: string, context: WorkspaceContext = { actor: "worker", attachments: [] }, options: { agent?: string; lease?: Readonly<{ owner: string; token: string; generation?: number }> } = {}): Promise<RequestResult> {
     const state = await this.repository.read();
     const operation = state.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -1398,9 +1432,10 @@ export class WorkspaceRuntime {
     return result;
   }
 
-  private leaseHeldBy(operation: OperationRecord | undefined, lease: Readonly<{ owner: string; token: string }>): boolean {
+  private leaseHeldBy(operation: OperationRecord | undefined, lease: Readonly<{ owner: string; token: string; generation?: number }>): boolean {
     if (operation === undefined) return false;
     if (operation.lease_owner !== lease.owner || operation.lease_token !== lease.token) return false;
+    if (lease.generation !== undefined && operation.fencing_generation !== undefined && operation.fencing_generation !== lease.generation) return false;
     if (operation.lease_expires_at === undefined) return true;
     return new Date(operation.lease_expires_at).getTime() > Date.now();
   }
@@ -3325,7 +3360,8 @@ export class WorkspaceRuntime {
         return { operation_id: pending.id, status: result.status, summary: result.summary, completed: [...result.chunks, ...result.facts], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }) };
       }
       if (pending.kind === "authoring") {
-        const result = await this.authoring.create(pending.id, trimmed, "director", context.actor);
+        const resolution = this.resolveExecutionContext(pending);
+        const result = await this.authoring.create(pending.id, trimmed, resolution.agent_id, context.actor);
         const latest = await this.repository.read();
         const finalOperation = latest.operations.find((item) => item.id === pending.id);
         return {
@@ -3335,14 +3371,15 @@ export class WorkspaceRuntime {
           completed: result.artifact_id === undefined ? [] : [result.artifact_id],
           blocked: [],
           ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
-          agent_id: "director",
-          agent_role: "orchestrator",
+          agent_id: resolution.agent_id,
+          agent_role: resolution.agent_role,
         };
       }
       if (pending.kind === "review") {
+        const resolution = this.resolveExecutionContext(pending);
         const result = /重新評估|re-?evaluate|quality profile/iu.test(trimmed)
           ? await this.review.reevaluate(pending.id, context.actor)
-          : await this.review.review(pending.id, trimmed, "fact-reviewer-1", context.actor);
+          : await this.review.review(pending.id, trimmed, resolution.agent_id, context.actor);
         const latest = await this.repository.read();
         const finalOperation = latest.operations.find((item) => item.id === pending.id);
         return {
@@ -3352,6 +3389,8 @@ export class WorkspaceRuntime {
           completed: result.review_id === undefined ? [] : [result.review_id],
           blocked: result.status === "blocked" ? [pending.id] : [],
           ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+          agent_id: resolution.agent_id,
+          agent_role: resolution.agent_role,
         };
       }
       if (pending.kind === "import" && context.attachments.length > 0) {

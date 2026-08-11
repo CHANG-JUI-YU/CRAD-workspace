@@ -135,7 +135,7 @@ describe("background workspace worker", () => {
       expect(renew.mock.calls[0]?.[0]).toBe("op-renew");
       expect(renew.mock.calls[0]?.[1]).toBe("writer");
       expect(renew.mock.calls[0]?.[2]).toEqual(expect.any(String));
-      expect(recover).toHaveBeenCalledWith("op-renew", { actor: "writer", attachments: [] }, expect.objectContaining({ lease: { owner: "writer", token: expect.any(String) } }));
+      expect(recover).toHaveBeenCalledWith("op-renew", { actor: "writer", attachments: [] }, expect.objectContaining({ lease: expect.objectContaining({ owner: "writer", token: expect.any(String) }) }));
     } finally {
       worker.stop();
     }
@@ -286,5 +286,27 @@ describe("background workspace worker", () => {
     expect(finalOperation?.status).toBe("completed");
     expect(finalOperation?.lease_owner).toBeUndefined();
     expect(finalOperation?.lease_token).toBeUndefined();
+  });
+
+  it("BUG3-09: increments fencing_generation on claim and rejects recovery when generation mismatches", async () => {
+    const repository = new MemoryProjectRepository("bug309-fencing");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-fence", "Draft note: Create character: Fence.")] }));
+    const runtime = new WorkspaceRuntime(repository);
+
+    const firstClaim = await runtime.claimOperation("op-fence", "worker-1");
+    expect(firstClaim?.fencing_generation).toBe(1);
+
+    await runtime.releaseOperationLease("op-fence", "worker-1", firstClaim!.lease_token!);
+
+    const secondClaim = await runtime.claimOperation("op-fence", "worker-2");
+    expect(secondClaim?.fencing_generation).toBe(2);
+
+    await expect(
+      runtime.recoverOperation(
+        "op-fence",
+        { actor: "worker-1", attachments: [] },
+        { lease: { owner: "worker-1", token: firstClaim!.lease_token!, generation: firstClaim!.fencing_generation } }
+      )
+    ).rejects.toMatchObject({ code: "OPERATION_LEASE_LOST" });
   });
 });

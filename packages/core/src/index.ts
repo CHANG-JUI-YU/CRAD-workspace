@@ -462,6 +462,7 @@ export interface OperationRecord {
   lease_owner?: string;
   lease_token?: string;
   lease_expires_at?: string;
+  fencing_generation?: number;
   attempt?: number;
   last_error?: string;
   execution_snapshot?: InternalExecutionSnapshot;
@@ -954,6 +955,7 @@ const operationSchema = z.object({
   lease_owner: z.string().min(1).optional(),
   lease_token: z.string().min(1).optional(),
   lease_expires_at: z.string().datetime({ offset: true }).optional(),
+  fencing_generation: z.number().int().nonnegative().optional(),
   attempt: z.number().int().nonnegative().optional(),
   last_error: z.string().optional(),
   execution_snapshot: internalExecutionSnapshotSchema.optional(),

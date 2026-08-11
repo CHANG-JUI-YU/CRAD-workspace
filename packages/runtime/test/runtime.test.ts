@@ -1490,4 +1490,39 @@ describe("artifact workbench groups", () => {
     expect(worldGroup.current.id).toBe("artifact-other");
     expect(worldGroup.revisions).toHaveLength(1);
   });
+
+  it("BUG3-06: resolveExecutionContext respects operation execution_snapshot when resuming pending operations", async () => {
+    const repository = new MemoryProjectRepository("bug306-test");
+    const timestamp = new Date().toISOString();
+    await repository.commit(0, (state) => ({
+      ...state,
+      operations: [
+        {
+          id: "op-authoring-pending",
+          kind: "authoring",
+          request: "建立角色 Alpha",
+          actor: "user",
+          status: "needs_input",
+          created_at: timestamp,
+          updated_at: timestamp,
+          progress: [],
+          question: "請補充細節",
+          execution_snapshot: {
+            execution_agent_id: "zhuji-creator",
+            execution_agent_role: "creator",
+            created_at: timestamp,
+          },
+        },
+      ],
+    }));
+
+    const runtime = new WorkspaceRuntime(repository);
+    const state = await repository.read();
+    const pendingOp = state.operations[0]!;
+    const resolution = runtime.resolveExecutionContext(pendingOp);
+
+    expect(resolution.agent_id).toBe("zhuji-creator");
+    expect(resolution.agent_role).toBe("creator");
+  });
 });
+
