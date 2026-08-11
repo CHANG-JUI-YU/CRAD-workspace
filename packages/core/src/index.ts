@@ -430,7 +430,7 @@ export interface OperationAttachmentRef {
 /** Versioned typed command persisted with the operation so crash recovery can replay the original payload. */
 export interface OperationCommand {
   version: 1;
-  type: "template_proposal" | "zhuji_proposal" | "import" | "source_resume" | "source_search" | "source_select" | "issue_update" | "request";
+  type: "template_proposal" | "zhuji_proposal" | "import" | "source_resume" | "source_search" | "source_select" | "issue_update" | "request" | "fact_review";
   payload?: unknown;
   attachment_refs?: OperationAttachmentRef[];
 }
@@ -942,7 +942,7 @@ const operationSchema = z.object({
   result_summary: z.string().optional(),
   command: z.object({
     version: z.literal(1),
-    type: z.enum(["template_proposal", "zhuji_proposal", "import", "source_resume", "source_search", "source_select", "issue_update", "request"]),
+    type: z.enum(["template_proposal", "zhuji_proposal", "import", "source_resume", "source_search", "source_select", "issue_update", "request", "fact_review"]),
     payload: z.unknown().optional(),
     attachment_refs: z.array(z.object({
       id: z.string().min(1),
@@ -3149,3 +3149,77 @@ export {
   type FactProvenanceRef,
   type SourceAdaptationIntent,
 } from "./authoring-context.js";
+
+export interface ProjectIntentCharacter {
+  id: string;
+  label: string;
+  is_primary: boolean;
+  aliases: string[];
+}
+
+export interface ProjectIntentProjection {
+  is_source_adaptation: boolean;
+  primary_character_id?: string;
+  roster: ProjectIntentCharacter[];
+}
+
+export function computeProjectIntentProjection(state: ProjectState): ProjectIntentProjection {
+  const latestArtifactsMap = new Map<string, ArtifactRecord>();
+  for (const artifact of state.artifacts) latestArtifactsMap.set(artifact.key, artifact);
+  const blueprintArtifact = [...latestArtifactsMap.values()].reverse().find((artifact) => artifact.kind === "blueprint");
+  let blueprint: Record<string, unknown> | undefined;
+  if (blueprintArtifact !== undefined) {
+    try {
+      const parsed = JSON.parse(blueprintArtifact.content);
+      if (parsed !== null && typeof parsed === "object") blueprint = parsed as Record<string, unknown>;
+    } catch {}
+  }
+  const isSourceAdaptation = state.interview.flow === "source_adaptation"
+    || blueprint?.source_adaptation !== undefined
+    || blueprint?.intent === "source_adaptation"
+    || blueprint?.intent_kind === "source_adaptation";
+
+  const rawCharacters = Array.isArray(blueprint?.characters) ? blueprint!.characters : [];
+  const rawPrimary = typeof blueprint?.primary_character_id === "string" ? blueprint!.primary_character_id : undefined;
+
+  const characters: Array<{ id: string; label: string; aliases: string[] }> = [];
+  const adaptationSubjects = blueprint?.source_adaptation && typeof blueprint.source_adaptation === "object"
+    ? (blueprint.source_adaptation as Record<string, unknown>).subjects
+    : undefined;
+  const perCharacterSubjects = Array.isArray(adaptationSubjects) ? adaptationSubjects : [];
+
+  for (const charObj of rawCharacters) {
+    if (charObj !== null && typeof charObj === "object" && typeof (charObj as Record<string, unknown>).id === "string") {
+      const id = (charObj as Record<string, unknown>).id as string;
+      const label = typeof (charObj as Record<string, unknown>).label === "string"
+        ? ((charObj as Record<string, unknown>).label as string)
+        : (typeof (charObj as Record<string, unknown>).display_name === "string"
+            ? ((charObj as Record<string, unknown>).display_name as string)
+            : id);
+      const aliases = perCharacterSubjects.flatMap((entry) => {
+        if (entry !== null && typeof entry === "object" && (entry as Record<string, unknown>).character_id === id) {
+          const name = typeof (entry as Record<string, unknown>).subject_name === "string"
+            ? ((entry as Record<string, unknown>).subject_name as string)
+            : undefined;
+          return name && name.length > 0 ? [name] : [];
+        }
+        return [];
+      });
+      characters.push({ id, label, aliases });
+    }
+  }
+
+  const primaryCharacterId = rawPrimary ?? characters[0]?.id;
+  const roster: ProjectIntentCharacter[] = characters.map((c) => ({
+    id: c.id,
+    label: c.label,
+    is_primary: primaryCharacterId !== undefined && c.id === primaryCharacterId,
+    aliases: c.aliases,
+  }));
+
+  return {
+    is_source_adaptation: isSourceAdaptation,
+    ...(primaryCharacterId === undefined ? {} : { primary_character_id: primaryCharacterId }),
+    roster,
+  };
+}

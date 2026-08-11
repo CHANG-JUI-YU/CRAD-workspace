@@ -1,4 +1,4 @@
-import { computeBuildPlan, parseWardrobeMarkdown, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
+import { computeBuildPlan, computeProjectIntentProjection, parseWardrobeMarkdown, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "./required-artifacts.js";
 import { contradictingAcceptedFacts } from "./knowledge.js";
 
@@ -404,7 +404,10 @@ function reportFacts(state: ProjectState, diagnostics: WorkflowDiagnostic[]): vo
     if (fact.review_run_id === undefined) return true;
     const owningRun = state.fact_review_runs.find((candidate) => candidate.id === fact.review_run_id && candidate.status === "completed");
     if (owningRun === undefined) return true;
-    return [...state.fact_review_decisions].reverse().find((decision) => decision.review_run_id === owningRun.id && decision.candidate_occurrence_id === occurrenceFor(fact))?.decision !== "accepted";
+    const decision = [...state.fact_review_decisions].reverse().find((item) => item.review_run_id === owningRun.id && item.candidate_occurrence_id === occurrenceFor(fact));
+    if (decision?.decision !== "accepted") return true;
+    if (decision.resulting_fact_revision !== undefined && decision.resulting_fact_revision !== (fact.fact_revision ?? 1)) return true;
+    return false;
   });
   if (acceptedOutsideRun.length > 0) {
     add(diagnostics, {
@@ -415,33 +418,18 @@ function reportFacts(state: ProjectState, diagnostics: WorkflowDiagnostic[]): vo
     });
   }
 
-  // Coverage is only a source-adaptation obligation.  Original-character
+  // Coverage is only a source-adaptation obligation. Original-character
   // projects may intentionally have no source-derived coverage register.
-  if (state.interview.flow === "source_adaptation") {
-    const blueprint = [...latestArtifacts(state)].reverse().find((artifact) => artifact.kind === "blueprint");
-    const parsedBlueprint = blueprint === undefined ? undefined : parseJson(blueprint.content);
-    const subjects = Array.isArray(parsedBlueprint?.characters)
-      ? parsedBlueprint.characters.map(record).flatMap((item) => {
-        if (item === undefined || typeof item.id !== "string") return [];
-        const adaptationSubjects = record(parsedBlueprint?.source_adaptation);
-        const perCharacter = Array.isArray(adaptationSubjects?.subjects) ? adaptationSubjects.subjects : [];
-        const aliases = perCharacter
-          .flatMap((entry) => {
-            const subjectEntry = record(entry);
-            if (subjectEntry === undefined || subjectEntry.character_id !== item.id) return [];
-            const subjectName = typeof subjectEntry.subject_name === "string" ? subjectEntry.subject_name : undefined;
-            return subjectName === undefined || subjectName.length === 0 ? [] : [subjectName];
-          });
-        return [{ id: item.id, label: typeof item.label === "string" ? item.label : item.id, aliases }];
-      })
-      : [];
+  const intentProjection = computeProjectIntentProjection(state);
+  if (intentProjection.is_source_adaptation) {
+    const subjects = intentProjection.roster;
     if (subjects.length > 0) {
       const acceptedFacts = accepted;
       const requiredPrimary = ["identity", "personality", "speech", "habits", "background", "relationships"];
       const optionalPrimary = ["appearance", "goals", "abilities", "world_context"];
       const requiredSupporting = ["identity", "personality", "relationships"];
       const missingCoverage: string[] = [];
-      subjects.forEach((subject, index) => {
+      subjects.forEach((subject) => {
         const subjectFacts = acceptedFacts.filter((fact) => {
           const factSubject = fact.subject ?? fact.statement;
           return normalized(factSubject) === normalized(subject.id)
@@ -449,9 +437,9 @@ function reportFacts(state: ProjectState, diagnostics: WorkflowDiagnostic[]): vo
             || subject.aliases.some((alias) => normalized(factSubject) === normalized(alias));
         });
         const covered = new Set(subjectFacts.flatMap((fact) => (fact.coverage ?? []).map(normalized)));
-        const required = index === 0 ? requiredPrimary : requiredSupporting;
+        const required = subject.is_primary ? requiredPrimary : requiredSupporting;
         for (const dimension of required) if (!covered.has(normalized(dimension))) missingCoverage.push(`${subject.id}/${dimension}`);
-        if (index === 0 && !optionalPrimary.some((dimension) => covered.has(normalized(dimension)))) missingCoverage.push(`${subject.id}/one-of-${optionalPrimary.join("|")}`);
+        if (subject.is_primary && !optionalPrimary.some((dimension) => covered.has(normalized(dimension)))) missingCoverage.push(`${subject.id}/one-of-${optionalPrimary.join("|")}`);
       });
       if (missingCoverage.length > 0) {
         add(diagnostics, {

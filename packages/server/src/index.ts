@@ -354,19 +354,56 @@ function factDecisionsValue(value: unknown): Array<{ fact_id?: string; candidate
   const decisions: Array<{ fact_id?: string; candidate_occurrence_id?: string; claim: string; decision: "accept" | "reject" | "conflict" | "needs_evidence"; reason: string; evidence: { source: string; quote?: string; locator?: string }[]; evidence_refs: { source_id: string; source_revision_id: string; quote: string; locator?: string; character_range?: { start: number; end: number } }[]; coverage: string[] }> = [];
   for (const item of value) {
     if (item === null || typeof item !== "object") return undefined;
-    const input = item as { fact_id?: unknown; candidate_occurrence_id?: unknown; claim?: unknown; decision?: unknown; reason?: unknown };
+    const input = item as { fact_id?: unknown; candidate_occurrence_id?: unknown; claim?: unknown; decision?: unknown; reason?: unknown; evidence?: unknown; evidence_refs?: unknown; coverage?: unknown };
     if (typeof input.claim !== "string" || typeof input.reason !== "string") return undefined;
     if (input.decision !== "accept" && input.decision !== "reject" && input.decision !== "conflict" && input.decision !== "needs_evidence") return undefined;
     if (input.fact_id !== undefined && typeof input.fact_id !== "string") return undefined;
     if (input.candidate_occurrence_id !== undefined && typeof input.candidate_occurrence_id !== "string") return undefined;
     if (input.fact_id === undefined && input.candidate_occurrence_id === undefined) return undefined;
+
+    const evidence: Array<{ source: string; quote?: string; locator?: string }> = [];
+    if (Array.isArray(input.evidence)) {
+      for (const e of input.evidence) {
+        if (e && typeof e === "object" && typeof (e as Record<string, unknown>).source === "string") {
+          const evObj = e as Record<string, unknown>;
+          evidence.push({
+            source: evObj.source as string,
+            ...(typeof evObj.quote === "string" ? { quote: evObj.quote } : {}),
+            ...(typeof evObj.locator === "string" ? { locator: evObj.locator } : {}),
+          });
+        }
+      }
+    }
+
+    const evidenceRefs: Array<{ source_id: string; source_revision_id: string; quote: string; locator?: string; character_range?: { start: number; end: number } }> = [];
+    if (Array.isArray(input.evidence_refs)) {
+      for (const er of input.evidence_refs) {
+        if (er && typeof er === "object" && typeof (er as Record<string, unknown>).source_id === "string" && typeof (er as Record<string, unknown>).source_revision_id === "string" && typeof (er as Record<string, unknown>).quote === "string") {
+          const erObj = er as Record<string, unknown>;
+          evidenceRefs.push({
+            source_id: erObj.source_id as string,
+            source_revision_id: erObj.source_revision_id as string,
+            quote: erObj.quote as string,
+            ...(typeof erObj.locator === "string" ? { locator: erObj.locator } : {}),
+          });
+        }
+      }
+    }
+
+    const coverage: string[] = [];
+    if (Array.isArray(input.coverage)) {
+      for (const c of input.coverage) {
+        if (typeof c === "string") coverage.push(c);
+      }
+    }
+
     decisions.push({
       claim: input.claim,
       decision: input.decision,
       reason: input.reason,
-      evidence: [],
-      evidence_refs: [],
-      coverage: [],
+      evidence,
+      evidence_refs: evidenceRefs,
+      coverage,
       ...(input.fact_id === undefined ? {} : { fact_id: input.fact_id }),
       ...(input.candidate_occurrence_id === undefined ? {} : { candidate_occurrence_id: input.candidate_occurrence_id }),
     });
@@ -675,7 +712,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
           return;
         }
         const input = parsed as { reviewer_identity?: unknown; run_id?: unknown; expected_projection_revision?: unknown };
-        const reviewerIdentity = typeof input.reviewer_identity === "string" && input.reviewer_identity.length > 0 ? input.reviewer_identity : "director";
+        const reviewerIdentity = typeof input.reviewer_identity === "string" && input.reviewer_identity.length > 0 ? input.reviewer_identity : undefined;
         const runId = typeof input.run_id === "string" && input.run_id.length > 0 ? input.run_id : undefined;
         const expectedProjectionRevision = typeof input.expected_projection_revision === "string" && input.expected_projection_revision.length > 0 ? input.expected_projection_revision : undefined;
         json(response, 200, await (await getRuntime()).applyFactReviewBatch(decisions, actor, reviewerIdentity, runId, expectedProjectionRevision));

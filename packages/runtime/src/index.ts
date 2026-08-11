@@ -70,6 +70,7 @@ import {
   ZHUJI_REQUIRED_MODULES,
   validateWorkflow,
   buildRequiredArtifactManifest,
+  reviewRunProjectionRevision,
   type IssueUpdateInput,
   type SourceSelectionDecision,
   type SourceFetcher,
@@ -2765,6 +2766,7 @@ export class WorkspaceRuntime {
         status: run.status,
         candidate_occurrence_ids: run.candidate_occurrence_ids,
         candidate_set_revision: run.candidate_set_revision,
+        projection_revision: reviewRunProjectionRevision(state, run.id),
         policy_revision: run.policy_revision,
         created_by: run.created_by,
         created_at: run.created_at,
@@ -3029,17 +3031,22 @@ export class WorkspaceRuntime {
   }
 
   async startFactReviewRun(actor: string): Promise<FactReviewRunRecord> {
-    return this.knowledge.beginFactReviewRun(await this.factReviewOperationId(), actor, undefined, actor);
+    const opId = await this.ensureFactReviewOperation(actor);
+    const reviewer = nextFactReviewer(await this.repository.read());
+    return this.knowledge.beginFactReviewRun(opId, reviewer, undefined, actor);
   }
 
   async applyFactReviewBatch(
     decisions: FactDecision[],
     actor: string,
-    reviewerIdentity: string,
+    reviewerIdentity?: string,
     reviewRunId?: string,
     expectedProjectionRevision?: string,
   ): Promise<FactReviewExecutionResult> {
-    return this.knowledge.applyReviewBatch(await this.factReviewOperationId(), decisions, actor, reviewerIdentity, reviewRunId, expectedProjectionRevision);
+    const opId = await this.ensureFactReviewOperation(actor);
+    const state = await this.repository.read();
+    const effectiveReviewer = (reviewerIdentity && reviewerIdentity.length > 0) ? reviewerIdentity : nextFactReviewer(state);
+    return this.knowledge.applyReviewBatch(opId, decisions, actor, effectiveReviewer, reviewRunId, expectedProjectionRevision);
   }
 
   async resolveFactConflict(
@@ -3048,16 +3055,42 @@ export class WorkspaceRuntime {
     reviewRunId?: string,
     expectedProjectionRevision?: string,
   ): Promise<FactReviewExecutionResult> {
-    return this.knowledge.resolveFactConflict(await this.factReviewOperationId(), decisions, actor, "director", reviewRunId, expectedProjectionRevision);
+    const opId = await this.ensureFactReviewOperation(actor);
+    return this.knowledge.resolveFactConflict(opId, decisions, actor, "director", reviewRunId, expectedProjectionRevision);
   }
 
-  private async factReviewOperationId(): Promise<string> {
-    const state = await this.repository.read();
-    const operation = [...state.operations].reverse().find((item) => item.kind === "review");
-    if (operation === undefined) {
-      throw new CoreError("OPERATION_NOT_FOUND", "No review operation is available to attach the fact review run.", true);
-    }
-    return operation.id;
+  private async ensureFactReviewOperation(actor: string): Promise<string> {
+    const initial = await this.repository.read();
+    const existing = [...initial.operations].reverse().find((item) =>
+      (item.command?.type === "fact_review" || item.kind === "knowledge" || item.kind === "review") && item.status !== "failed"
+    );
+    if (existing !== undefined) return existing.id;
+    const opId = internalId("op");
+    const newOp: OperationRecord = {
+      id: opId,
+      kind: "knowledge",
+      request: "fact review run",
+      actor,
+      status: "running",
+      created_at: now(),
+      updated_at: now(),
+      progress: [],
+      command: {
+        version: 1,
+        type: "fact_review",
+        payload: {},
+      },
+      execution_snapshot: {
+        execution_agent_id: "fact-reviewer-1",
+        execution_agent_role: "reviewer",
+        created_at: now(),
+      },
+    };
+    await this.repository.commit(initial.revision, (current) => ({
+      ...current,
+      operations: [...current.operations, newOp],
+    }));
+    return opId;
   }
 
   async setProjectImage(context: WorkspaceContext, options: { character_id?: string; aspect_ratio?: string; source?: string; license?: string } = {}): Promise<{ image_id: string; width: number; height: number }> {

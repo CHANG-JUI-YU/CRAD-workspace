@@ -683,4 +683,65 @@ describe("knowledge, authoring and review services", () => {
     state = await repository.read();
     expect(state.artifacts.map((item) => item.key)).toContain("world_lore:coastal-network");
   });
+
+  describe("BUG3-05: curation batch deduplication", () => {
+    it("deduplicates identical claims within the same curation proposal (BUG3-05)", async () => {
+      const repository = new MemoryProjectRepository("demo-dedup-same");
+      await repository.commit(0, (state) => ({ ...state, operations: [operation("op-c1", "authoring")], sources: [{ id: "src-1", candidate_id: "cand-1", title: "doc1", canonical_text: "Yukino is direct.", original_hash: contentHash("x"), revision: contentHash("x"), media_type: "text/plain", created_at: new Date().toISOString() }] }));
+      const claim1: FactClaim = { subject: "Yukino", predicate: "has_trait", value: "direct", classification: "trait", confidence: 0.9, coverage: ["character"], evidence: [{ source: "doc1", quote: "Yukino is direct." }] };
+      const claim2: FactClaim = { ...claim1 };
+      const service = new KnowledgeService(repository);
+      const result = await service.applyCuration("op-c1", [claim1, claim2], "fact-curator");
+      expect(result.status).toBe("completed");
+      const state = await repository.read();
+      expect(state.facts).toHaveLength(1);
+    });
+
+    it("merges claims with different sources within the same curation proposal (BUG3-05)", async () => {
+      const repository = new MemoryProjectRepository("demo-dedup-multi");
+      await repository.commit(0, (state) => ({ ...state, operations: [operation("op-c2", "authoring")], sources: [
+        { id: "src-a", candidate_id: "cand-a", title: "page A", canonical_text: "Yukino is direct.", original_hash: contentHash("a"), revision: contentHash("a"), media_type: "text/plain", created_at: new Date().toISOString() },
+        { id: "src-b", candidate_id: "cand-b", title: "page B", canonical_text: "Yukino is direct.", original_hash: contentHash("b"), revision: contentHash("b"), media_type: "text/plain", created_at: new Date().toISOString() },
+      ] }));
+      const claim1: FactClaim = { subject: "Yukino", predicate: "has_trait", value: "direct", classification: "trait", confidence: 0.9, coverage: ["character"], evidence: [{ source: "page A", quote: "Yukino is direct." }] };
+      const claim2: FactClaim = { subject: "Yukino", predicate: "has_trait", value: "direct", classification: "trait", confidence: 0.95, coverage: ["character"], evidence: [{ source: "page B", quote: "Yukino is direct." }] };
+      const service = new KnowledgeService(repository);
+      const result = await service.applyCuration("op-c2", [claim1, claim2], "fact-curator");
+      expect(result.status).toBe("completed");
+      const state = await repository.read();
+      expect(state.facts).toHaveLength(1);
+      expect(state.facts[0]?.source_ids).toEqual(["src-a", "src-b"]);
+    });
+
+    it("merges new curation evidence into an accepted fact, increments revision and resets status to candidate (BUG3-04)", async () => {
+      const repository = new MemoryProjectRepository("demo-accepted-candidate");
+      await repository.commit(0, (state) => ({
+        ...state,
+        operations: [operation("op-c1", "authoring"), operation("op-c2", "authoring")],
+        sources: [
+          { id: "src-1", candidate_id: "cand-1", title: "Doc 1", canonical_text: "Yukino is calm.", original_hash: contentHash("1"), revision: contentHash("1"), media_type: "text/plain", created_at: new Date().toISOString() },
+          { id: "src-2", candidate_id: "cand-2", title: "Doc 2", canonical_text: "Yukino is calm.", original_hash: contentHash("2"), revision: contentHash("2"), media_type: "text/plain", created_at: new Date().toISOString() },
+        ],
+      }));
+      const service = new KnowledgeService(repository);
+      const claim1: FactClaim = { subject: "Yukino", predicate: "has_trait", value: "calm", classification: "trait", confidence: 0.9, coverage: ["character"], evidence: [{ source: "Doc 1", quote: "Yukino is calm." }] };
+      await service.applyCuration("op-c1", [claim1], "fact-curator");
+
+      // Mark fact as accepted manually
+      let state = await repository.read();
+      await repository.commit(state.revision, (s) => ({
+        ...s,
+        facts: s.facts.map((f) => ({ ...f, status: "accepted" as const })),
+      }));
+
+      // Apply second curation with new evidence
+      const claim2: FactClaim = { subject: "Yukino", predicate: "has_trait", value: "calm", classification: "trait", confidence: 0.9, coverage: ["character"], evidence: [{ source: "Doc 2", quote: "Yukino is calm." }] };
+      await service.applyCuration("op-c2", [claim2], "fact-curator");
+
+      state = await repository.read();
+      expect(state.facts).toHaveLength(1);
+      expect(state.facts[0]?.status).toBe("candidate");
+      expect(state.facts[0]?.fact_revision).toBe(2);
+    });
+  });
 });

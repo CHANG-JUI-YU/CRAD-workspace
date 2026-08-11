@@ -203,7 +203,7 @@ function factCandidateRevision(fact: FactRecord, sources: readonly SourceRecord[
   }));
 }
 
-function reviewRunProjectionRevision(state: { facts: readonly FactRecord[]; fact_review_decisions: readonly FactReviewDecisionRecord[] }, runId: string): string {
+export function reviewRunProjectionRevision(state: { facts: readonly FactRecord[]; fact_review_decisions: readonly FactReviewDecisionRecord[] }, runId: string): string {
   return contentHash(canonicalJson({
     run_id: runId,
     facts: state.facts.map((fact) => ({
@@ -358,9 +358,8 @@ export class KnowledgeService {
         };
       }
       const chunks: KnowledgeChunk[] = [];
-      const facts: FactRecord[] = [];
       const existingFactsByKey = new Map(current.facts.map((fact) => [factKey(fact), fact]));
-      const batchKeys = new Map<string, number>();
+      const newFactsByKey = new Map<string, FactRecord>();
       const mergedFacts = new Map<string, FactRecord>();
       let mergedCount = 0;
       for (const source of currentSources) {
@@ -370,27 +369,35 @@ export class KnowledgeService {
         for (const statement of sentenceCandidates(source.canonical_text)) {
           const candidate = factFromSentence(source, statement, actor);
           const key = factKey(candidate);
-          const batchIndex = batchKeys.get(key);
-          if (batchIndex !== undefined && facts[batchIndex] !== undefined) {
-            facts[batchIndex] = mergeFactEvidence(facts[batchIndex], candidate);
-            continue;
-          }
           const existing = existingFactsByKey.get(key);
           if (existing !== undefined) {
-            const merged = mergeFactEvidence(existing, candidate);
-            const hasNewEvidence = merged.source_ids.length > existing.source_ids.length
-              || merged.evidence.length > existing.evidence.length
-              || (merged.evidence_refs?.length ?? 0) > (existing.evidence_refs?.length ?? 0);
+            const currentTarget = mergedFacts.get(existing.id) ?? existing;
+            const merged = mergeFactEvidence(currentTarget, candidate);
+            const hasNewEvidence = merged.source_ids.length > currentTarget.source_ids.length
+              || merged.evidence.length > currentTarget.evidence.length
+              || (merged.evidence_refs?.length ?? 0) > (currentTarget.evidence_refs?.length ?? 0);
             if (hasNewEvidence) {
-              mergedFacts.set(existing.id, { ...merged, fact_revision: (existing.fact_revision ?? 0) + 1, updated_at: now() });
+              const wasAccepted = existing.status === "accepted";
+              mergedFacts.set(existing.id, {
+                ...merged,
+                fact_revision: (currentTarget.fact_revision ?? 1) + 1,
+                updated_at: now(),
+                ...(wasAccepted ? { status: "candidate" as const } : {}),
+              });
               mergedCount += 1;
             }
             continue;
           }
-          batchKeys.set(key, facts.length);
-          facts.push(candidate);
+          const existingInBatch = newFactsByKey.get(key);
+          if (existingInBatch !== undefined) {
+            const merged = mergeFactEvidence(existingInBatch, candidate);
+            newFactsByKey.set(key, { ...merged, updated_at: now() });
+            continue;
+          }
+          newFactsByKey.set(key, candidate);
         }
       }
+      const facts = [...newFactsByKey.values()];
       const batchSummary = `Extracted ${chunks.length} knowledge chunks and ${facts.length} structured fact candidates${mergedCount > 0 ? `; merged ${mergedCount} corroborating evidence into existing facts.` : "."}`;
       committedSummary = batchSummary;
       committedChunks = chunks.map((chunk) => chunk.id);
@@ -437,9 +444,8 @@ export class KnowledgeService {
       return splitIntoChunks(source.canonical_text).map((text, ordinal) => ({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), created_at: now() }));
     });
     const availableChunks = [...initial.knowledge_chunks, ...chunks];
-    const facts: FactRecord[] = [];
-    const known = new Set(initial.facts.map((fact) => factKey(fact)));
     const knownFactsByKey = new Map(initial.facts.map((fact) => [factKey(fact), fact]));
+    const newFactsByKey = new Map<string, FactRecord>();
     const mergedFacts = new Map<string, FactRecord>();
     let mergedCount = 0;
     for (const claim of claims) {
@@ -456,19 +462,32 @@ export class KnowledgeService {
       const factWithRefs = evidenceRefs.length === 0 ? fact : { ...fact, evidence_refs: evidenceRefs };
       const existing = knownFactsByKey.get(key);
       if (existing !== undefined) {
-        const merged = mergeFactEvidence(existing, factWithRefs);
-        const hasNewEvidence = merged.source_ids.length > existing.source_ids.length
-          || merged.evidence.length > existing.evidence.length
-          || (merged.evidence_refs?.length ?? 0) > (existing.evidence_refs?.length ?? 0);
+        const currentTarget = mergedFacts.get(existing.id) ?? existing;
+        const merged = mergeFactEvidence(currentTarget, factWithRefs);
+        const hasNewEvidence = merged.source_ids.length > currentTarget.source_ids.length
+          || merged.evidence.length > currentTarget.evidence.length
+          || (merged.evidence_refs?.length ?? 0) > (currentTarget.evidence_refs?.length ?? 0);
         if (hasNewEvidence) {
-          mergedFacts.set(existing.id, { ...merged, fact_revision: (existing.fact_revision ?? 0) + 1, updated_at: now() });
+          const wasAccepted = existing.status === "accepted";
+          mergedFacts.set(existing.id, {
+            ...merged,
+            fact_revision: (currentTarget.fact_revision ?? 1) + 1,
+            updated_at: now(),
+            ...(wasAccepted ? { status: "candidate" as const } : {}),
+          });
           mergedCount += 1;
         }
         continue;
       }
-      known.add(key);
-      facts.push(factWithRefs);
+      const existingInBatch = newFactsByKey.get(key);
+      if (existingInBatch !== undefined) {
+        const merged = mergeFactEvidence(existingInBatch, factWithRefs);
+        newFactsByKey.set(key, { ...merged, updated_at: now() });
+        continue;
+      }
+      newFactsByKey.set(key, factWithRefs);
     }
+    const facts = [...newFactsByKey.values()];
     const summary = `Applied ${facts.length} structured fact candidates from curation${mergedCount > 0 ? `; merged ${mergedCount} corroborating evidence into existing facts.` : "."}`;
     await this.repository.commit(initial.revision, (current) => ({
       ...current,

@@ -667,4 +667,79 @@ describe("high-level agent compatibility layer", () => {
       expect(reviewed.summary).toContain("審查目標不明確");
     });
   });
+
+  describe("BUG3-01 & BUG3-03: fact review run & project intent projection", () => {
+    const makeFact = (id: string, statement: string): FactRecord => ({
+      id,
+      statement,
+      subject: "Yukino",
+      predicate: "has_trait",
+      value: "calm",
+      classification: "trait",
+      status: "candidate",
+      source_ids: ["src-1"],
+      confidence: 0.9,
+      coverage: ["character"],
+      evidence: ["quote"],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      created_by: "fact-curator",
+    });
+
+    it("creates a dedicated fact_review operation when starting a review run without prior review operations (BUG3-01)", async () => {
+      const repository = new MemoryProjectRepository("demo-no-op-fact-review");
+      const runtime = new WorkspaceRuntime(repository);
+      await repository.commit(0, (state) => ({
+        ...state,
+        facts: [makeFact("fact-1", "Yukino is calm.")],
+      }));
+
+      const run = await runtime.startFactReviewRun("server");
+      expect(run.status).toBe("open");
+      const state = await repository.read();
+      expect(state.operations.some((op) => op.command?.type === "fact_review")).toBe(true);
+    });
+
+    it("includes projection_revision in dashboardSnapshot review_runs (BUG3-01)", async () => {
+      const repository = new MemoryProjectRepository("demo-dashboard-projection");
+      const runtime = new WorkspaceRuntime(repository);
+      await repository.commit(0, (state) => ({
+        ...state,
+        facts: [makeFact("fact-1", "Yukino is calm.")],
+      }));
+      await runtime.startFactReviewRun("server");
+      const snapshot = await runtime.dashboardSnapshot();
+      expect(snapshot.review_runs[0]?.projection_revision).toBeDefined();
+    });
+
+    it("rotates reviewer identities in applyFactReviewBatch when unspecified (BUG3-01)", async () => {
+      const repository = new MemoryProjectRepository("demo-reviewer-rotation");
+      const runtime = new WorkspaceRuntime(repository);
+      const text = "Yukino is calm.";
+      const srcHash = contentHash(text);
+      await repository.commit(0, (state) => ({
+        ...state,
+        sources: [{ id: "src-1", candidate_id: "cand-1", title: "Doc 1", canonical_text: text, original_hash: srcHash, revision: srcHash, media_type: "text/plain", created_at: new Date().toISOString() }],
+        knowledge_chunks: [{ id: "chunk-1", source_id: "src-1", ordinal: 0, text, hash: srcHash, created_at: new Date().toISOString() }],
+        facts: [
+          {
+            ...makeFact("fact-1", text),
+            evidence_refs: [{ source_id: "src-1", source_revision_id: srcHash, chunk_id: "chunk-1", chunk_hash: srcHash, quote: text }],
+          },
+          makeFact("fact-2", "Yukino is direct."),
+        ],
+      }));
+      const run = await runtime.startFactReviewRun("server");
+      const snapshot = await runtime.dashboardSnapshot();
+      const projRev = snapshot.review_runs[0]!.projection_revision!;
+      const result1 = await runtime.applyFactReviewBatch(
+        [{ candidate_occurrence_id: "fact-1", claim: "Yukino is calm.", decision: "accept", reason: "Valid evidence", evidence: [{ source: "Doc 1", quote: text }], evidence_refs: [{ source_id: "src-1", source_revision_id: srcHash, chunk_id: "chunk-1", chunk_hash: srcHash, quote: text }] }],
+        "server",
+        "", // unspecified reviewer
+        run.id,
+        projRev,
+      );
+      expect(result1.status).toBe("completed");
+    });
+  });
 });

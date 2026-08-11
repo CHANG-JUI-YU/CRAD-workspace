@@ -1846,7 +1846,7 @@ export function dashboard(): string {
         postJson(endpoint, {
           decisions: [{ candidate_occurrence_id: occurrenceId, claim: statement, decision: selectElement.value, reason: reason }],
           run_id: run.id,
-          expected_projection_revision: run.candidate_set_revision
+          expected_projection_revision: run.projection_revision || run.review_projection_revision || run.candidate_set_revision
         }).then(function () { reasonElement.value = ""; refresh(); }).catch(function (error) { setAreaError("fact-review-run", error); });
       }
 
