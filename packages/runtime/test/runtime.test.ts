@@ -1463,3 +1463,31 @@ function makeTestPng(width: number, height: number, filter = 0): Buffer {
   ihdr[9] = 6;
   return Buffer.concat([pngSignature, encodePngChunk("IHDR", ihdr), encodePngChunk("IDAT", deflateSync(raw)), encodePngChunk("IEND", Buffer.alloc(0))]);
 }
+
+describe("artifact workbench groups", () => {
+  it("groups revisions by key with the latest revision as current and exposes content", async () => {
+    const repository = new MemoryProjectRepository("artifact-groups");
+    const timestamp = new Date().toISOString();
+    await repository.commit(0, (state) => ({
+      ...state,
+      operations: [{ id: "op-artifact", kind: "authoring", request: "Draft note: Create character: Alpha.", actor: "writer", status: "completed", created_at: timestamp, updated_at: timestamp, progress: [] }],
+      artifacts: [
+        { id: "artifact-v1", key: "character:alpha", kind: "character", name: "Alpha", content: JSON.stringify({ document: { schema_version: 1, id: "alpha", display_name: "Alpha", sections: [], provenance: [], extensions: {} } }), media_type: "application/json", content_hash: contentHash("v1"), revision: contentHash("v1"), status: "draft", created_at: timestamp, updated_at: timestamp, created_by: "writer", operation_id: "op-artifact" },
+        { id: "artifact-v2", key: "character:alpha", kind: "character", name: "Alpha", content: JSON.stringify({ document: { schema_version: 1, id: "alpha", display_name: "Alpha", sections: [], provenance: [], extensions: {} } }), media_type: "application/json", content_hash: contentHash("v2"), revision: contentHash("v2"), status: "draft", created_at: timestamp, updated_at: timestamp, created_by: "writer", operation_id: "op-artifact" },
+        { id: "artifact-other", key: "world_lore:harbor", kind: "world_lore", name: "Harbor", content: JSON.stringify({ schema_version: 1, entries: [] }), media_type: "application/json", content_hash: contentHash("w"), revision: contentHash("w"), status: "draft", created_at: timestamp, updated_at: timestamp, created_by: "writer", operation_id: "op-artifact" },
+      ],
+    }));
+    const snapshot = await new WorkspaceRuntime(repository).dashboardSnapshot();
+    expect(snapshot.artifacts).toHaveLength(3);
+    expect(snapshot.artifact_groups).toHaveLength(2);
+    const characterGroup = snapshot.artifact_groups.find((group) => group.key === "character:alpha")!;
+    expect(characterGroup.revisions.map((item) => item.id)).toEqual(["artifact-v1", "artifact-v2"]);
+    expect(characterGroup.current.id).toBe("artifact-v2");
+    expect(characterGroup.current.content).toContain("display_name");
+    expect(characterGroup.current.media_type).toBe("application/json");
+    expect(characterGroup.current.revision).toBe(contentHash("v2"));
+    const worldGroup = snapshot.artifact_groups.find((group) => group.key === "world_lore:harbor")!;
+    expect(worldGroup.current.id).toBe("artifact-other");
+    expect(worldGroup.revisions).toHaveLength(1);
+  });
+});

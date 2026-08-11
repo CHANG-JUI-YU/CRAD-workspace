@@ -707,6 +707,16 @@ export interface DashboardArtifactView {
   content_hash: string;
   blueprint_precheck_id?: string;
   blueprint_precheck_revision?: string;
+  content: string;
+  media_type?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface DashboardArtifactGroupView {
+  key: string;
+  current: DashboardArtifactView;
+  revisions: DashboardArtifactView[];
 }
 
 export interface DashboardFactView {
@@ -786,6 +796,7 @@ export interface DashboardSnapshot {
   blueprint?: DashboardBlueprint;
   prechecks: DashboardPrecheckView[];
   artifacts: DashboardArtifactView[];
+  artifact_groups: DashboardArtifactGroupView[];
   images: Array<{ id: string; character_id?: string; width: number; height: number; aspect_ratio?: string; source?: string; license?: string; created_at: string; updated_at: string }>;
   roster?: Array<{ id: string; label: string; display_name?: string; mode?: string }>;
   primary_character_id?: string;
@@ -2564,7 +2575,7 @@ export class WorkspaceRuntime {
     const imageManifest = buildRequiredArtifactManifest(state);
     const latestPublish = state.publishes.at(-1);
     const latestImageUpdate = state.images.reduce((latest, image) => image.updated_at > latest ? image.updated_at : latest, "");
-    return {
+    const dashboardBase = {
       project: {
         project_id: state.project_id,
         ...(state.project_name === undefined ? {} : { project_name: state.project_name }),
@@ -2600,7 +2611,8 @@ export class WorkspaceRuntime {
           ...(check.intake_key === undefined ? {} : { intake_key: check.intake_key }),
         })),
       })),
-      artifacts: state.artifacts.map((artifact) => ({
+    };
+    const artifactViews: DashboardArtifactView[] = state.artifacts.map((artifact) => ({
         id: artifact.id,
         key: artifact.key,
         kind: artifact.kind,
@@ -2612,7 +2624,26 @@ export class WorkspaceRuntime {
         content_hash: artifact.content_hash,
         ...(artifact.blueprint_precheck_id === undefined ? {} : { blueprint_precheck_id: artifact.blueprint_precheck_id }),
         ...(artifact.blueprint_precheck_revision === undefined ? {} : { blueprint_precheck_revision: artifact.blueprint_precheck_revision }),
-      })),
+        content: artifact.content,
+        ...(artifact.media_type === undefined ? {} : { media_type: artifact.media_type }),
+        created_at: artifact.created_at,
+        ...(artifact.updated_at === undefined ? {} : { updated_at: artifact.updated_at }),
+      }));
+      const artifactGroups: DashboardArtifactGroupView[] = [];
+      for (const view of artifactViews) {
+        const groupIndex = artifactGroups.findIndex((candidate) => candidate.key === view.key);
+        if (groupIndex === -1) {
+          artifactGroups.push({ key: view.key, current: view, revisions: [view] });
+        } else {
+          const existingGroup = artifactGroups[groupIndex]!;
+          existingGroup.revisions.push(view);
+          existingGroup.current = view;
+        }
+      }
+      return {
+        ...dashboardBase,
+        artifacts: artifactViews,
+        artifact_groups: artifactGroups,
       images: state.images.map((image) => ({
         id: image.id,
         ...(image.character_id === undefined ? {} : { character_id: image.character_id }),

@@ -360,7 +360,7 @@ export function dashboard(): string {
       <div class="panel-heading">
         <div>
           <h2 id="artifact-heading">Artifact 工作台</h2>
-          <p class="muted">顯示 revision、Blueprint binding、建立者與狀態；原始內容展開查看。</p>
+          <p class="muted">一個 key 一列目前版本；可展開查看原始／格式化內容、與前一版差異，並送審或下載。</p>
         </div>
       </div>
       <div id="artifact-message" class="panel-message" aria-live="polite">尚未取得 artifact 資料。</div>
@@ -511,17 +511,6 @@ export function dashboard(): string {
       <div id="image-stale-banner" class="panel-message" hidden></div>
       <div id="image-message" class="panel-message" aria-live="polite">尚未上傳角色圖像。</div>
       <div id="image-list" class="fact-list"></div>
-    </section>
-
-    <section class="panel panel-wide" aria-labelledby="deferred-heading">
-      <div class="panel-heading">
-        <h2 id="deferred-heading">後續提供</h2>
-      </div>
-      <ul class="deferred-list">
-        <li>Publish readiness 的正式裁決</li>
-        <li>artifact、review、fact 寫入與 quality override</li>
-        <li>打包模式、operation cancel/retry 與 Tavern compatibility verifier</li>
-      </ul>
     </section>
   </main>
 
@@ -1388,37 +1377,197 @@ export function dashboard(): string {
       function renderArtifactList(snapshot) {
         var target = byId("artifact-list");
         target.textContent = "";
-        var artifacts = Array.isArray(snapshot.artifacts) ? snapshot.artifacts : [];
-        if (artifacts.length === 0) {
+        var groups = Array.isArray(snapshot.artifact_groups) ? snapshot.artifact_groups : [];
+        if (groups.length === 0) {
           byId("artifact-message").textContent = "目前沒有 artifact。";
         } else {
-          byId("artifact-message").textContent = "共 " + artifacts.length + " 個 artifact。";
+          byId("artifact-message").textContent = "共 " + groups.length + " 個 artifact key（" + (Array.isArray(snapshot.artifacts) ? snapshot.artifacts.length : 0) + " 個 revision）。";
         }
-        for (var i = 0; i < artifacts.length; i += 1) {
-          var artifact = artifacts[i];
-          if (!isRecord(artifact)) continue;
+        var reviews = Array.isArray(snapshot.reviews) ? snapshot.reviews : [];
+        for (var i = 0; i < groups.length; i += 1) {
+          var group = groups[i];
+          if (!isRecord(group) || !isRecord(group.current)) continue;
+          var current = group.current;
+          var revisions = Array.isArray(group.revisions) ? group.revisions : [current];
           var row = document.createElement("div");
           row.className = "artifact-row";
           var badge = document.createElement("span");
-          badge.className = "status-badge " + statusClass(artifact.status || "draft");
-          badge.textContent = firstString(artifact, ["kind"]) || "?";
+          badge.className = "status-badge " + statusClass(firstString(current, ["status"]) || "draft");
+          badge.textContent = firstString(current, ["kind"]) || "?";
           var name = document.createElement("span");
-          name.textContent = firstString(artifact, ["name"]) || firstString(artifact, ["id"]) || "?";
+          name.textContent = firstString(current, ["name"]) || firstString(current, ["id"]) || "?";
+          var currentBadge = document.createElement("span");
+          currentBadge.className = "current-badge";
+          currentBadge.textContent = "目前版本";
           var meta = document.createElement("span");
-          var parts = ["rev " + (firstString(artifact, ["revision"]) || "?")];
-          if (artifact.created_by) parts.push("by " + artifact.created_by);
-          if (artifact.blueprint_precheck_id) parts.push("binding " + artifact.blueprint_precheck_revision || "?");
-          var reviews = Array.isArray(snapshot.reviews) ? snapshot.reviews : [];
-          var artifactReviews = reviews.filter(function (review) { return isRecord(review) && review.artifact_id === artifact.id; });
+          var parts = ["rev " + String(firstString(current, ["revision"]) || "?").slice(0, 8)];
+          if (current.created_by) parts.push("by " + current.created_by);
+          if (current.blueprint_precheck_id) parts.push("binding " + String(firstString(current, ["blueprint_precheck_revision"]) || "?").slice(0, 8));
+          var artifactReviews = reviews.filter(function (review) { return isRecord(review) && review.artifact_id === current.id; });
           if (artifactReviews.length > 0) parts.push("reviewer " + (firstString(artifactReviews[artifactReviews.length - 1], ["reviewer"]) || "?"));
-          var history = artifacts.filter(function (item) { return item.key === artifact.key; });
-          if (history.length > 1) parts.push("歷史 " + history.length + " 個 revision");
+          if (revisions.length > 1) parts.push("歷史 " + revisions.length + " 個 revision");
           meta.textContent = parts.join(" · ");
-          row.append(badge, name, meta);
+          var actions = document.createElement("span");
+          actions.className = "artifact-actions";
+          actions.append(
+            makeActionButton("原始內容", function () { toggleArtifactRaw(row, current); }),
+            makeActionButton("與前一版差異", function () { toggleArtifactDiff(row, current, revisions); }),
+            makeActionButton("送審", function () { submitArtifactForReview(firstString(current, ["name"]) || firstString(current, ["id"]) || ""); }),
+            makeActionButton("下載", function () { downloadArtifact(current); })
+          );
+          row.append(badge, currentBadge, name, meta, actions);
           target.append(row);
         }
         var blueprint = snapshot.blueprint;
         byId("blueprint-json").textContent = blueprint === undefined ? "{}" : jsonText(blueprint);
+      }
+
+      function makeActionButton(label, handler) {
+        var button = document.createElement("button");
+        button.type = "button";
+        button.className = "action-link";
+        button.textContent = label;
+        button.addEventListener("click", handler);
+        return button;
+      }
+
+      function artifactDisplayContent(artifact) {
+        var content = firstString(artifact, ["content"]);
+        if (content === "") return content;
+        var mediaType = firstString(artifact, ["media_type"]);
+        if (mediaType === "application/json") {
+          try {
+            return JSON.stringify(JSON.parse(content), null, 2);
+          } catch (ignore) {
+            return content;
+          }
+        }
+        return content;
+      }
+
+      function toggleArtifactRaw(row, artifact) {
+        var detail = findRowDetail(row, "artifact-raw");
+        if (detail !== null) {
+          detail.hidden = !detail.hidden;
+          return;
+        }
+        var container = document.createElement("div");
+        container.className = "artifact-detail artifact-raw";
+        var heading = document.createElement("div");
+        heading.className = "detail-heading";
+        heading.textContent = "原始內容（rendered：JSON 格式化後顯示）";
+        var pre = document.createElement("pre");
+        pre.textContent = artifactDisplayContent(artifact);
+        container.append(heading, pre);
+        row.append(container);
+        container.hidden = false;
+      }
+
+      function toggleArtifactDiff(row, current, revisions) {
+        var detail = findRowDetail(row, "artifact-diff");
+        if (detail !== null) {
+          detail.hidden = !detail.hidden;
+          return;
+        }
+        var container = document.createElement("div");
+        container.className = "artifact-detail artifact-diff";
+        var heading = document.createElement("div");
+        heading.className = "detail-heading";
+        var previous = revisions.length > 1 ? revisions[revisions.length - 2] : undefined;
+        if (!isRecord(previous)) {
+          heading.textContent = "與前一版差異：這是此 key 的第一版，沒有前一版可比對。";
+        } else {
+          heading.textContent = "與前一版差異（" + String(firstString(previous, ["revision"]) || "?").slice(0, 8) + " → " + String(firstString(current, ["revision"]) || "?").slice(0, 8) + "）";
+          var lines = lineDiff(firstString(previous, ["content"]) || "", firstString(current, ["content"]) || "");
+          var pre = document.createElement("pre");
+          pre.className = "diff-view";
+          pre.textContent = "";
+          for (var i = 0; i < lines.length; i += 1) {
+            var lineNode = document.createElement("div");
+            lineNode.textContent = lines[i].text;
+            if (lines[i].type === "added") {
+              lineNode.className = "diff-added";
+            } else if (lines[i].type === "removed") {
+              lineNode.className = "diff-removed";
+            }
+            pre.append(lineNode);
+          }
+          container.append(heading, pre);
+        }
+        row.append(container);
+        container.hidden = false;
+      }
+
+      function findRowDetail(row, className) {
+        for (var i = 0; i < row.children.length; i += 1) {
+          var child = row.children[i];
+          if (typeof child.className === "string" && child.className.indexOf(className) >= 0) return child;
+        }
+        return null;
+      }
+
+      function lineDiff(previous, current) {
+        var oldLines = previous.split("\n");
+        var newLines = current.split("\n");
+        var rows = [];
+        for (var i = 0; i < oldLines.length; i += 1) rows.push({ text: oldLines[i], type: "same" });
+        var oldSet = {};
+        for (var j = 0; j < oldLines.length; j += 1) oldSet[oldLines[j]] = true;
+        var added = [];
+        for (var k = 0; k < newLines.length; k += 1) {
+          if (oldSet[newLines[k]]) {
+            while (added.length > 0) rows.push(added.shift());
+          } else {
+            added.push({ text: newLines[k], type: "added" });
+          }
+        }
+        while (added.length > 0) rows.push(added.shift());
+        var removed = [];
+        var newSet = {};
+        for (var m = 0; m < newLines.length; m += 1) newSet[newLines[m]] = true;
+        var rebuilt = [];
+        for (var n = 0; n < rows.length; n += 1) {
+          if (rows[n].type === "same" && !newSet[rows[n].text]) {
+            removed.push({ text: rows[n].text, type: "removed" });
+          } else {
+            while (removed.length > 0) rebuilt.push(removed.shift());
+            rebuilt.push(rows[n]);
+          }
+        }
+        while (removed.length > 0) rebuilt.push(removed.shift());
+        return rebuilt;
+      }
+
+      function submitArtifactForReview(name) {
+        if (name === "") {
+          byId("artifact-message").textContent = "找不到可送審的 artifact 名稱。";
+          return;
+        }
+        postJson("/workspace/request", { request: "Review " + name }).then(function () {
+          byId("artifact-message").textContent = "已送出審查請求：" + name;
+          refresh();
+        }).catch(function (error) {
+          setAreaError("artifact-message", error);
+        });
+      }
+
+      function downloadArtifact(artifact) {
+        var content = firstString(artifact, ["content"]);
+        if (content === "") {
+          byId("artifact-message").textContent = "此 artifact 沒有可下載的內容。";
+          return;
+        }
+        var mediaType = firstString(artifact, ["media_type"]) || "text/plain";
+        var extension = mediaType === "application/json" ? ".json" : mediaType === "text/markdown" ? ".md" : ".txt";
+        var blob = new Blob([content], { type: mediaType });
+        var url = URL.createObjectURL(blob);
+        var link = document.createElement("a");
+        link.href = url;
+        link.download = (firstString(artifact, ["name"]) || firstString(artifact, ["id"]) || "artifact") + extension;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
       }
 
       var cachedOperations = [];

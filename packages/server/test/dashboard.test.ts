@@ -79,9 +79,14 @@ describe("local Dashboard", () => {
       "送出裁決",
       "Director 解析",
       "事實裁決需要原因",
+      "目前版本",
+      "與前一版差異",
+      "送審",
+      "下載",
     ]) {
       expect(html).toContain(label);
     }
+    expect(html).not.toContain("後續提供");
     for (const endpoint of [
       "/workspace/dashboard/data",
       "/workspace/publish/preview",
@@ -113,6 +118,7 @@ describe("local Dashboard", () => {
       const data = await (await fetch(`${base}/workspace/dashboard/data`)).json();
       expect(data.project).toMatchObject({ project_id: "dashboard-endpoints" });
       expect(Array.isArray(data.artifacts)).toBe(true);
+      expect(Array.isArray(data.artifact_groups)).toBe(true);
       expect(Array.isArray(data.operations)).toBe(true);
       expect(Array.isArray(data.reviews)).toBe(true);
       expect(Array.isArray(data.issues)).toBe(true);
