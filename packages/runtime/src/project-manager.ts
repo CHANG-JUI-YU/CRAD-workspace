@@ -42,6 +42,35 @@ async function exists(filePath: string): Promise<boolean> {
   }
 }
 
+export type FindTargetProjectResult =
+  | { status: "found"; target: WorkspaceProjectSummary }
+  | { status: "not_found" }
+  | { status: "ambiguous"; candidates: WorkspaceProjectSummary[] };
+
+export function findTargetProject(requested: string, summaries: WorkspaceProjectSummary[]): FindTargetProjectResult {
+  const trimmed = requested.trim();
+  if (trimmed.length === 0) return { status: "not_found" };
+  const resolvedRequested = path.resolve(trimmed);
+
+  const exactIdMatches = summaries.filter((item) => item.project_id === trimmed);
+  if (exactIdMatches.length === 1) return { status: "found", target: exactIdMatches[0]! };
+
+  const exactPathMatches = summaries.filter((item) => path.resolve(item.path) === resolvedRequested);
+  if (exactPathMatches.length === 1) return { status: "found", target: exactPathMatches[0]! };
+
+  const matches = summaries.filter((item) =>
+    item.project_id === trimmed ||
+    item.project_name === trimmed ||
+    path.basename(item.path) === trimmed ||
+    path.resolve(item.path) === resolvedRequested
+  );
+
+  if (matches.length === 0) return { status: "not_found" };
+  if (matches.length === 1) return { status: "found", target: matches[0]! };
+
+  return { status: "ambiguous", candidates: matches };
+}
+
 export class WorkspaceProjectManager {
   private repositoryValue: FileProjectRepository;
   private runtimeValue: WorkspaceRuntime;
@@ -144,10 +173,12 @@ export class WorkspaceProjectManager {
   async select(project: string): Promise<WorkspaceProjectSummary> {
     if (this.preparePromise !== undefined) await this.preparePromise;
     const requested = project.trim();
-    if (requested.length === 0 || requested.includes("/") || requested.includes("\\") || requested === "." || requested === "..") throw new CoreError("PROJECT_SELECTION_INVALID", "請提供可見的專案名稱或資料夾名稱 (project selection must be a project name or id)", true);
+    if (requested.length === 0 || requested.startsWith("..") || requested === "." || requested === "..") throw new CoreError("PROJECT_SELECTION_INVALID", "請提供可見的專案名稱或資料夾名稱 (project selection must be a project name or id)", true);
     const summaries = await this.listProjects();
-    const selected = summaries.find((item) => item.project_id === requested || item.project_name === requested || path.basename(item.path) === requested);
-    if (selected === undefined) throw new CoreError("PROJECT_NOT_FOUND", `找不到專案「${requested}」 (project was not found)`, true);
+    const result = findTargetProject(requested, summaries);
+    if (result.status === "not_found") throw new CoreError("PROJECT_NOT_FOUND", `找不到專案「${requested}」 (project was not found)`, true);
+    if (result.status === "ambiguous") throw new CoreError("PROJECT_SELECTION_AMBIGUOUS", `發現多個符合「${requested}」的專案，請提供專案 ID 或完整路徑 (ambiguous project selection)`, true);
+    const selected = result.target;
     this.repositoryValue = new FileProjectRepository(this.options.root, path.basename(selected.path), { layout: "project", materialize: true });
     this.runtimeValue = this.options.createRuntime(this.repositoryValue);
     this.placeholderReuseAllowed = false;
@@ -240,28 +271,73 @@ export class WorkspaceProjectManager {
     const flow = placeholderState.interview.flow;
     if (flow !== "continue" && flow !== "world" && flow !== "character_expansion") return undefined;
     const values = placeholderState.interview.values;
-    const targetValue = flow === "continue"
-      ? values.continue_project
+    const targetQuestionId = flow === "continue"
+      ? "continue_project"
       : flow === "world" && typeof values.world_kind === "string" && values.world_kind.replace(/\s+/gu, "").includes("既有專案")
-        ? values.world_project
+        ? "world_project"
         : flow === "character_expansion"
-          ? values.expansion_project
+          ? "expansion_project"
           : undefined;
+
+    if (targetQuestionId === undefined) return undefined;
+    const targetValue = values[targetQuestionId];
     if (typeof targetValue !== "string" || targetValue.trim().length === 0) return undefined;
     const targetName = targetValue.trim();
+
     const summaries = await this.listProjects();
-    const target = summaries.find((item) => item.project_id === targetName || item.project_name === targetName || path.basename(item.path) === targetName);
-    if (target === undefined) {
+    const targetResult = findTargetProject(targetName, summaries);
+
+    const interviewOperation = [...placeholderState.operations].reverse().find((item) => item.kind === "interview");
+
+    if (targetResult.status !== "found") {
+      const restoredValues = { ...placeholderState.interview.values };
+      delete restoredValues[targetQuestionId];
+      const restoredAnswers = placeholderState.interview.answers.filter((item) => item.question_id !== targetQuestionId);
+
+      const targetQuestionText = targetQuestionId === "continue_project"
+        ? "請提供要繼續的專案名稱或路徑。"
+        : targetQuestionId === "world_project"
+          ? "請提供既有專案名稱或路徑。"
+          : "請提供要擴充角色的既有專案名稱或路徑。";
+
+      const restoredQuestion = {
+        id: targetQuestionId,
+        text: targetQuestionText,
+        kind: "free_text" as const,
+      };
+
+      const errorSummary = targetResult.status === "ambiguous"
+        ? `發現多個符合「${targetName}」的專案，請提供專案 ID 或完整路徑。`
+        : `找不到專案「${targetName}」，請重新輸入專案 ID、名稱或完整路徑。`;
+
+      await placeholderRepository.commit(placeholderState.revision, (current) => ({
+        ...current,
+        interview: {
+          ...current.interview,
+          status: "active" as const,
+          current: restoredQuestion,
+          answers: restoredAnswers,
+          values: restoredValues,
+        },
+        operations: interviewOperation === undefined
+          ? current.operations
+          : current.operations.map((op) => op.id === interviewOperation.id ? { ...op, status: "needs_input" as const, question: targetQuestionText, result_summary: errorSummary } : op),
+      }));
+
       return {
         ...result,
         status: "needs_input" as const,
-        summary: `找不到專案「${targetName}」；此流程已中止，請重新開始並從專案清單選擇目標。`,
+        summary: errorSummary,
+        question: targetQuestionText,
+        interview_question: restoredQuestion,
         completed: [],
         blocked: [...(result.operation_id === undefined ? [] : [result.operation_id])],
       };
     }
+
+    const target = targetResult.target;
     if (target.project_id === placeholderState.project_id) return undefined;
-    const interviewOperation = [...placeholderState.operations].reverse().find((item) => item.kind === "interview");
+
     await this.select(target.project_id);
     const targetState = await this.repositoryValue.read();
     const operationToMigrate = interviewOperation === undefined
@@ -269,6 +345,50 @@ export class WorkspaceProjectManager {
       : targetState.operations.some((item) => item.id === interviewOperation.id)
         ? { ...interviewOperation, id: internalId("operation") }
         : interviewOperation;
+
+    if (flow === "continue") {
+      const migrated = await this.repositoryValue.commit(targetState.revision, (current) => ({
+        ...current,
+        project_status: current.project_status === "uninitialized" ? "ready" : current.project_status,
+        interview: placeholderState.interview,
+        operations: operationToMigrate === undefined ? current.operations : [...current.operations, operationToMigrate],
+        audit: [
+          ...current.audit,
+          {
+            id: internalId("audit"),
+            operation_id: operationToMigrate?.id ?? internalId("operation"),
+            event: "interview.target.migrated",
+            actor: context.actor,
+            occurred_at: now(),
+            project_revision: current.revision + 1,
+            details: { source_project: placeholderState.project_id, target_project: target.project_id, flow, target_revision: targetState.revision },
+          },
+        ],
+      }));
+
+      await placeholderRepository.commit(placeholderState.revision, (current) => ({
+        ...current,
+        project_status: "uninitialized",
+        interview: {
+          schema_version: 1,
+          status: "idle",
+          flow: "new_project",
+          answers: [],
+          values: {},
+        },
+        operations: interviewOperation === undefined ? current.operations : current.operations.filter((item) => item.id !== interviewOperation.id),
+      }));
+
+      return {
+        ...result,
+        status: "completed" as const,
+        project_id: migrated.project_id,
+        ...(migrated.project_name === undefined ? {} : { project_name: migrated.project_name }),
+        project_path: this.repositoryValue.projectDirectory,
+        summary: `已切換至專案「${target.project_name ?? target.project_id}」。`,
+      };
+    }
+
     const migrated = await this.repositoryValue.commit(targetState.revision, (current) => ({
       ...current,
       project_status: "interviewing",
@@ -287,6 +407,7 @@ export class WorkspaceProjectManager {
         },
       ],
     }));
+
     await placeholderRepository.commit(placeholderState.revision, (current) => ({
       ...current,
       project_status: "uninitialized",
@@ -299,6 +420,7 @@ export class WorkspaceProjectManager {
       },
       operations: interviewOperation === undefined ? current.operations : current.operations.filter((item) => item.id !== interviewOperation.id),
     }));
+
     const continued = placeholderState.interview.status !== "complete";
     return {
       ...result,

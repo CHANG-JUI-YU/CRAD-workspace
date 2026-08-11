@@ -368,18 +368,25 @@ function mergeExpansionIntoBlueprint(state: ProjectState, expansionPrecheck: Blu
   const expansion = objectValue(expansionPrecheck.candidate_blueprint) ?? {};
   const expansionCharacters = Array.isArray(expansion.characters) ? expansion.characters as Array<Record<string, unknown>> : [];
   const existingCharacters = Array.isArray(previousBlueprint.characters) ? previousBlueprint.characters as Array<Record<string, unknown>> : [];
+  const existingIds = new Set(existingCharacters.map((candidate) => typeof candidate.id === "string" ? candidate.id as string : ""));
   const existingOrdinals = existingCharacters.map((candidate) => typeof candidate.ordinal === "number" ? candidate.ordinal as number : 0);
   const newSubject = expansionCharacters[0];
   if (newSubject === undefined) {
     return { artifact: createBlueprintArtifact(state, expansionPrecheck, operationId, actor), precheck: expansionPrecheck };
   }
   const maxOrdinal = existingOrdinals.length === 0 ? 0 : Math.max(...existingOrdinals);
+  let nextIndex = 1;
+  while (existingIds.has(`character-${nextIndex}`)) {
+    nextIndex += 1;
+  }
+  const newCharacterId = `character-${nextIndex}`;
+  const newOrdinal = maxOrdinal + 1;
   const mergedCharacters = [
     ...existingCharacters,
     {
-      id: `character-${maxOrdinal + 1}`,
+      id: newCharacterId,
       label: typeof newSubject.label === "string" ? newSubject.label : "新角色",
-      ordinal: maxOrdinal + 1,
+      ordinal: newOrdinal,
       display_name: typeof newSubject.display_name === "string" ? newSubject.display_name : (typeof newSubject.label === "string" ? newSubject.label : "新角色"),
       ...(typeof newSubject.mode === "string" ? { mode: newSubject.mode } : {}),
       ...(objectValue(newSubject.direction) === undefined ? {} : { direction: newSubject.direction }),
@@ -436,6 +443,78 @@ function mergeExpansionIntoBlueprint(state: ProjectState, expansionPrecheck: Blu
     },
     precheck: mergedPrecheck,
   };
+}
+
+function mergeWorldIntoBlueprint(state: ProjectState, worldPrecheck: BlueprintPrecheckRecord, operationId: string, actor: string): { artifact: ArtifactRecord | undefined; precheck: BlueprintPrecheckRecord } {
+  const previousBlueprint = latestBlueprintSnapshot(state);
+  const previousPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
+  if (previousBlueprint === undefined || previousPrecheck === undefined) {
+    return { artifact: createBlueprintArtifact(state, worldPrecheck, operationId, actor), precheck: worldPrecheck };
+  }
+  const worldCandidate = objectValue(worldPrecheck.candidate_blueprint) ?? {};
+  const newWorld = objectValue(worldCandidate.world);
+  const existingIntake = objectValue(previousBlueprint.intake_values);
+  const newIntake = objectValue(worldCandidate.intake_values);
+
+  const mergedCandidate: Record<string, unknown> = {
+    ...previousBlueprint,
+    ...(newWorld === undefined ? {} : { world: newWorld }),
+    intake_values: { ...(existingIntake ?? {}), ...(newIntake ?? {}) },
+  };
+  const mergedRevision = contentHash(canonicalJson(mergedCandidate));
+  const mergedPrecheck: BlueprintPrecheckRecord = {
+    id: internalId("blueprint_precheck"),
+    schema_version: 1,
+    project_id: state.project_id,
+    operation_id: operationId,
+    collaboration_mode: worldPrecheck.collaboration_mode,
+    candidate_blueprint: mergedCandidate,
+    candidate_blueprint_revision: mergedRevision,
+    checks: [
+      ...previousPrecheck.checks,
+      ...worldPrecheck.checks,
+    ],
+    status: "recorded",
+    created_at: now(),
+    created_by: actor,
+  };
+  const content = blueprintContent(mergedPrecheck);
+  const hash = contentHash(content);
+  const key = blueprintKey(state.project_id);
+  const previousArtifact = [...state.artifacts].reverse().find((artifact) => artifact.key === key);
+  if (previousArtifact?.content_hash === hash) return { artifact: undefined, precheck: mergedPrecheck };
+  return {
+    artifact: {
+      id: internalId("artifact"),
+      key,
+      kind: "blueprint",
+      name: "project-blueprint",
+      content,
+      media_type: "application/json",
+      content_hash: hash,
+      revision: hash,
+      status: "draft",
+      created_at: now(),
+      updated_at: now(),
+      created_by: actor,
+      operation_id: operationId,
+      ...(previousArtifact === undefined ? {} : { based_on: previousArtifact.revision }),
+      blueprint_precheck_id: mergedPrecheck.id,
+      blueprint_precheck_revision: mergedPrecheck.candidate_blueprint_revision,
+    },
+    precheck: mergedPrecheck,
+  };
+}
+
+function mergePatchBlueprint(state: ProjectState, precheck: BlueprintPrecheckRecord, operationId: string, actor: string): { artifact: ArtifactRecord | undefined; precheck: BlueprintPrecheckRecord } | undefined {
+  if (state.interview.flow === "character_expansion") {
+    return mergeExpansionIntoBlueprint(state, precheck, operationId, actor);
+  }
+  const isExistingWorldFlow = state.interview.flow === "world" && typeof state.interview.values.world_kind === "string" && state.interview.values.world_kind.replace(/\s+/gu, "").includes("既有專案");
+  if (isExistingWorldFlow) {
+    return mergeWorldIntoBlueprint(state, precheck, operationId, actor);
+  }
+  return undefined;
 }
 
 function interviewCharacterSubjects(interview: InterviewState): InterviewCharacterSubject[] {
@@ -1032,17 +1111,17 @@ export class WorkspaceRuntime {
       const nextQuestion = nextCheck === undefined ? undefined : precheckConfirmQuestion(nextCheck, precheckSubjectLabel(updatedPrecheck, nextCheck));
       const allDone = nextCheck === undefined;
       const confirmedPrecheck: BlueprintPrecheckRecord = { ...updatedPrecheck, status: allDone ? "recorded" : "needs_input" };
-      const mergedExpansion = allDone && state.interview.flow === "character_expansion"
-        ? mergeExpansionIntoBlueprint(state, confirmedPrecheck, operation.id, context.actor)
+      const mergedPatch = allDone
+        ? mergePatchBlueprint(state, confirmedPrecheck, operation.id, context.actor)
         : undefined;
-      const recordedPrecheck = mergedExpansion?.precheck ?? confirmedPrecheck;
+      const recordedPrecheck = mergedPatch?.precheck ?? confirmedPrecheck;
       const blueprintArtifact = allDone
-        ? (mergedExpansion?.artifact ?? createBlueprintArtifact(state, confirmedPrecheck, operation.id, context.actor))
+        ? (mergedPatch?.artifact ?? createBlueprintArtifact(state, confirmedPrecheck, operation.id, context.actor))
         : undefined;
       const finalized = await this.repository.commit(state.revision, (current) => ({
         ...current,
         project_status: allDone ? "ready" : "interviewing",
-        blueprint_prechecks: mergedExpansion === undefined
+        blueprint_prechecks: mergedPatch === undefined
           ? current.blueprint_prechecks.map((item) => item.id === pendingPrecheck.id ? confirmedPrecheck : item)
           : current.blueprint_prechecks.map((item) => item.id === pendingPrecheck.id ? recordedPrecheck : item),
         artifacts: blueprintArtifact === undefined ? current.artifacts : [...current.artifacts, blueprintArtifact],
@@ -1124,12 +1203,12 @@ export class WorkspaceRuntime {
         return pending === undefined ? undefined : precheckConfirmQuestion(pending, precheckSubjectLabel(precheck, pending));
       })()
       : undefined;
-    const mergedExpansion = workflowComplete && precheck !== undefined && interview.flow === "character_expansion"
-      ? mergeExpansionIntoBlueprint(state, precheck, operation.id, context.actor)
+    const mergedPatch = workflowComplete && precheck !== undefined
+      ? mergePatchBlueprint(state, precheck, operation.id, context.actor)
       : undefined;
-    const recordedPrecheck = mergedExpansion?.precheck ?? precheck;
+    const recordedPrecheck = mergedPatch?.precheck ?? precheck;
     const blueprintArtifact = workflowComplete && precheck !== undefined
-      ? (mergedExpansion?.artifact ?? createBlueprintArtifact(state, precheck, operation.id, context.actor))
+      ? (mergedPatch?.artifact ?? createBlueprintArtifact(state, precheck, operation.id, context.actor))
       : undefined;
     const precheckAudit = precheck === undefined ? [] : [{
       id: internalId("audit"),
@@ -1146,14 +1225,14 @@ export class WorkspaceRuntime {
       project_status: workflowComplete ? "ready" : "interviewing",
       interview: firstConfirmQuestion === undefined ? interview : { ...interview, current: firstConfirmQuestion },
       ...(precheck === undefined ? {} : {
-        blueprint_prechecks: mergedExpansion === undefined
+        blueprint_prechecks: mergedPatch === undefined
           ? [
             ...current.blueprint_prechecks.map((item) => item.status === "recorded" ? { ...item, status: "superseded" as const } : item),
             precheck,
           ]
           : [
             ...current.blueprint_prechecks.map((item) => item.id === precheck.id || item.status === "recorded" ? { ...item, status: item.id === precheck.id ? item.status : "superseded" as const } : item),
-            mergedExpansion.precheck,
+            mergedPatch.precheck,
           ],
       }),
       artifacts: blueprintArtifact === undefined ? current.artifacts : [...current.artifacts, blueprintArtifact],

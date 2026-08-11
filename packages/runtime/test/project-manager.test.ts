@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { FileProjectRepository } from "@st-workspace/core";
+import { contentHash, canonicalJson, FileProjectRepository } from "@st-workspace/core";
 import { WorkspaceProjectManager, WorkspaceRuntime } from "../src/index.js";
 
 const roots: string[] = [];
@@ -253,5 +253,135 @@ describe("workspace project manager", () => {
     expect(placeholder.blueprint_prechecks).toHaveLength(0);
     expect(placeholder.artifacts.filter((item) => item.kind === "blueprint")).toHaveLength(0);
     expect(placeholder.operations).toHaveLength(0);
+  });
+
+  it("BUG3-02: supports full path in target selector and preserves target ready status on continue", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-bug302-continue-"));
+    roots.push(root);
+    const targetRepo = new FileProjectRepository(root, "project-001", { layout: "project", materialize: true });
+    const targetState = await targetRepo.read();
+    await targetRepo.commit(targetState.revision, (state) => ({
+      ...state,
+      project_name: "目標專案",
+      project_status: "ready",
+    }));
+
+    const projects = manager(root);
+    const fullPath = targetRepo.projectDirectory;
+    await projects.answerInterview("繼續專案", { actor: "user", attachments: [] });
+    const result = await projects.answerInterview(fullPath, { actor: "user", attachments: [] });
+
+    expect(result.status).toBe("completed");
+    expect(result.project_id).toBe("project-001");
+    const updatedTarget = await targetRepo.read();
+    expect(updatedTarget.project_status).toBe("ready");
+  });
+
+  it("BUG3-02: restores question state on invalid target project so user can re-input in same interview", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-bug302-invalid-target-"));
+    roots.push(root);
+    const targetRepo = new FileProjectRepository(root, "project-001", { layout: "project", materialize: true });
+    const targetState = await targetRepo.read();
+    await targetRepo.commit(targetState.revision, (state) => ({
+      ...state,
+      project_name: "合法專案",
+      project_status: "ready",
+    }));
+
+    const projects = manager(root);
+    await projects.answerInterview("繼續專案", { actor: "user", attachments: [] });
+    const invalidResult = await projects.answerInterview("不存在的專案", { actor: "user", attachments: [] });
+
+    expect(invalidResult.status).toBe("needs_input");
+    expect(invalidResult.summary).toContain("找不到專案");
+    expect(invalidResult.interview_question?.id).toBe("continue_project");
+
+    const retryResult = await projects.answerInterview("合法專案", { actor: "user", attachments: [] });
+    expect(retryResult.status).toBe("completed");
+    expect(retryResult.project_id).toBe("project-001");
+  });
+
+  it("BUG3-02: existing-world preserves target blueprint roster and source-adaptation intent", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-bug302-world-patch-"));
+    roots.push(root);
+    const targetRepo = new FileProjectRepository(root, "project-001", { layout: "project", materialize: true });
+    const initialBlueprintObj = {
+      schema_version: 1,
+      kind: "blueprint",
+      project_id: "project-001",
+      characters: [
+        { id: "character-1", label: "Alpha", ordinal: 1 },
+        { id: "character-2", label: "Beta", ordinal: 2 },
+      ],
+      primary_character_id: "character-1",
+      source_adaptation: { subject_name: "Original Anime", canon_policy: "canon_faithful" },
+    };
+    const initialBlueprint = JSON.stringify(initialBlueprintObj);
+    const hash = contentHash(initialBlueprint);
+    const targetState = await targetRepo.read();
+    await targetRepo.commit(targetState.revision, (state) => ({
+      ...state,
+      project_name: "既有角色專案",
+      project_status: "ready",
+      artifacts: [
+        ...state.artifacts,
+        {
+          id: "art-bp-01",
+          key: "blueprint:project-001",
+          kind: "blueprint",
+          name: "project-blueprint",
+          content: initialBlueprint,
+          media_type: "application/json",
+          content_hash: hash,
+          revision: hash,
+          status: "draft",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          created_by: "user",
+          operation_id: "op-01",
+        },
+      ],
+      blueprint_prechecks: [
+        {
+          id: "precheck-01",
+          schema_version: 1,
+          project_id: "project-001",
+          operation_id: "op-01",
+          collaboration_mode: "free",
+          candidate_blueprint: initialBlueprintObj,
+          candidate_blueprint_revision: hash,
+          checks: [
+            {
+              subject_id: "character-1",
+              dimension: "character_core",
+              uncertainty: "low",
+              impact: "high",
+              basis: "Explicit input",
+              action: "preserve_explicit",
+            },
+          ],
+          status: "recorded",
+          created_at: new Date().toISOString(),
+          created_by: "user",
+        },
+      ],
+    }));
+
+    const projects = manager(root);
+    await projects.answerInterview("世界設定", { actor: "user", attachments: [] });
+    const worldKind = (await projects.interviewContext()).question?.options?.find((option) => option.includes("既有專案"));
+    await projects.answerInterview(worldKind!, { actor: "user", attachments: [] });
+    await projects.answerInterview("既有角色專案", { actor: "user", attachments: [] });
+    await projects.answerInterview("龐克世界設定", { actor: "user", attachments: [] });
+    await projects.answerInterview("之前", { actor: "user", attachments: [] });
+
+    const updatedState = await targetRepo.read();
+    const blueprints = updatedState.artifacts.filter((a) => a.kind === "blueprint");
+    expect(blueprints.length).toBeGreaterThan(0);
+    const latestBp = JSON.parse(blueprints[blueprints.length - 1]!.content);
+    expect(latestBp.characters).toHaveLength(2);
+    expect(latestBp.primary_character_id).toBe("character-1");
+    expect(latestBp.source_adaptation?.subject_name).toBe("Original Anime");
+    expect(latestBp.world?.concept).toBe("龐克世界設定");
   });
 });
