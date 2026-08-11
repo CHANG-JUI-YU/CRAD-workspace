@@ -207,6 +207,7 @@ export interface KnowledgeChunk {
   ordinal: number;
   text: string;
   hash: string;
+  extractor_revision?: string;
   created_at: string;
 }
 
@@ -681,6 +682,7 @@ const knowledgeChunkSchema = z.object({
   ordinal: z.number().int().nonnegative(),
   text: z.string().min(1),
   hash: z.string().regex(/^[a-f0-9]{64}$/u),
+  extractor_revision: z.string().min(1).optional(),
   created_at: z.string().datetime({ offset: true }),
 }).strict();
 

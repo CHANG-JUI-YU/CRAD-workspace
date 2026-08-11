@@ -63,6 +63,7 @@ export interface FactReviewContext {
   run?: FactReviewRunRecord;
   projection_revision?: string;
   candidates: FactReviewCandidateContext[];
+  next_cursor?: string;
 }
 
 export interface AuthoringKnowledgeContext {

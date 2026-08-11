@@ -57,6 +57,8 @@ import {
   type ArtifactKind,
   type RepairInspection,
   type RepairReport,
+  type FactRecord,
+  type FactClassification,
 } from "@st-workspace/core";
 import {
   AuthoringService,
@@ -77,6 +79,7 @@ import {
   type WorkflowGateResult,
   type ReviewExecutionResult,
   type FactReviewExecutionResult,
+  type KnowledgeExecutionResult,
 } from "@st-workspace/domain";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
 
@@ -318,14 +321,30 @@ function sourceFactsReady(state: ProjectState): boolean {
   });
 }
 
-function buildAuthoringKnowledgeContext(state: ProjectState): AuthoringKnowledgeContext {
+function buildAuthoringKnowledgeContext(state: ProjectState, options?: { character_id?: string; related_character_ids?: ReadonlyArray<string>; coverage?: ReadonlyArray<string> }): AuthoringKnowledgeContext {
   const blueprint = latestBlueprintSnapshot(state);
   const candidateById = new Map(state.candidates.map((candidate) => [candidate.id, candidate]));
+  const characterId = options?.character_id;
+  const factRelevant = (fact: FactRecord): boolean => {
+    if (characterId === undefined) return true;
+    const subject = fact.subject ?? "";
+    if (subject === characterId) return true;
+    if ((fact.coverage ?? []).includes(characterId)) return true;
+    if (fact.classification === "world") return true;
+    if ((options?.related_character_ids ?? []).includes(subject)) return true;
+    return false;
+  };
+  const coverageFiltered = (fact: FactRecord): boolean => {
+    if (options?.coverage === undefined || options.coverage.length === 0) return true;
+    return (fact.coverage ?? []).some((dimension) => options.coverage!.includes(dimension));
+  };
+  const acceptedFacts = state.facts.filter((fact) => fact.status === "accepted" && factRelevant(fact) && coverageFiltered(fact));
+  const unresolvedFacts = state.facts.filter((fact) => fact.status !== "accepted" && factRelevant(fact) && coverageFiltered(fact));
   return {
     ...(blueprint === undefined ? {} : { blueprint }),
     ...(objectValue(blueprint?.source_adaptation)?.subject_name === undefined ? {} : { source_adaptation: blueprint?.source_adaptation as SourceAdaptationIntent }),
-    accepted_facts: state.facts.filter((fact) => fact.status === "accepted"),
-    unresolved_facts: state.facts.filter((fact) => fact.status !== "accepted"),
+    accepted_facts: acceptedFacts,
+    unresolved_facts: unresolvedFacts,
     sources: state.sources.map((source) => sourceContextFromRecord(source, candidateById.get(source.candidate_id))),
     fact_register_revision: contentHash(canonicalJson(state.facts.map((fact) => ({ id: fact.id, status: fact.status, updated_at: fact.updated_at })))),
     adaptation_decisions: [...state.adaptation_decisions],
@@ -1985,7 +2004,7 @@ export class WorkspaceRuntime {
   /* c8 ignore stop */
   async zhujiContext(characterId?: string): Promise<{ schema: Record<string, unknown>; context: ReturnType<typeof buildZhujiTemplateContext> }> {
     const state = await this.repository.read();
-    const knowledge = buildAuthoringKnowledgeContext(state);
+    const knowledge = buildAuthoringKnowledgeContext(state, characterId === undefined ? undefined : { character_id: characterId });
     const existing = state.artifacts.flatMap((artifact) => {
       if (artifact.kind !== "zhuji") return [];
       try {
@@ -2002,11 +2021,6 @@ export class WorkspaceRuntime {
 
   async templateContext(kind: TemplateKind): Promise<{ schema: Record<string, unknown>; context: ReturnType<typeof buildTemplateContext> }> {
     const state = await this.repository.read();
-    const factReview = kind === "fact_review" ? await this.knowledge.factReviewContext() : undefined;
-    const knowledge: AuthoringKnowledgeContext = {
-      ...buildAuthoringKnowledgeContext(state),
-      ...(factReview === undefined ? {} : { fact_review: factReview as FactReviewContext }),
-    };
     const existing = state.artifacts.flatMap<TemplateInstance>((artifact): TemplateInstance[] => {
       if (kind === "wardrobe" && artifact.kind === "wardrobe") {
         const characterId = artifact.name.split("/")[0]?.trim();
@@ -2016,14 +2030,29 @@ export class WorkspaceRuntime {
         return [{ artifact_id: artifact.id, kind, name: artifact.name, value: { kind: "wardrobe", character_id: characterId, content }, content: parsed.document, markdown: content, revision: artifact.revision }];
       }
       try {
-        const value = JSON.parse(artifact.content) as { kind?: unknown };
-        if (value.kind !== kind) return [];
+        const value = JSON.parse(artifact.content) as { kind?: unknown; document?: unknown };
+        const kindMatch = kind === "character" ? value.document !== undefined || value.kind === "character" : value.kind === kind;
+        if (!kindMatch) return [];
         const name = artifact.name;
         return [{ artifact_id: artifact.id, kind, name, value, content: value, revision: artifact.revision }];
       } catch {
         return [];
       }
     });
+    const factReview = kind === "fact_review" ? await this.knowledge.factReviewContext() : undefined;
+    const firstInstance = existing[0];
+    const rawValue = firstInstance?.value as { character_id?: unknown; document?: { id?: unknown } } | undefined;
+    const instanceCharacterId = typeof rawValue?.character_id === "string"
+      ? rawValue.character_id
+      : typeof rawValue?.document?.id === "string"
+        ? rawValue.document.id
+        : typeof firstInstance?.name === "string" && firstInstance.name.includes("/")
+          ? firstInstance.name.split("/")[0]
+          : undefined;
+    const knowledge: AuthoringKnowledgeContext = {
+      ...buildAuthoringKnowledgeContext(state, kind === "fact_review" || instanceCharacterId === undefined ? undefined : { character_id: instanceCharacterId }),
+      ...(factReview === undefined ? {} : { fact_review: factReview as FactReviewContext }),
+    };
     const context = buildTemplateContext(kind, existing, knowledge);
     return { schema: templateJsonSchemaFor(kind), context };
   }
@@ -3236,8 +3265,12 @@ export class WorkspaceRuntime {
     return this.repository.runRepair(planHash);
   }
 
-  async factReviewContext(): Promise<FactReviewContext> {
-    return this.knowledge.factReviewContext();
+  async factReviewContext(options?: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification }): Promise<FactReviewContext> {
+    return this.knowledge.factReviewContext(options);
+  }
+
+  async reextract(operationId: string, sourceIds: readonly string[], actor: string, extractorRevision?: string): Promise<KnowledgeExecutionResult> {
+    return this.knowledge.reextract(operationId, sourceIds, actor, extractorRevision);
   }
 
   async startFactReviewRun(actor: string): Promise<FactReviewRunRecord> {

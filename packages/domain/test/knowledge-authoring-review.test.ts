@@ -744,4 +744,78 @@ describe("knowledge, authoring and review services", () => {
       expect(state.facts[0]?.fact_revision).toBe(2);
     });
   });
+
+  describe("re-extraction and paginated fact review context", () => {
+    function sourceRecord(id: string, text: string): SourceRecord {
+      return { id, candidate_id: `candidate-${id}`, title: id, canonical_text: text, original_hash: contentHash(text), revision: contentHash(text), media_type: "text/plain", created_at: new Date().toISOString() };
+    }
+
+    it("re-extracts known sources with the extractor revision stamped on chunks", async () => {
+      const repository = new MemoryProjectRepository("demo-reextract");
+      const text = "Yukino has a direct personality.";
+      await repository.commit(0, (state) => ({
+        ...state,
+        operations: [operation("op-k1", "knowledge"), operation("op-k2", "knowledge")],
+        sources: [sourceRecord("source-1", text)],
+      }));
+      const service = new KnowledgeService(repository);
+      const first = await service.refresh("op-k1", "整理知識", "curator");
+      expect(first.status).toBe("completed");
+      const second = await service.reextract("op-k2", ["source-1"], "curator");
+      expect(second.status).toBe("completed");
+      expect(second.summary).toContain("Re-extracted");
+      const state = await repository.read();
+      const chunks = state.knowledge_chunks.filter((chunk) => chunk.source_id === "source-1");
+      expect(chunks.length).toBeGreaterThanOrEqual(2);
+      expect(chunks.every((chunk) => chunk.extractor_revision === "extractor-v1")).toBe(true);
+      expect(state.audit.some((entry) => entry.event === "knowledge.reextracted" && entry.details.extractor_revision === "extractor-v1")).toBe(true);
+    });
+
+    it("stamps chunks with a custom extractor revision when one is provided", async () => {
+      const repository = new MemoryProjectRepository("demo-reextract-v2");
+      const text = "Yukino has a direct personality.";
+      await repository.commit(0, (state) => ({
+        ...state,
+        operations: [operation("op-k1", "knowledge")],
+        sources: [sourceRecord("source-1", text)],
+      }));
+      const service = new KnowledgeService(repository);
+      await service.reextract("op-k1", ["source-1"], "curator", "extractor-v2");
+      const state = await repository.read();
+      expect(state.knowledge_chunks.every((chunk) => chunk.extractor_revision === "extractor-v2")).toBe(true);
+    });
+
+    it("rejects missing sources and empty source id lists", async () => {
+      const repository = new MemoryProjectRepository("demo-reextract-errors");
+      await repository.commit(0, (state) => ({ ...state, operations: [operation("op-k1", "knowledge")], sources: [sourceRecord("source-1", "Yukino is calm.")] }));
+      const service = new KnowledgeService(repository);
+      await expect(service.reextract("op-k1", ["missing-source"], "curator")).rejects.toMatchObject({ code: "SOURCE_NOT_FOUND" });
+      await expect(service.reextract("op-k1", [], "curator")).rejects.toMatchObject({ code: "SOURCE_IDS_REQUIRED" });
+    });
+
+    it("paginates fact review candidates with an opaque cursor and triage filters", async () => {
+      const repository = new MemoryProjectRepository("demo-fact-paging");
+      const now = new Date().toISOString();
+      const facts: FactRecord[] = [
+        { id: "fact-1", candidate_occurrence_id: "occ-1", statement: "Yukino is calm.", subject: "Yukino", predicate: "is", value: "calm", classification: "trait", coverage: ["character"], status: "candidate", confidence: 0.7, source_ids: ["source-a"], evidence: ["source-a"], fact_revision: 1, created_at: now, updated_at: now, created_by: "curator" },
+        { id: "fact-2", candidate_occurrence_id: "occ-2", statement: "Yukino comes from the north.", subject: "Yukino", predicate: "comes from", value: "the north", classification: "event", coverage: ["background"], status: "candidate", confidence: 0.7, source_ids: ["source-b"], evidence: ["source-b"], fact_revision: 1, created_at: now, updated_at: now, created_by: "curator" },
+        { id: "fact-3", candidate_occurrence_id: "occ-3", statement: "The academy is ancient.", subject: "the academy", predicate: "is", value: "ancient", classification: "world", coverage: ["world_context"], status: "candidate", confidence: 0.7, source_ids: ["source-c"], evidence: ["source-c"], fact_revision: 1, created_at: now, updated_at: now, created_by: "curator" },
+      ];
+      await repository.commit(0, (state) => ({ ...state, operations: [operation("op-k1", "knowledge")], facts }));
+      const service = new KnowledgeService(repository);
+      const page1 = await service.factReviewContext({ limit: 2 });
+      expect(page1.candidates).toHaveLength(2);
+      expect(page1.next_cursor).toBe("index:2");
+      const page2 = await service.factReviewContext({ cursor: page1.next_cursor });
+      expect(page2.candidates).toHaveLength(1);
+      expect(page2.next_cursor).toBeUndefined();
+      const bySource = await service.factReviewContext({ source_id: "source-b" });
+      expect(bySource.candidates.map((candidate) => candidate.candidate_occurrence_id)).toEqual(["occ-2"]);
+      const byClassification = await service.factReviewContext({ classification: "world" });
+      expect(byClassification.candidates.map((candidate) => candidate.candidate_occurrence_id)).toEqual(["occ-3"]);
+      const unlimited = await service.factReviewContext();
+      expect(unlimited.candidates).toHaveLength(3);
+      expect(unlimited.next_cursor).toBeUndefined();
+    });
+  });
 });

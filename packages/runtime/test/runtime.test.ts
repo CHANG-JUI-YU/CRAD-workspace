@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deflateSync } from "node:zlib";
-import { CoreError, MemoryProjectRepository, contentHash, createProjectState, type ArtifactRecord, type BlueprintPrecheckRecord, type ProjectRepository, type ZhujiProposalValue } from "@st-workspace/core";
+import { CoreError, MemoryProjectRepository, contentHash, createProjectState, type ArtifactRecord, type BlueprintPrecheckRecord, type FactRecord, type ProjectRepository, type ZhujiProposalValue } from "@st-workspace/core";
 import { encodePngChunk, pngSignature } from "@st-workspace/adapters-png";
 import { WorkspaceRuntime } from "../src/index.js";
 
@@ -1653,6 +1653,29 @@ describe("artifact workbench groups", () => {
     expect(result.summary).toContain("agent_managed");
     const state = await repository.read();
     expect(state.candidates.length).toBe(0);
+  });
+
+  it("scopes creator knowledge contexts to the target character and keeps the full register available", async () => {
+    const repository = new MemoryProjectRepository("context-scope");
+    const now = new Date().toISOString();
+    const factAlpha: FactRecord = { id: "fact-alpha", candidate_occurrence_id: "occ-alpha", statement: "Alpha is calm.", subject: "alpha", predicate: "has_property", value: "calm", classification: "trait", coverage: ["personality"], status: "accepted", confidence: 0.9, source_ids: ["s1"], evidence: ["s1"], fact_revision: 1, created_at: now, updated_at: now, created_by: "fact-reviewer-1" };
+    const factBeta: FactRecord = { id: "fact-beta", candidate_occurrence_id: "occ-beta", statement: "Beta is loud.", subject: "beta", predicate: "has_property", value: "loud", classification: "trait", coverage: ["personality"], status: "accepted", confidence: 0.9, source_ids: ["s2"], evidence: ["s2"], fact_revision: 1, created_at: now, updated_at: now, created_by: "fact-reviewer-1" };
+    const factWorld: FactRecord = { id: "fact-world", candidate_occurrence_id: "occ-world", statement: "The city is foggy.", subject: "world", predicate: "has_property", value: "foggy", classification: "world", coverage: ["world_context"], status: "accepted", confidence: 0.9, source_ids: ["s3"], evidence: ["s3"], fact_revision: 1, created_at: now, updated_at: now, created_by: "fact-reviewer-1" };
+    await repository.commit(0, (state) => ({
+      ...state,
+      facts: [factAlpha, factBeta, factWorld],
+      artifacts: [{ id: "artifact-alpha", key: "character:alpha", kind: "character" as const, name: "alpha", content: JSON.stringify({ document: { schema_version: 1, id: "alpha", display_name: "Alpha", sections: [], provenance: [], extensions: {} } }), media_type: "application/json", content_hash: contentHash("alpha"), revision: contentHash("alpha"), status: "draft" as const, created_at: now, updated_at: now, created_by: "director", operation_id: "op" }],
+    }));
+    const runtime = new WorkspaceRuntime(repository);
+    const alpha = await runtime.zhujiContext("alpha");
+    expect(alpha.context.knowledge?.accepted_facts.map((fact) => fact.id)).toEqual(["fact-alpha", "fact-world"]);
+    expect(alpha.context.knowledge?.unresolved_facts).toEqual([]);
+    const beta = await runtime.zhujiContext("beta");
+    expect(beta.context.knowledge?.accepted_facts.map((fact) => fact.id)).toEqual(["fact-beta", "fact-world"]);
+    const all = await runtime.authoringKnowledgeContext();
+    expect(all.accepted_facts.map((fact) => fact.id)).toEqual(["fact-alpha", "fact-beta", "fact-world"]);
+    const template = await runtime.templateContext("character");
+    expect(template.context.knowledge?.accepted_facts.map((fact) => fact.id)).toEqual(["fact-alpha", "fact-world"]);
   });
 });
 

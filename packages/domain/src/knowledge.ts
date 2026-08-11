@@ -25,6 +25,9 @@ export interface KnowledgeExecutionResult {
   summary: string;
 }
 
+/** Version tag stamped on every chunk produced by the built-in extractor. */
+export const KNOWLEDGE_EXTRACTOR_REVISION = "extractor-v1";
+
 export interface FactReviewExecutionResult {
   fact_ids: string[];
   status: "completed" | "needs_input";
@@ -364,7 +367,7 @@ export class KnowledgeService {
       let mergedCount = 0;
       for (const source of currentSources) {
         splitIntoChunks(source.canonical_text).forEach((text, ordinal) => {
-          chunks.push({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), created_at: now() });
+          chunks.push({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), extractor_revision: KNOWLEDGE_EXTRACTOR_REVISION, created_at: now() });
         });
         for (const statement of sentenceCandidates(source.canonical_text)) {
           const candidate = factFromSentence(source, statement, actor);
@@ -433,6 +436,103 @@ export class KnowledgeService {
     return { chunks: needsInput ? [] : committedChunks, facts: needsInput ? [] : committedFacts, status: needsInput ? "needs_input" : "completed", summary: committedSummary };
   }
 
+  /**
+   * Re-extracts chunks and fact candidates from already-known sources,
+   * versioning every new chunk with the extractor revision so downstream
+   * review runs can distinguish regenerated content.
+   */
+  async reextract(operationId: string, sourceIds: readonly string[], actor: string, extractorRevision: string = KNOWLEDGE_EXTRACTOR_REVISION): Promise<KnowledgeExecutionResult> {
+    const initial = await this.repository.read();
+    const operation = initial.operations.find((item) => item.id === operationId);
+    if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
+    if (!Array.isArray(sourceIds) || sourceIds.length === 0) {
+      throw new CoreError("SOURCE_IDS_REQUIRED", "At least one source id is required for re-extraction.", true);
+    }
+    const missing = sourceIds.filter((id) => !initial.sources.some((source) => source.id === id));
+    if (missing.length > 0) {
+      throw new CoreError("SOURCE_NOT_FOUND", `Source ${missing[0]} does not exist.`, true);
+    }
+    let committedSummary = "Re-extracted 0 knowledge chunks and 0 structured fact candidates.";
+    let committedChunks: string[] = [];
+    let committedFacts: string[] = [];
+    await this.repository.commit(initial.revision, (current) => {
+      const chunks: KnowledgeChunk[] = [];
+      const existingFactsByKey = new Map(current.facts.map((fact) => [factKey(fact), fact]));
+      const newFactsByKey = new Map<string, FactRecord>();
+      const mergedFacts = new Map<string, FactRecord>();
+      let mergedCount = 0;
+      for (const sourceId of sourceIds) {
+        const source = current.sources.find((candidate) => candidate.id === sourceId);
+        if (source === undefined) continue;
+        splitIntoChunks(source.canonical_text).forEach((text, ordinal) => {
+          chunks.push({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), extractor_revision: extractorRevision, created_at: now() });
+        });
+        for (const statement of sentenceCandidates(source.canonical_text)) {
+          const candidate = factFromSentence(source, statement, actor);
+          const key = factKey(candidate);
+          const existing = existingFactsByKey.get(key);
+          if (existing !== undefined) {
+            const currentTarget = mergedFacts.get(existing.id) ?? existing;
+            const merged = mergeFactEvidence(currentTarget, candidate);
+            const hasNewEvidence = merged.source_ids.length > currentTarget.source_ids.length
+              || merged.evidence.length > currentTarget.evidence.length
+              || (merged.evidence_refs?.length ?? 0) > (currentTarget.evidence_refs?.length ?? 0);
+            if (hasNewEvidence) {
+              mergedFacts.set(existing.id, {
+                ...merged,
+                fact_revision: (currentTarget.fact_revision ?? 1) + 1,
+                updated_at: now(),
+                ...(existing.status === "accepted" ? { status: "candidate" as const } : {}),
+              });
+              mergedCount += 1;
+            }
+            continue;
+          }
+          const existingInBatch = newFactsByKey.get(key);
+          if (existingInBatch !== undefined) {
+            const merged = mergeFactEvidence(existingInBatch, candidate);
+            newFactsByKey.set(key, { ...merged, updated_at: now() });
+            continue;
+          }
+          newFactsByKey.set(key, candidate);
+        }
+      }
+      const facts = [...newFactsByKey.values()];
+      const batchSummary = `Re-extracted ${chunks.length} knowledge chunks and ${facts.length} structured fact candidates${mergedCount > 0 ? `; merged ${mergedCount} corroborating evidence into existing facts.` : "."}`;
+      committedSummary = batchSummary;
+      committedChunks = chunks.map((chunk) => chunk.id);
+      committedFacts = facts.map((fact) => fact.id);
+      return {
+        ...current,
+        ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
+        knowledge_chunks: [...current.knowledge_chunks, ...chunks],
+        facts: current.facts.map((fact) => mergedFacts.get(fact.id) ?? fact).concat(facts),
+        operations: current.operations.map((item) => item.id === operationId
+          ? updateOperation(item, {
+            status: "completed",
+            progress: [
+              ...item.progress,
+              ...chunks.map((chunk) => ({ item_id: chunk.id, status: "completed" as const, message: "Knowledge chunk re-extracted.", source_id: chunk.source_id })),
+              ...facts.map((fact) => ({ item_id: fact.id, status: "completed" as const, message: "Structured fact candidate created." })),
+              ...[...mergedFacts.entries()].map(([factId]) => ({ item_id: factId, status: "completed" as const, message: "Corroborating evidence merged into existing fact." })),
+            ],
+            result_summary: batchSummary,
+          })
+          : item),
+        audit: [...current.audit, {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "knowledge.reextracted",
+          actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: { source_ids: [...sourceIds], chunk_count: chunks.length, fact_count: facts.length, extractor_revision: extractorRevision, ...(mergedCount > 0 ? { merged_count: mergedCount } : {}) },
+        }],
+      };
+    });
+    return { chunks: committedChunks, facts: committedFacts, status: "completed", summary: committedSummary };
+  }
+
   async applyCuration(operationId: string, claims: FactClaim[], actor: string, auditActor = actor): Promise<KnowledgeExecutionResult> {
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
@@ -441,7 +541,7 @@ export class KnowledgeService {
     const curationSources = initial.sources.filter((source) => claims.some((claim) => claim.evidence.some((evidence) => sourceMatches(source, evidence.source))));
     const chunks: KnowledgeChunk[] = curationSources.flatMap((source) => {
       if (knownChunkSourceIds.has(source.id)) return [];
-      return splitIntoChunks(source.canonical_text).map((text, ordinal) => ({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), created_at: now() }));
+      return splitIntoChunks(source.canonical_text).map((text, ordinal) => ({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), extractor_revision: KNOWLEDGE_EXTRACTOR_REVISION, created_at: now() }));
     });
     const availableChunks = [...initial.knowledge_chunks, ...chunks];
     const knownFactsByKey = new Map(initial.facts.map((fact) => [factKey(fact), fact]));
@@ -570,10 +670,11 @@ export class KnowledgeService {
     return run;
   }
 
-  async factReviewContext(): Promise<{
+  async factReviewContext(options?: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification }): Promise<{
     run?: FactReviewRunRecord;
     projection_revision?: string;
     candidates: Array<{ candidate_occurrence_id: string; fact_id: string; statement: string; subject?: string; predicate?: string; value?: string; classification?: FactClassification; coverage?: string[]; status: FactRecord["status"]; source_ids: string[]; evidence: string[]; evidence_refs?: FactEvidenceReference[]; candidate_revision: string; last_decision?: FactReviewDecisionRecord["decision"]; last_reviewer_identity?: string }>;
+    next_cursor?: string;
   }> {
     const state = await this.repository.read();
     const run = [...state.fact_review_runs].reverse().find((candidate) => candidate.status === "open" || candidate.status === "blocked");
@@ -581,6 +682,8 @@ export class KnowledgeService {
     const candidates = occurrenceIds.flatMap((occurrenceId) => {
       const fact = state.facts.find((item) => candidateOccurrenceForFact(item) === occurrenceId);
       if (fact === undefined) return [];
+      if (options?.source_id !== undefined && !fact.source_ids.includes(options.source_id)) return [];
+      if (options?.classification !== undefined && fact.classification !== options.classification) return [];
       const lastDecision = run === undefined ? undefined : latestDecisionForOccurrence(state.fact_review_decisions, run.id, occurrenceId);
       // A successful decision is final for this run.  Blocked runs expose only
       // unresolved candidates so a reviewer can supply missing evidence; the
@@ -608,7 +711,13 @@ export class KnowledgeService {
         ...(lastDecision === undefined ? {} : { last_decision: lastDecision.decision, last_reviewer_identity: lastDecision.reviewer_identity }),
       }];
     });
-    return run === undefined ? { candidates } : { run, projection_revision: reviewRunProjectionRevision(state, run.id), candidates };
+    const cursorIndex = options?.cursor === undefined ? 0 : Number.parseInt(options.cursor.replace(/^index:/u, ""), 10);
+    const effectiveCursor = Number.isFinite(cursorIndex) && cursorIndex >= 0 ? cursorIndex : 0;
+    const limit = Math.min(options?.limit ?? 50, 200);
+    const page = candidates.slice(effectiveCursor, effectiveCursor + limit);
+    const nextCursor = effectiveCursor + page.length < candidates.length ? `index:${effectiveCursor + page.length}` : undefined;
+    const base = run === undefined ? { candidates: page } : { run, projection_revision: reviewRunProjectionRevision(state, run.id), candidates: page };
+    return nextCursor === undefined ? base : { ...base, next_cursor: nextCursor };
   }
 
   async applyReviewBatch(

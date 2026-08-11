@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { TextDecoder } from "node:util";
 import { HttpSourceFetcher } from "@st-workspace/adapters";
-import { CoreError, FileAttachmentStore, FileProjectRepository, templateProposalJsonSchema, type AdaptationDecision, type IssueSeverity, type RequestResult, type SourceAttachment, zhujiProposalJsonSchema } from "@st-workspace/core";
+import { CoreError, FileAttachmentStore, FileProjectRepository, internalId, templateProposalJsonSchema, type AdaptationDecision, type IssueSeverity, type RequestResult, type SourceAttachment, zhujiProposalJsonSchema } from "@st-workspace/core";
 import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
 import { dashboard } from "./dashboard.js";
 import { structuredError } from "./errors.js";
@@ -702,6 +702,21 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       if (request.method === "POST" && url.pathname === "/workspace/fact/review/run") {
         const runtime = await getRuntime();
         json(response, 200, await runtime.startFactReviewRun(actor));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/knowledge/reextract") {
+        const parsed = await body(request);
+        const input = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as { source_ids?: unknown; extractor_revision?: unknown } : undefined;
+        const sourceIds = input !== undefined && Array.isArray(input.source_ids)
+          ? input.source_ids.filter((item): item is string => typeof item === "string")
+          : undefined;
+        if (sourceIds === undefined || sourceIds.length === 0) {
+          json(response, 400, structuredError(new CoreError("SOURCE_IDS_REQUIRED", "SOURCE_IDS_REQUIRED", true)));
+          return;
+        }
+        const extractorRevision = input !== undefined && typeof input.extractor_revision === "string" && input.extractor_revision.length > 0 ? input.extractor_revision : undefined;
+        const runtime = await getRuntime();
+        json(response, 200, await runtime.reextract(internalId("operation"), sourceIds, actor, extractorRevision));
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/fact/review/batch") {
