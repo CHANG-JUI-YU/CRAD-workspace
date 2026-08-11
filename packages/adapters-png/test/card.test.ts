@@ -242,4 +242,3 @@ function makePng(width: number, height: number, channels = 4, filter = 0): Buffe
   }
   return Buffer.concat([pngSignature, encodePngChunk("IHDR", ihdr), encodePngChunk("IDAT", deflateSync(raw)), encodePngChunk("IEND", Buffer.alloc(0))]);
 }
-

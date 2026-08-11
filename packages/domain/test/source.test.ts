@@ -331,9 +331,12 @@ describe("source vertical slice", () => {
     const service = new SourceService(repository as any);
     const result = await service.execute("op-exhaust", { actor: "director", attachments: [] });
     expect(result.blocked).toEqual(["candidate-exhaust"]);
+    expect(result.summary).toContain("CAS_RETRY_EXHAUSTED");
+    expect(result.summary).toContain("REVISION_CONFLICT");
     const final = await baseRepository.read();
     expect(final.candidates[0]?.status).toBe("approved");
     expect(final.candidates[0]?.failure).toBeUndefined();
+    expect(final.audit.some((e) => e.event === "source.blocked")).toBe(false);
   });
 
   it("safely converges when another executor ingests candidate during CAS retry (BUG2-20)", async () => {
@@ -356,6 +359,7 @@ describe("source vertical slice", () => {
         if (commitCount === 1) {
           await baseRepository.commit(expectedRevision, (s) => ({
             ...s,
+            sources: [...s.sources, { id: "source-concurrent", candidate_id: "candidate-concurrent", title: "Concurrent candidate", canonical_text: "valid content", original_hash: "0".repeat(64), revision: "0".repeat(64), media_type: "text/plain", created_at: new Date().toISOString() }],
             candidates: s.candidates.map((c) => c.id === "candidate-concurrent" ? { ...c, status: "ingested" as const } : c),
           }));
           throw new CoreError("REVISION_CONFLICT", "Conflict simulation", true);
@@ -368,5 +372,92 @@ describe("source vertical slice", () => {
     const result = await service.execute("op-concurrent", { actor: "director", attachments: [] });
     expect(result.status).toBe("completed");
     expect(result.completed).toEqual(["candidate-concurrent"]);
+    const final = await baseRepository.read();
+    expect(final.sources).toHaveLength(1);
+  });
+
+  it("propagates non-CAS CoreError directly without marking candidate failed or adding source.blocked audit", async () => {
+    const baseRepository = new MemoryProjectRepository("demo-non-cas-core-error");
+    await baseRepository.commit(0, (state) => ({
+      ...state,
+      candidates: [{ id: "candidate-non-cas", title: "Non-CAS candidate", status: "approved", content: "valid content" }],
+      operations: [{ id: "op-non-cas", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+
+    const repository = {
+      read: () => baseRepository.read(),
+      readBlob: (hash: string) => baseRepository.readBlob(hash),
+      writeBlob: (hash: string, data: Uint8Array) => baseRepository.writeBlob(hash, data),
+      inspectRepair: () => baseRepository.inspectRepair(),
+      runRepair: () => baseRepository.runRepair(),
+      commit: async () => {
+        throw new CoreError("STATE_INVALID", "State schema validation failed", true);
+      },
+    };
+
+    const service = new SourceService(repository as any);
+    await expect(service.execute("op-non-cas", { actor: "director", attachments: [] })).rejects.toMatchObject({ code: "STATE_INVALID" });
+
+    const final = await baseRepository.read();
+    expect(final.candidates[0]?.status).toBe("approved");
+    expect(final.candidates[0]?.failure).toBeUndefined();
+    expect(final.audit.some((event) => event.event === "source.blocked")).toBe(false);
+  });
+
+  it("propagates generic SystemError directly without converting to SOURCE_ACQUISITION_FAILED", async () => {
+    const baseRepository = new MemoryProjectRepository("demo-generic-error");
+    await baseRepository.commit(0, (state) => ({
+      ...state,
+      candidates: [{ id: "candidate-generic", title: "Generic error candidate", status: "approved", content: "valid content" }],
+      operations: [{ id: "op-generic", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+
+    const repository = {
+      read: () => baseRepository.read(),
+      readBlob: (hash: string) => baseRepository.readBlob(hash),
+      writeBlob: (hash: string, data: Uint8Array) => baseRepository.writeBlob(hash, data),
+      inspectRepair: () => baseRepository.inspectRepair(),
+      runRepair: () => baseRepository.runRepair(),
+      commit: async () => {
+        throw new Error("disk I/O write failure");
+      },
+    };
+
+    const service = new SourceService(repository as any);
+    await expect(service.execute("op-generic", { actor: "director", attachments: [] })).rejects.toThrow("disk I/O write failure");
+
+    const final = await baseRepository.read();
+    expect(final.candidates[0]?.status).toBe("approved");
+    expect(final.candidates[0]?.failure).toBeUndefined();
+    expect(final.audit.some((event) => event.event === "source.blocked")).toBe(false);
+  });
+
+  it("throws when markCandidateBlockedOrFailed exhausts retries", async () => {
+    const baseRepository = new MemoryProjectRepository("demo-mark-exhaust");
+    await baseRepository.commit(0, (state) => ({
+      ...state,
+      candidates: [{ id: "candidate-mark-exhaust", title: "Unreachable URL", url: "https://invalid.domain.example", status: "approved" }],
+      operations: [{ id: "op-mark-exhaust", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+
+    const repository = {
+      read: () => baseRepository.read(),
+      readBlob: (hash: string) => baseRepository.readBlob(hash),
+      writeBlob: (hash: string, data: Uint8Array) => baseRepository.writeBlob(hash, data),
+      inspectRepair: () => baseRepository.inspectRepair(),
+      runRepair: () => baseRepository.runRepair(),
+      commit: async () => {
+        throw new CoreError("REVISION_CONFLICT", "Conflict on mark failure", true);
+      },
+    };
+
+    const service = new SourceService(repository as any);
+    await expect(service.execute("op-mark-exhaust", {
+      actor: "director",
+      attachments: [],
+      fetcher: async () => {
+        throw new CoreError("SOURCE_FETCH_BLOCKED", "Fetch blocked", true);
+      },
+    })).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
   });
 });

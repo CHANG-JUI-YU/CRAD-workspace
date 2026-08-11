@@ -140,6 +140,10 @@ function isOfficialCandidate(candidate: SourceCandidate): boolean {
   return candidate.official === true || /official|公式|官方/iu.test([candidate.title, candidate.snippet, candidate.domain, candidate.url].filter((item): item is string => item !== undefined).join(" "));
 }
 
+function isSourceError(error: unknown): error is CoreError {
+  return error instanceof CoreError && error.code.startsWith("SOURCE_");
+}
+
 export class SourceService {
   constructor(private readonly repository: ProjectRepository) {}
 
@@ -311,6 +315,7 @@ export class SourceService {
 
     const completed: string[] = [];
     const blocked: string[] = [];
+    const casConflictCandidates: string[] = [];
     const allowedDomains = sourceResearchPolicy(initial);
     const officialCandidates = candidates.filter(isOfficialCandidate);
     const officialCompleted = new Set<string>();
@@ -337,17 +342,21 @@ export class SourceService {
       try {
         acquired = await this.acquire(candidate, context);
       } catch (error) {
-        const failure = error instanceof CoreError ? error : new CoreError("SOURCE_ACQUISITION_FAILED", error instanceof Error ? error.message : String(error), true);
-        await this.markCandidateBlockedOrFailed(operationId, candidate.id, failure, context);
-        blocked.push(candidate.id);
-        continue;
+        if (isSourceError(error)) {
+          await this.markCandidateBlockedOrFailed(operationId, candidate.id, error, context);
+          blocked.push(candidate.id);
+          continue;
+        }
+        throw error;
       }
 
       let text: string;
       try {
         text = decodeText(acquired.content);
       } catch (error) {
-        const failure = error instanceof CoreError ? error : new CoreError("SOURCE_ACQUISITION_FAILED", error instanceof Error ? error.message : String(error), true);
+        const failure = error instanceof CoreError && isSourceError(error)
+          ? error
+          : new CoreError("SOURCE_DECODE_FAILED", error instanceof Error ? error.message : String(error), true);
         await this.markCandidateBlockedOrFailed(operationId, candidate.id, failure, context);
         blocked.push(candidate.id);
         continue;
@@ -445,14 +454,17 @@ export class SourceService {
             isConflict = true;
             continue;
           }
-          const failure = commitErr instanceof CoreError ? commitErr : new CoreError("SOURCE_ACQUISITION_FAILED", commitErr instanceof Error ? commitErr.message : String(commitErr), true);
-          await this.markCandidateBlockedOrFailed(operationId, candidate.id, failure, context);
-          blocked.push(candidate.id);
-          break;
+          if (isSourceError(commitErr)) {
+            await this.markCandidateBlockedOrFailed(operationId, candidate.id, commitErr, context);
+            blocked.push(candidate.id);
+            break;
+          }
+          throw commitErr;
         }
       }
 
       if (!commitSuccess && isConflict && !completed.includes(candidate.id) && !blocked.includes(candidate.id)) {
+        casConflictCandidates.push(candidate.id);
         blocked.push(candidate.id);
       }
     }
@@ -463,21 +475,39 @@ export class SourceService {
     const finalState = await this.repository.read();
     const status = completed.length > 0 && blocked.length === 0 ? "completed" : completed.length > 0 ? "partial" : "needs_input";
     const officialRequired = officialCandidates.length > 0 && officialCompleted.size === 0;
-    const summary = officialRequired
-      ? `SOURCE_RESEARCH_OFFICIAL_REQUIRED: at least one official candidate must be ingested. ${completed.length} candidate(s) ingested, ${blocked.length} blocked.`
-      : completed.length > 0
-      ? `${completed.length} 個來源已加入${blocked.length > 0 ? `，${blocked.length} 個來源需要後續處理` : "。"}`
-      : "目前沒有來源可以安全入庫，請提供內容或稍後重試。";
+
+    let summary: string;
+    if (officialRequired) {
+      summary = `SOURCE_RESEARCH_OFFICIAL_REQUIRED: at least one official candidate must be ingested. ${completed.length} candidate(s) ingested, ${blocked.length} blocked.`;
+    } else if (casConflictCandidates.length > 0) {
+      summary = `CAS_RETRY_EXHAUSTED: 由於 REVISION_CONFLICT 並行衝突，${casConflictCandidates.length} 個候選來源暫時無法入庫，保留 approved 狀態可稍後重試。`;
+    } else if (completed.length > 0) {
+      summary = `${completed.length} 個來源已加入${blocked.length > 0 ? `，${blocked.length} 個來源需要後續處理` : "。"}`;
+    } else {
+      summary = "目前沒有來源可以安全入庫，請提供內容或稍後重試。";
+    }
+
     const operationPatch: Partial<OperationRecord> = {
       status,
       result_summary: summary,
       ...(status === "needs_input" ? { question: "要上傳本地檔案、貼上內容，還是稍後重試？" } : {}),
     };
+
     try {
       await this.repository.commit(finalState.revision, (current) => ({
         ...current,
         operations: current.operations.map((item) => item.id === operationId
-          ? updateOperation(item, operationPatch)
+          ? updateOperation(item, {
+            ...operationPatch,
+            progress: [
+              ...item.progress,
+              ...casConflictCandidates.map((id) => ({
+                item_id: id,
+                status: "blocked" as const,
+                message: "CAS_RETRY_EXHAUSTED: REVISION_CONFLICT 導致候選來源暫時無法入庫，保持 approved 狀態可重新嘗試。",
+              })),
+            ],
+          })
           : item),
       }));
     } catch (err) {
@@ -502,7 +532,9 @@ export class SourceService {
       try {
         return await context.fetcher(candidate.url);
       } catch (error) {
-        throw new CoreError("SOURCE_FETCH_BLOCKED", error instanceof Error ? error.message : String(error), true);
+        throw error instanceof CoreError && isSourceError(error)
+          ? error
+          : new CoreError("SOURCE_FETCH_BLOCKED", error instanceof Error ? error.message : String(error), true);
       }
     }
     throw new CoreError("SOURCE_CONTENT_REQUIRED", `來源「${candidate.title}」沒有可用內容；請提供檔案、文字或稍後重試。`, true);
@@ -517,6 +549,7 @@ export class SourceService {
 
   private async markCandidateBlockedOrFailed(operationId: string, candidateId: string, failure: CoreError, context: SourceExecutionContext): Promise<void> {
     const maxRetries = 3;
+    let lastError: unknown;
     for (let attempt = 0; attempt < maxRetries; attempt += 1) {
       const state = await this.repository.read();
       const currentCandidate = state.candidates.find((item) => item.id === candidateId);
@@ -543,9 +576,13 @@ export class SourceService {
         }));
         return;
       } catch (err) {
-        if (err instanceof CoreError && err.code === "REVISION_CONFLICT") continue;
+        if (err instanceof CoreError && err.code === "REVISION_CONFLICT") {
+          lastError = err;
+          continue;
+        }
         throw err;
       }
     }
+    throw lastError instanceof Error ? lastError : new CoreError("CAS_RETRY_EXHAUSTED", `無法寫入來源失敗狀態：REVISION_CONFLICT (candidate ${candidateId})`, true);
   }
 }
