@@ -357,6 +357,10 @@ export function dashboard(): string {
         <button id="apply-quality" class="primary" type="button">套用品質設定</button>
       </div>
       <div id="quality-message" class="panel-message" aria-live="polite">尚未取得品質設定。</div>
+      <div class="panel-heading">
+        <h3>逐項 issue 操作</h3>
+      </div>
+      <div id="issue-list" class="issue-list"></div>
       <details class="raw-json">
         <summary>查看品質原始 JSON</summary>
         <pre id="quality-json">{}</pre>
@@ -773,7 +777,41 @@ export function dashboard(): string {
         var status = error.status ? "HTTP " + error.status + (error.statusText ? " " + error.statusText : "") + "；" : "";
         var code = error.code || "未提供";
         var message = error.message || "伺服器沒有提供錯誤訊息";
-        return status + "錯誤代碼：" + code + "；訊息：" + message + "；下一步：" + nextStep(error);
+        var hint = codeHint(code);
+        return status + "錯誤代碼：" + code + "；訊息：" + message + "；下一步：" + hint;
+      }
+
+      function codeHint(code) {
+        var hints = {
+          "BLUEPRINT_PRECHECK_REQUIRED": "工作區缺少 Blueprint 預檢：請在訪談中完成角色與世界設定的預檢確認。",
+          "ARTIFACT_REVIEW_REQUIRED": "工作區缺少 artifact review：目前 revision 需要不同 reviewer 通過，請送交對應 Critic 或重新審查。",
+          "REQUIRED_WORLD_ARTIFACT_MISSING": "世界設定尚未建立：請先建立世界設定，再繼續角色創作。",
+          "BLUEPRINT_BINDING_STALE": "artifact 綁定到舊版 Blueprint：請依目前 Blueprint 重新建立該 artifact。",
+          "FACT_REVIEW_RUN_MISSING": "事實尚未進入審查：請先整理來源並自動抽取事實。",
+          "FACT_REVIEW_COVERAGE_INCOMPLETE": "事實審查未完成：所有候選都需要 accepted 或 rejected 裁決。",
+          "FACT_REVIEW_NEEDS_EVIDENCE": "事實缺少證據：請補上來源引文後重新送審。",
+          "FACT_REVIEW_CONFLICT": "事實裁決衝突：需要 Director 使用衝突裁決功能處理。",
+          "FACT_REVIEW_CONTRADICTION": "已接受的事實彼此矛盾：請送交 Director 裁決哪一筆為真。",
+          "SOURCE_RESEARCH_NOT_INGESTED": "來源研究候選尚未入庫：請批准候選來源並執行入庫。",
+          "SOURCE_RESEARCH_OFFICIAL_REQUIRED": "缺少官方來源：請搜尋並入庫至少一個官方來源。",
+          "WORLD_AUTHORING_ORDER": "世界設定需在角色創作之前完成：請先建立世界設定。",
+          "CHARACTER_AUTHORING_ORDER": "角色創作需在世界設定之前完成：請先建立角色設定。",
+          "AGENT_READ_ONLY": "該 agent 是唯讀角色：請改由 director 或其他可寫角色執行此操作。",
+          "AGENT_CAPABILITY_DENIED": "該 agent 沒有此操作能力：請選擇具備對應能力的 agent。",
+          "REVISION_CONFLICT": "狀態版本衝突：請先重新整理目前狀態，再重試這個操作。",
+          "REQUEST_INVALID_JSON": "請求內容不是有效 JSON：請確認輸入格式後重新送出。",
+          "REQUEST_TOO_LARGE": "請求內容超過上限：請縮短內容後重新送出。",
+          "SOURCE_DECODE_FAILED": "來源內容不是有效 UTF-8：請改用正確編碼的檔案或文字。",
+          "TEMPLATE_SCHEMA_INVALID": "提交的結構化內容不符合 schema：請由專屬 Creator 依 context 重新產生。"
+        };
+        if (code && hints[code]) return hints[code];
+        return nextStep(errorFromCode(code));
+      }
+
+      function errorFromCode(code) {
+        if (!code) return {};
+        if (/^REQUEST_/u.test(code)) return { status: 400 };
+        return { status: 500 };
       }
 
       function nextStep(error) {
@@ -1072,6 +1110,11 @@ export function dashboard(): string {
           var metaCell = document.createElement("span");
           metaCell.textContent = "uncertainty: " + uncertainty + " / impact: " + impact + " / basis: " + basis + " / action: " + action;
           row.append(subjectCell, dimensionCell, statusCell, metaCell);
+          var confirm = document.createElement("button");
+          confirm.type = "button";
+          confirm.textContent = "標記確認";
+          confirm.addEventListener("click", function () { submitInterviewAnswer("確認"); });
+          row.append(confirm);
           rows.push(row);
         }
         target.append.apply(target, rows);
@@ -1100,8 +1143,36 @@ export function dashboard(): string {
           var text = document.createElement("span");
           text.textContent = (firstString(item, ["code"]) || "?") + "： " + (firstString(item, ["message"]) || "");
           row.append(badge, text);
+          var hint = document.createElement("span");
+          hint.className = "readiness-hint";
+          hint.textContent = readinessHint(firstString(item, ["code"]));
+          row.append(hint);
           target.append(row);
         }
+      }
+
+      function readinessHint(code) {
+        var hints = {
+          "BLUEPRINT_PRECHECK_REQUIRED": "動作：在訪談中完成預檢確認。",
+          "INTERVIEW_REQUIRED": "動作：完成結構化訪談。",
+          "PUBLISH_NO_CONTENT": "動作：建立至少一個角色內容 artifact。",
+          "ARTIFACT_REVIEW_REQUIRED": "動作：送交對應 Critic 審查。",
+          "REQUIRED_WORLD_ARTIFACT_MISSING": "動作：建立世界設定。",
+          "BLUEPRINT_BINDING_STALE": "動作：依目前 Blueprint 重建 artifact。",
+          "FACT_REVIEW_RUN_MISSING": "動作：整理來源後自動抽取事實。",
+          "FACT_REVIEW_COVERAGE_INCOMPLETE": "動作：完成全部候選的裁決。",
+          "FACT_REVIEW_NEEDS_EVIDENCE": "動作：補齊來源引文後重新送審。",
+          "FACT_REVIEW_CONFLICT": "動作：由 Director 執行衝突裁決。",
+          "FACT_REVIEW_CONTRADICTION": "動作：送交 Director 裁決矛盾事實。",
+          "SOURCE_RESEARCH_NOT_INGESTED": "動作：批准候選並執行來源入庫。",
+          "SOURCE_RESEARCH_OFFICIAL_REQUIRED": "動作：搜尋並入庫官方來源。",
+          "WORLD_AUTHORING_ORDER": "動作：先建立世界設定。",
+          "CHARACTER_AUTHORING_ORDER": "動作：先建立角色設定。",
+          "FACT_PROVENANCE_MISSING": "動作：為已接受事實補上來源佐證。",
+          "FACT_REVIEW_DECISION_MISSING": "動作：確認每個已接受事實都有裁決記錄。",
+          "REQUIRED_ARTIFACT_MISSING": "動作：建立缺少的必要 artifact。"
+        };
+        return hints[code] || "";
       }
 
       function renderArtifactList(snapshot) {
@@ -1127,6 +1198,11 @@ export function dashboard(): string {
           var parts = ["rev " + (firstString(artifact, ["revision"]) || "?")];
           if (artifact.created_by) parts.push("by " + artifact.created_by);
           if (artifact.blueprint_precheck_id) parts.push("binding " + artifact.blueprint_precheck_revision || "?");
+          var reviews = Array.isArray(snapshot.reviews) ? snapshot.reviews : [];
+          var artifactReviews = reviews.filter(function (review) { return isRecord(review) && review.artifact_id === artifact.id; });
+          if (artifactReviews.length > 0) parts.push("reviewer " + (firstString(artifactReviews[artifactReviews.length - 1], ["reviewer"]) || "?"));
+          var history = artifacts.filter(function (item) { return item.key === artifact.key; });
+          if (history.length > 1) parts.push("歷史 " + history.length + " 個 revision");
           meta.textContent = parts.join(" · ");
           row.append(badge, name, meta);
           target.append(row);
@@ -1187,6 +1263,54 @@ export function dashboard(): string {
         byId("quality-json").textContent = jsonText(quality);
       }
 
+      function renderIssueList(snapshot) {
+        var target = byId("issue-list");
+        target.textContent = "";
+        var issues = Array.isArray(snapshot.issues) ? snapshot.issues : [];
+        if (issues.length === 0) {
+          target.textContent = "沒有待處理 issue。";
+          return;
+        }
+        for (var i = 0; i < issues.length; i += 1) {
+          var issue = issues[i];
+          if (!isRecord(issue)) continue;
+          var row = document.createElement("div");
+          row.className = "issue-row";
+          var badge = document.createElement("span");
+          badge.className = "status-badge " + (issue.effective_severity === "error" || issue.effective_severity === "critical" ? "error" : "active");
+          badge.textContent = firstString(issue, ["severity"]) || "?";
+          var text = document.createElement("span");
+          text.textContent = (firstString(issue, ["code"]) || "?") + "：" + (firstString(issue, ["message"]) || "") + (issue.status ? "（" + issue.status + "）" : "");
+          row.append(badge, text);
+          var actions = document.createElement("span");
+          actions.className = "inline-actions";
+          var resolve = document.createElement("button");
+          resolve.type = "button";
+          resolve.textContent = "已解決";
+          resolve.addEventListener("click", function () { postIssue(issue.id, "resolve"); });
+          var ignore = document.createElement("button");
+          ignore.type = "button";
+          ignore.textContent = "忽略";
+          ignore.addEventListener("click", function () { postIssue(issue.id, "ignore"); });
+          var override = document.createElement("button");
+          override.type = "button";
+          override.textContent = "覆寫";
+          override.addEventListener("click", function () { postIssue(issue.id, "override"); });
+          actions.append(resolve, ignore, override);
+          row.append(actions);
+          target.append(row);
+        }
+      }
+
+      function postIssue(issueId, action) {
+        if (state.busy) return;
+        void runTask("更新 issue", async function () {
+          var payload = await postJson("/workspace/issue", { issue_id: issueId, action: action, reason: "console action" });
+          await refreshAfterAction();
+          return payload;
+        });
+      }
+
       function renderSourceFact(snapshot) {
         var candidates = Array.isArray(snapshot.candidates) ? snapshot.candidates : [];
         var sources = Array.isArray(snapshot.sources) ? snapshot.sources : [];
@@ -1232,6 +1356,12 @@ export function dashboard(): string {
           var factText = document.createElement("span");
           factText.textContent = (firstString(fact, ["statement"]) || "");
           factRow.append(factBadge, factText);
+          var factMeta = document.createElement("span");
+          var factParts = [];
+          if (fact.evidence_quote) factParts.push("引文：" + fact.evidence_quote);
+          if (fact.last_reviewer) factParts.push("reviewer " + fact.last_reviewer + "：" + (fact.last_decision || "?"));
+          factMeta.textContent = factParts.join(" · ");
+          factRow.append(factMeta);
           factTarget.append(factRow);
         }
       }
@@ -1254,8 +1384,18 @@ export function dashboard(): string {
         byId("build-message").textContent = parts.join(" · ");
         var entries = Array.isArray(readiness.entries) ? readiness.entries : [];
         var entryTarget = document.createElement("div");
-        entryTarget.textContent = entries.length === 0 ? "沒有附加條目。" : "附加條目：" + entries.map(function (entry) { return (isRecord(entry) ? (firstString(entry, ["kind"]) || "?") + ":" + (firstString(entry, ["name"]) || "?") : "?"); }).join("、");
+        var entryLabels = entries.map(function (entry) { return (isRecord(entry) ? (firstString(entry, ["kind"]) || "?") + ":" + (firstString(entry, ["name"]) || "?") : "?"); });
+        entryTarget.textContent = entries.length === 0 ? "沒有附加條目。" : "附加條目：" + entryLabels.join("、");
         target.append(entryTarget);
+        var stats = [];
+        if (readiness.greeting_entries !== undefined) stats.push("greeting " + readiness.greeting_entries + " 組");
+        if (readiness.png_expected !== undefined) stats.push(readiness.png_expected ? "將輸出 PNG" : "不輸出 PNG");
+        var totalChars = entries.reduce(function (sum, entry) { return sum + (isRecord(entry) && typeof entry.char_count === "number" ? entry.char_count : 0); }, 0);
+        var totalTokens = entries.reduce(function (sum, entry) { return sum + (isRecord(entry) && typeof entry.estimated_tokens === "number" ? entry.estimated_tokens : 0); }, 0);
+        if (entries.length > 0) stats.push("字數 " + totalChars + "／token 預估 " + totalTokens);
+        var statsTarget = document.createElement("div");
+        statsTarget.textContent = stats.join(" · ");
+        target.append(statsTarget);
         var missing = Array.isArray(readiness.missing) ? readiness.missing : [];
         var missingTarget = document.createElement("div");
         missingTarget.textContent = missing.length === 0 ? "模組齊全。" : "缺少模組：" + missing.join("、");
@@ -1334,6 +1474,7 @@ export function dashboard(): string {
           renderArtifactList(payload);
           renderOperationList(payload.operations);
           renderQuality(payload);
+          renderIssueList(payload);
           renderSourceFact(payload);
           renderRepairInspection(payload.repair);
           return payload;

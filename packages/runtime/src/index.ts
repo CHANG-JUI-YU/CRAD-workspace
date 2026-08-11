@@ -652,6 +652,9 @@ export interface DashboardFactView {
   source_ids: string[];
   review_run_id?: string;
   decision_id?: string;
+  evidence_quote?: string;
+  last_reviewer?: string;
+  last_decision?: string;
 }
 
 export interface DashboardOperationView {
@@ -691,6 +694,7 @@ export interface DashboardSnapshot {
   candidates: Array<{ id: string; title: string; url?: string; status: string; official?: boolean }>;
   operations: DashboardOperationView[];
   issues: DashboardIssueView[];
+  reviews: Array<{ id: string; artifact_id: string; artifact_revision: string; reviewer: string; status: string }>;
   quality: { level?: string; blocking_severity: string; overrides: Record<string, string> };
   review_runs: Array<{ id: string; status: string; candidate_occurrence_ids: string[] }>;
   publishes: Array<{ id: string; content_hash: string; created_at: string; export_json_path?: string; export_png_path?: string }>;
@@ -702,7 +706,9 @@ export interface DashboardBuildReadiness {
   modes: { zhuji: boolean; palette: boolean };
   primary_character?: { id: string; label: string; mode: string };
   export_modes?: string;
-  entries: Array<{ kind: string; name: string }>;
+  entries: Array<{ kind: string; name: string; char_count: number; estimated_tokens: number }>;
+  greeting_entries: number;
+  png_expected: boolean;
   missing: string[];
   diagnostics: Array<{ code: string; severity: string; message: string }>;
 }
@@ -2227,19 +2233,25 @@ export class WorkspaceRuntime {
         ...(artifact.blueprint_precheck_id === undefined ? {} : { blueprint_precheck_id: artifact.blueprint_precheck_id }),
         ...(artifact.blueprint_precheck_revision === undefined ? {} : { blueprint_precheck_revision: artifact.blueprint_precheck_revision }),
       })),
-      facts: state.facts.map((fact) => ({
-        id: fact.id,
-        statement: fact.statement,
-        status: fact.status,
-        ...(fact.subject === undefined ? {} : { subject: fact.subject }),
-        ...(fact.predicate === undefined ? {} : { predicate: fact.predicate }),
-        ...(fact.value === undefined ? {} : { value: fact.value }),
-        ...(fact.classification === undefined ? {} : { classification: fact.classification }),
-        ...(fact.coverage === undefined ? {} : { coverage: fact.coverage }),
-        source_ids: fact.source_ids,
-        ...(fact.review_run_id === undefined ? {} : { review_run_id: fact.review_run_id }),
-        ...(fact.decision_id === undefined ? {} : { decision_id: fact.decision_id }),
-      })),
+      facts: state.facts.map((fact) => {
+        const evidenceQuote = fact.evidence[0] ?? fact.evidence_refs?.[0]?.quote;
+        const decision = fact.decision_id === undefined ? undefined : state.fact_review_decisions.find((item) => item.id === fact.decision_id);
+        return {
+          id: fact.id,
+          statement: fact.statement,
+          status: fact.status,
+          ...(fact.subject === undefined ? {} : { subject: fact.subject }),
+          ...(fact.predicate === undefined ? {} : { predicate: fact.predicate }),
+          ...(fact.value === undefined ? {} : { value: fact.value }),
+          ...(fact.classification === undefined ? {} : { classification: fact.classification }),
+          ...(fact.coverage === undefined ? {} : { coverage: fact.coverage }),
+          source_ids: fact.source_ids,
+          ...(fact.review_run_id === undefined ? {} : { review_run_id: fact.review_run_id }),
+          ...(fact.decision_id === undefined ? {} : { decision_id: fact.decision_id }),
+          ...(evidenceQuote === undefined ? {} : { evidence_quote: String(evidenceQuote) }),
+          ...(decision === undefined ? {} : { last_reviewer: decision.reviewer_identity, last_decision: decision.decision }),
+        };
+      }),
       sources: state.sources.map((source) => ({ id: source.id, candidate_id: source.candidate_id, title: source.title, revision: source.revision })),
       candidates: state.candidates.map((candidate) => ({ id: candidate.id, title: candidate.title, ...(candidate.url === undefined ? {} : { url: candidate.url }), status: candidate.status, ...(candidate.official === undefined ? {} : { official: candidate.official }) })),
       operations: state.operations.map((operation) => ({
@@ -2267,6 +2279,7 @@ export class WorkspaceRuntime {
         status: issue.status,
         created_at: issue.created_at,
       })),
+      reviews: state.reviews.map((review) => ({ id: review.id, artifact_id: review.artifact_id, artifact_revision: review.artifact_revision, reviewer: review.reviewer, status: review.status })),
       quality: { ...(state.quality_profile.level === undefined ? {} : { level: state.quality_profile.level }), blocking_severity: state.quality_profile.blocking_severity, overrides: state.quality_profile.overrides },
       review_runs: state.fact_review_runs.map((run) => ({ id: run.id, status: run.status, candidate_occurrence_ids: run.candidate_occurrence_ids })),
       publishes: state.publishes.map((publish) => ({ id: publish.id, content_hash: publish.content_hash, created_at: publish.created_at, ...(publish.export_json_path === undefined ? {} : { export_json_path: publish.export_json_path }), ...(publish.export_png_path === undefined ? {} : { export_png_path: publish.export_png_path }) })),
@@ -2301,13 +2314,15 @@ export class WorkspaceRuntime {
         primary = undefined;
       }
     }
-    const entries = state.artifacts.filter((artifact) => ["world_lore", "relationship", "greeting", "wardrobe", "plugin"].includes(artifact.kind)).map((artifact) => ({ kind: artifact.kind, name: artifact.name }));
+    const entries = state.artifacts.filter((artifact) => ["world_lore", "relationship", "greeting", "wardrobe", "plugin"].includes(artifact.kind)).map((artifact) => ({ kind: artifact.kind, name: artifact.name, char_count: artifact.content.length, estimated_tokens: Math.ceil(artifact.content.length / 4) }));
     const missing = manifest === undefined ? [] : manifest.characters.flatMap((character) => character.missing_modules.map((module) => `${character.character_id}:${module}`));
     return {
       modes,
       ...(primary === undefined ? {} : { primary_character: primary }),
       ...(manifest === undefined ? {} : { export_modes: manifest.export_modes }),
       entries,
+      greeting_entries: entries.filter((entry) => entry.kind === "greeting").length,
+      png_expected: modes.zhuji || modes.palette,
       missing,
       diagnostics: manifest?.diagnostics ?? [],
     };

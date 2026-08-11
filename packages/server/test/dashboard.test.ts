@@ -63,6 +63,8 @@ describe("local Dashboard", () => {
       "Operation 管理",
       "專案修復",
       "Tavern 相容性",
+      "逐項 issue 操作",
+      "標記確認",
     ]) {
       expect(html).toContain(label);
     }
@@ -95,6 +97,8 @@ describe("local Dashboard", () => {
       expect(data.project).toMatchObject({ project_id: "dashboard-endpoints" });
       expect(Array.isArray(data.artifacts)).toBe(true);
       expect(Array.isArray(data.operations)).toBe(true);
+      expect(Array.isArray(data.reviews)).toBe(true);
+      expect(Array.isArray(data.issues)).toBe(true);
       expect(data.repair).toMatchObject({ legacy_files: [], orphan_backups: [] });
       const readiness = await (await fetch(`${base}/workspace/publish/preview`)).json();
       expect(typeof readiness.ok).toBe("boolean");
