@@ -421,6 +421,7 @@ export function dashboard(): string {
       <div id="candidate-list" class="candidate-list"></div>
       <div id="source-list" class="source-list"></div>
       <div id="fact-list" class="fact-list"></div>
+      <div id="fact-review-run" class="fact-list"></div>
     </section>
 
     <section class="panel panel-wide" aria-labelledby="build-heading">
@@ -1677,10 +1678,49 @@ export function dashboard(): string {
         });
       }
 
+      function submitFactDecision(run, occurrenceId, statement, selectElement, reasonElement, endpoint) {
+        var reason = reasonElement.value;
+        if (!reason || !reason.trim()) { localValidation("fact-review-run", "事實裁決需要原因。"); return; }
+        postJson(endpoint, {
+          decisions: [{ candidate_occurrence_id: occurrenceId, claim: statement, decision: selectElement.value, reason: reason }],
+          run_id: run.id,
+          expected_projection_revision: run.candidate_set_revision
+        }).then(function () { reasonElement.value = ""; refresh(); }).catch(function (error) { setAreaError("fact-review-run", error); });
+      }
+
+      function factAdjudicationRow(run, occurrenceId, statement, status, conflictOnly) {
+        var row = document.createElement("div");
+        row.className = "fact-row fact-adjudication";
+        var text = document.createElement("span");
+        text.textContent = (statement || "?") + (status === "conflict" ? "（衝突，需 Director）" : "");
+        row.append(text);
+        var select = document.createElement("select");
+        var options = [["accept", "接受"], ["reject", "拒絕"], ["needs_evidence", "需補證據"], ["conflict", "衝突"]];
+        for (var o = 0; o < options.length; o += 1) {
+          var option = document.createElement("option");
+          option.value = options[o][0];
+          option.textContent = options[o][1];
+          select.append(option);
+        }
+        var reason = document.createElement("input");
+        reason.type = "text";
+        reason.placeholder = "裁決原因（必填）";
+        row.append(select, reason);
+        var submit = document.createElement("button");
+        submit.className = "button";
+        submit.textContent = conflictOnly ? "Director 解析" : "送出裁決";
+        submit.addEventListener("click", function () {
+          submitFactDecision(run, occurrenceId, statement, select, reason, conflictOnly ? "/workspace/fact/review/conflict" : "/workspace/fact/review/batch");
+        });
+        row.append(submit);
+        return row;
+      }
+
       function renderSourceFact(snapshot) {
         var candidates = Array.isArray(snapshot.candidates) ? snapshot.candidates : [];
         var sources = Array.isArray(snapshot.sources) ? snapshot.sources : [];
         var facts = Array.isArray(snapshot.facts) ? snapshot.facts : [];
+        var runs = Array.isArray(snapshot.review_runs) ? snapshot.review_runs : [];
         var candidateTarget = byId("candidate-list");
         candidateTarget.textContent = "";
         candidateTarget.textContent = candidates.length === 0 ? "沒有候選來源。" : "候選來源 " + candidates.length + " 筆";
@@ -1693,8 +1733,36 @@ export function dashboard(): string {
           badge.className = "status-badge " + statusClass(candidate.status || "pending");
           badge.textContent = firstString(candidate, ["status"]) || "?";
           var text = document.createElement("span");
-          text.textContent = (firstString(candidate, ["title"]) || "?") + (candidate.official ? "（官方）" : "");
+          var candidateLabel = (firstString(candidate, ["title"]) || "?") + (candidate.official ? "（官方）" : "");
+          if (candidate.url) {
+            var link = document.createElement("a");
+            link.href = candidate.url;
+            link.target = "_blank";
+            link.rel = "noopener";
+            link.textContent = candidateLabel;
+            text.append(link);
+          } else {
+            text.textContent = candidateLabel;
+          }
           row.append(badge, text);
+          if (candidate.selection_snapshot && candidate.status === "approved") {
+            var approved = document.createElement("span");
+            approved.className = "status-badge ok";
+            approved.textContent = "已選入（approved）";
+            row.append(approved);
+          }
+          if (candidate.selection_snapshot && candidate.status === "rejected") {
+            var rejected = document.createElement("span");
+            rejected.className = "status-badge bad";
+            rejected.textContent = "已拒絕（rejected）";
+            row.append(rejected);
+          }
+          if (candidate.failure && isRecord(candidate.failure)) {
+            var failure = document.createElement("span");
+            failure.className = "status-badge bad";
+            failure.textContent = "擷取失敗：" + (firstString(candidate.failure, ["code"]) || "?") + " " + (firstString(candidate.failure, ["message"]) || "");
+            row.append(failure);
+          }
           candidateTarget.append(row);
         }
         var sourceTarget = byId("source-list");
@@ -1705,7 +1773,21 @@ export function dashboard(): string {
           if (!isRecord(source)) continue;
           var sourceRow = document.createElement("div");
           sourceRow.className = "fact-row";
-          sourceRow.textContent = firstString(source, ["title"]) || "?";
+          var sourceParts = [];
+          sourceParts.push(firstString(source, ["title"]) || "?");
+          if (source.media_type) sourceParts.push(source.media_type);
+          if (source.revision) sourceParts.push("r" + String(source.revision).slice(0, 8));
+          if (typeof source.chunk_count === "number") sourceParts.push("chunks " + source.chunk_count);
+          if (typeof source.canonical_chars === "number") sourceParts.push("chars " + source.canonical_chars);
+          sourceRow.textContent = sourceParts.join(" · ");
+          if (source.url) {
+            var sourceLink = document.createElement("a");
+            sourceLink.href = source.url;
+            sourceLink.target = "_blank";
+            sourceLink.rel = "noopener";
+            sourceLink.textContent = "開啟來源";
+            sourceRow.append(sourceLink);
+          }
           sourceTarget.append(sourceRow);
         }
         var factTarget = byId("fact-list");
@@ -1720,15 +1802,68 @@ export function dashboard(): string {
           factBadge.className = "status-badge " + statusClass(fact.status || "candidate");
           factBadge.textContent = firstString(fact, ["status"]) || "?";
           var factText = document.createElement("span");
-          factText.textContent = (firstString(fact, ["statement"]) || "");
+          var statement = (firstString(fact, ["statement"]) || "");
+          if (fact.status === "conflict") statement += "（待 Director 解析）";
+          factText.textContent = statement;
           factRow.append(factBadge, factText);
           var factMeta = document.createElement("span");
           var factParts = [];
+          if (typeof fact.fact_revision === "number") factParts.push("r" + fact.fact_revision);
+          if (Array.isArray(fact.source_ids)) factParts.push("來源 " + fact.source_ids.length);
           if (fact.evidence_quote) factParts.push("引文：" + fact.evidence_quote);
+          if (fact.locator) factParts.push("L:" + fact.locator);
+          if (fact.chunk_id) factParts.push("chunk " + String(fact.chunk_id).slice(0, 8));
           if (fact.last_reviewer) factParts.push("reviewer " + fact.last_reviewer + "：" + (fact.last_decision || "?"));
+          if (Array.isArray(fact.coverage) && fact.coverage.length > 0) factParts.push("coverage: " + fact.coverage.join("、"));
           factMeta.textContent = factParts.join(" · ");
           factRow.append(factMeta);
           factTarget.append(factRow);
+        }
+        var runTarget = byId("fact-review-run");
+        runTarget.textContent = "";
+        var latestRun = runs.length > 0 ? runs[runs.length - 1] : undefined;
+        if (!isRecord(latestRun)) {
+          runTarget.textContent = "尚未建立事實 Review Run。";
+          var startButton = document.createElement("button");
+          startButton.className = "button";
+          startButton.textContent = "建立 Review Run";
+          startButton.addEventListener("click", function () {
+            postJson("/workspace/fact/review/run", {}).then(function () { refresh(); }).catch(function (error) { setAreaError("fact-review-run", error); });
+          });
+          runTarget.append(startButton);
+          return;
+        }
+        var runHeading = document.createElement("div");
+        runHeading.className = "fact-row";
+        var runBadge = document.createElement("span");
+        runBadge.className = "status-badge " + statusClass(firstString(latestRun, ["status"]) || "open");
+        runBadge.textContent = "run " + (firstString(latestRun, ["status"]) || "open");
+        var runMeta = document.createElement("span");
+        var runParts = ["候選 " + (Array.isArray(latestRun.candidate_occurrence_ids) ? latestRun.candidate_occurrence_ids.length : 0)];
+        if (latestRun.candidate_set_revision) runParts.push("candidate set " + String(latestRun.candidate_set_revision).slice(0, 8));
+        if (latestRun.created_by) runParts.push("by " + latestRun.created_by);
+        runMeta.textContent = runParts.join(" · ");
+        runHeading.append(runBadge, runMeta);
+        runTarget.append(runHeading);
+        var adjudicated = new Set();
+        if (Array.isArray(latestRun.decisions)) {
+          for (var d = 0; d < latestRun.decisions.length; d += 1) {
+            adjudicated.add(latestRun.decisions[d].candidate_occurrence_id);
+          }
+        }
+        var candidatesForRun = Array.isArray(latestRun.candidates) ? latestRun.candidates : [];
+        for (var m = 0; m < candidatesForRun.length; m += 1) {
+          var runCandidate = candidatesForRun[m];
+          if (!isRecord(runCandidate)) continue;
+          if (adjudicated.has(runCandidate.candidate_occurrence_id)) continue;
+          var isConflict = runCandidate.status === "conflict";
+          runTarget.append(factAdjudicationRow(latestRun, runCandidate.candidate_occurrence_id, runCandidate.statement, runCandidate.status, isConflict));
+        }
+        if (candidatesForRun.length > 0 && adjudicated.size >= candidatesForRun.length) {
+          var completeNote = document.createElement("div");
+          completeNote.className = "muted";
+          completeNote.textContent = "此 run 的所有候選事實都已裁決；可建立新 Review Run 進行下一輪。";
+          runTarget.append(completeNote);
         }
       }
 

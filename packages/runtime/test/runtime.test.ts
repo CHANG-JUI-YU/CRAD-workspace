@@ -1393,6 +1393,50 @@ describe("natural language runtime boundary", () => {
       expect(snapshot.primary_character_id).toBe("beta");
     });
   });
+
+  describe("fact review console", () => {
+    it("starts a review run and exposes candidates and decisions in the dashboard snapshot", async () => {
+      const repository = new MemoryProjectRepository("fact-console");
+      const timestamp = new Date().toISOString();
+      await repository.commit(0, (state) => ({
+        ...state,
+        sources: [{ id: "source-console", candidate_id: "candidate-console", title: "official", canonical_text: "Yukino is direct.", original_hash: contentHash("Yukino is direct."), revision: contentHash("Yukino is direct."), media_type: "text/plain", created_at: timestamp }],
+        knowledge_chunks: [{ id: "chunk-console", source_id: "source-console", ordinal: 0, text: "Yukino is direct.", hash: contentHash("Yukino is direct."), created_at: timestamp }],
+        facts: [{ id: "fact-console", candidate_occurrence_id: "occ-console", statement: "Yukino is direct.", subject: "Yukino", predicate: "is", value: "direct", classification: "trait", coverage: ["personality"], status: "candidate", confidence: 0.8, source_ids: ["source-console"], evidence: ["Yukino is direct."], evidence_refs: [{ source_id: "source-console", source_revision_id: contentHash("Yukino is direct."), quote: "Yukino is direct." }], fact_revision: 1, created_at: timestamp, updated_at: timestamp, created_by: "curator" }],
+        operations: [
+          { id: "op-fact-run", kind: "review", request: "review facts", status: "running", created_at: timestamp, updated_at: timestamp, progress: [] },
+          { id: "op-fact-batch", kind: "review", request: "review facts", status: "running", created_at: timestamp, updated_at: timestamp, progress: [] },
+        ],
+      }));
+      const runtime = new WorkspaceRuntime(repository);
+      const run = await runtime.startFactReviewRun("fact-reviewer-1");
+      expect(run.status).toBe("open");
+      const context = await runtime.factReviewContext();
+      const candidate = context.candidates[0]!;
+      expect(candidate.evidence_refs?.[0]?.chunk_id).toBeDefined();
+      const snapshot = await runtime.dashboardSnapshot();
+      expect(snapshot.review_runs).toHaveLength(1);
+      expect(snapshot.review_runs[0]).toMatchObject({
+        id: run.id,
+        status: "open",
+        candidate_set_revision: expect.any(String),
+      });
+      expect(snapshot.review_runs[0]?.candidates).toEqual([expect.objectContaining({ candidate_occurrence_id: "occ-console", statement: "Yukino is direct.", status: "candidate" })]);
+      expect(snapshot.review_runs[0]?.decisions).toEqual([]);
+      const applied = await runtime.applyFactReviewBatch(
+        [{ candidate_occurrence_id: candidate.candidate_occurrence_id, claim: candidate.statement, decision: "accept", reason: "Matches the official source.", evidence: [], evidence_refs: candidate.evidence_refs ?? [], coverage: ["personality"] }],
+        "server",
+        "fact-reviewer-1",
+        run.id
+      );
+      expect(applied.status).toBe("completed");
+      const state = await repository.read();
+      expect(state.facts[0]?.status).toBe("accepted");
+      const after = await runtime.dashboardSnapshot();
+      expect(after.review_runs[0]?.decisions).toEqual([expect.objectContaining({ candidate_occurrence_id: candidate.candidate_occurrence_id, decision: "accepted", reviewer_identity: "fact-reviewer-1", reason: "Matches the official source." })]);
+      expect(after.review_runs[0]?.status).toBe("completed");
+    });
+  });
 });
 
 function makeTestPng(width: number, height: number, filter = 0): Buffer {

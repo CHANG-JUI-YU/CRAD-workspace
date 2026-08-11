@@ -359,8 +359,10 @@ export class KnowledgeService {
       }
       const chunks: KnowledgeChunk[] = [];
       const facts: FactRecord[] = [];
-      const existingFactKeys = new Set(current.facts.map((fact) => factKey(fact)));
+      const existingFactsByKey = new Map(current.facts.map((fact) => [factKey(fact), fact]));
       const batchKeys = new Map<string, number>();
+      const mergedFacts = new Map<string, FactRecord>();
+      let mergedCount = 0;
       for (const source of currentSources) {
         splitIntoChunks(source.canonical_text).forEach((text, ordinal) => {
           chunks.push({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), created_at: now() });
@@ -373,13 +375,23 @@ export class KnowledgeService {
             facts[batchIndex] = mergeFactEvidence(facts[batchIndex], candidate);
             continue;
           }
-          if (existingFactKeys.has(key)) continue;
-          existingFactKeys.add(key);
+          const existing = existingFactsByKey.get(key);
+          if (existing !== undefined) {
+            const merged = mergeFactEvidence(existing, candidate);
+            const hasNewEvidence = merged.source_ids.length > existing.source_ids.length
+              || merged.evidence.length > existing.evidence.length
+              || (merged.evidence_refs?.length ?? 0) > (existing.evidence_refs?.length ?? 0);
+            if (hasNewEvidence) {
+              mergedFacts.set(existing.id, { ...merged, fact_revision: (existing.fact_revision ?? 0) + 1, updated_at: now() });
+              mergedCount += 1;
+            }
+            continue;
+          }
           batchKeys.set(key, facts.length);
           facts.push(candidate);
         }
       }
-      const batchSummary = `Extracted ${chunks.length} knowledge chunks and ${facts.length} structured fact candidates.`;
+      const batchSummary = `Extracted ${chunks.length} knowledge chunks and ${facts.length} structured fact candidates${mergedCount > 0 ? `; merged ${mergedCount} corroborating evidence into existing facts.` : "."}`;
       committedSummary = batchSummary;
       committedChunks = chunks.map((chunk) => chunk.id);
       committedFacts = facts.map((fact) => fact.id);
@@ -387,7 +399,7 @@ export class KnowledgeService {
         ...current,
         ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
         knowledge_chunks: [...current.knowledge_chunks, ...chunks],
-        facts: [...current.facts, ...facts],
+        facts: current.facts.map((fact) => mergedFacts.get(fact.id) ?? fact).concat(facts),
         operations: current.operations.map((item) => item.id === operationId
           ? updateOperation(item, {
             status: "completed",
@@ -395,6 +407,7 @@ export class KnowledgeService {
               ...item.progress,
               ...chunks.map((chunk) => ({ item_id: chunk.id, status: "completed" as const, message: "Knowledge chunk created.", source_id: chunk.source_id })),
               ...facts.map((fact) => ({ item_id: fact.id, status: "completed" as const, message: "Structured fact candidate created." })),
+              ...[...mergedFacts.entries()].map(([factId]) => ({ item_id: factId, status: "completed" as const, message: "Corroborating evidence merged into existing fact." })),
             ],
             result_summary: batchSummary,
           })
@@ -406,7 +419,7 @@ export class KnowledgeService {
           actor,
           occurred_at: now(),
           project_revision: current.revision + 1,
-          details: { source_ids: currentSources.map((source) => source.id), chunk_count: chunks.length, fact_count: facts.length, structured: true },
+          details: { source_ids: currentSources.map((source) => source.id), chunk_count: chunks.length, fact_count: facts.length, structured: true, ...(mergedCount > 0 ? { merged_count: mergedCount } : {}) },
         }],
       };
     });
@@ -426,11 +439,12 @@ export class KnowledgeService {
     const availableChunks = [...initial.knowledge_chunks, ...chunks];
     const facts: FactRecord[] = [];
     const known = new Set(initial.facts.map((fact) => factKey(fact)));
+    const knownFactsByKey = new Map(initial.facts.map((fact) => [factKey(fact), fact]));
+    const mergedFacts = new Map<string, FactRecord>();
+    let mergedCount = 0;
     for (const claim of claims) {
       const fact = claimToFact(claim, initial.sources, actor);
       const key = factKey(fact);
-      if (known.has(key)) continue;
-      known.add(key);
       const evidenceRefs = claim.evidence.flatMap((evidence) => {
         if (evidence.quote === undefined) return [];
         const source = sourceForReference(initial.sources, evidence.source);
@@ -439,20 +453,34 @@ export class KnowledgeService {
         if (chunk === undefined) return [];
         return [{ source_id: source.id, source_revision_id: source.revision, chunk_id: chunk.id, chunk_hash: chunk.hash, quote: evidence.quote, ...(evidence.locator === undefined ? {} : { locator: evidence.locator }) }];
       });
-      facts.push(evidenceRefs.length === 0 ? fact : { ...fact, evidence_refs: evidenceRefs });
+      const factWithRefs = evidenceRefs.length === 0 ? fact : { ...fact, evidence_refs: evidenceRefs };
+      const existing = knownFactsByKey.get(key);
+      if (existing !== undefined) {
+        const merged = mergeFactEvidence(existing, factWithRefs);
+        const hasNewEvidence = merged.source_ids.length > existing.source_ids.length
+          || merged.evidence.length > existing.evidence.length
+          || (merged.evidence_refs?.length ?? 0) > (existing.evidence_refs?.length ?? 0);
+        if (hasNewEvidence) {
+          mergedFacts.set(existing.id, { ...merged, fact_revision: (existing.fact_revision ?? 0) + 1, updated_at: now() });
+          mergedCount += 1;
+        }
+        continue;
+      }
+      known.add(key);
+      facts.push(factWithRefs);
     }
-    const summary = `Applied ${facts.length} structured fact candidates from curation.`;
+    const summary = `Applied ${facts.length} structured fact candidates from curation${mergedCount > 0 ? `; merged ${mergedCount} corroborating evidence into existing facts.` : "."}`;
     await this.repository.commit(initial.revision, (current) => ({
       ...current,
       ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
       knowledge_chunks: [...current.knowledge_chunks, ...chunks],
-      facts: [...current.facts, ...facts],
+      facts: current.facts.map((fact) => mergedFacts.get(fact.id) ?? fact).concat(facts),
       operations: current.operations.map((item) => item.id === operationId
-        ? updateOperation(item, { status: "completed", progress: [...item.progress, ...facts.map((fact) => ({ item_id: fact.id, status: "completed" as const, message: "Fact curation applied." }))], result_summary: summary })
+        ? updateOperation(item, { status: "completed", progress: [...item.progress, ...facts.map((fact) => ({ item_id: fact.id, status: "completed" as const, message: "Fact curation applied." })), ...[...mergedFacts.entries()].map(([factId]) => ({ item_id: factId, status: "completed" as const, message: "Corroborating evidence merged into existing fact." }))], result_summary: summary })
         : item),
       audit: [...current.audit, {
         id: internalId("audit"), operation_id: operationId, event: "fact.curation.applied", actor: auditActor, occurred_at: now(), project_revision: current.revision + 1,
-        details: { fact_ids: facts.map((fact) => fact.id), claim_count: claims.length, agent_id: actor },
+        details: { fact_ids: facts.map((fact) => fact.id), claim_count: claims.length, agent_id: actor, ...(mergedCount > 0 ? { merged_count: mergedCount } : {}) },
       }],
     }));
     return { chunks: chunks.map((chunk) => chunk.id), facts: facts.map((fact) => fact.id), status: "completed", summary };

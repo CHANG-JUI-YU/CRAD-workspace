@@ -348,6 +348,31 @@ function issueUpdateValue(value: unknown): { issue_id: string; action: "resolve"
   };
 }
 
+function factDecisionsValue(value: unknown): Array<{ fact_id?: string; candidate_occurrence_id?: string; claim: string; decision: "accept" | "reject" | "conflict" | "needs_evidence"; reason: string; evidence: { source: string; quote?: string; locator?: string }[]; evidence_refs: { source_id: string; source_revision_id: string; quote: string; locator?: string; character_range?: { start: number; end: number } }[]; coverage: string[] }> | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const decisions: Array<{ fact_id?: string; candidate_occurrence_id?: string; claim: string; decision: "accept" | "reject" | "conflict" | "needs_evidence"; reason: string; evidence: { source: string; quote?: string; locator?: string }[]; evidence_refs: { source_id: string; source_revision_id: string; quote: string; locator?: string; character_range?: { start: number; end: number } }[]; coverage: string[] }> = [];
+  for (const item of value) {
+    if (item === null || typeof item !== "object") return undefined;
+    const input = item as { fact_id?: unknown; candidate_occurrence_id?: unknown; claim?: unknown; decision?: unknown; reason?: unknown };
+    if (typeof input.claim !== "string" || typeof input.reason !== "string") return undefined;
+    if (input.decision !== "accept" && input.decision !== "reject" && input.decision !== "conflict" && input.decision !== "needs_evidence") return undefined;
+    if (input.fact_id !== undefined && typeof input.fact_id !== "string") return undefined;
+    if (input.candidate_occurrence_id !== undefined && typeof input.candidate_occurrence_id !== "string") return undefined;
+    if (input.fact_id === undefined && input.candidate_occurrence_id === undefined) return undefined;
+    decisions.push({
+      claim: input.claim,
+      decision: input.decision,
+      reason: input.reason,
+      evidence: [],
+      evidence_refs: [],
+      coverage: [],
+      ...(input.fact_id === undefined ? {} : { fact_id: input.fact_id }),
+      ...(input.candidate_occurrence_id === undefined ? {} : { candidate_occurrence_id: input.candidate_occurrence_id }),
+    });
+  }
+  return decisions;
+}
+
 function adaptationDecisionValue(value: unknown): Omit<AdaptationDecision, "id" | "created_at" | "created_by"> | undefined {
   if (value === null || typeof value !== "object") return undefined;
   const input = value as { topic?: unknown; choice?: unknown; blueprint_refs?: unknown; fact_refs?: unknown; rationale?: unknown };
@@ -632,6 +657,38 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         json(response, 200, await (await getRuntime()).configureQualityProfile(level, { actor, attachments: [] }, overrides));
         return;
       }
+      if (request.method === "POST" && url.pathname === "/workspace/fact/review/run") {
+        const runtime = await getRuntime();
+        json(response, 200, await runtime.startFactReviewRun(actor));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/fact/review/batch") {
+        const parsed = await body(request);
+        const decisions = factDecisionsValue(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && "decisions" in parsed ? parsed.decisions : undefined);
+        if (decisions === undefined) {
+          json(response, 400, { error: "FACT_DECISIONS_REQUIRED" });
+          return;
+        }
+        const input = parsed as { reviewer_identity?: unknown; run_id?: unknown; expected_projection_revision?: unknown };
+        const reviewerIdentity = typeof input.reviewer_identity === "string" && input.reviewer_identity.length > 0 ? input.reviewer_identity : "director";
+        const runId = typeof input.run_id === "string" && input.run_id.length > 0 ? input.run_id : undefined;
+        const expectedProjectionRevision = typeof input.expected_projection_revision === "string" && input.expected_projection_revision.length > 0 ? input.expected_projection_revision : undefined;
+        json(response, 200, await (await getRuntime()).applyFactReviewBatch(decisions, actor, reviewerIdentity, runId, expectedProjectionRevision));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/fact/review/conflict") {
+        const parsed = await body(request);
+        const decisions = factDecisionsValue(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && "decisions" in parsed ? parsed.decisions : undefined);
+        if (decisions === undefined) {
+          json(response, 400, { error: "FACT_DECISIONS_REQUIRED" });
+          return;
+        }
+        const input = parsed as { run_id?: unknown; expected_projection_revision?: unknown };
+        const runId = typeof input.run_id === "string" && input.run_id.length > 0 ? input.run_id : undefined;
+        const expectedProjectionRevision = typeof input.expected_projection_revision === "string" && input.expected_projection_revision.length > 0 ? input.expected_projection_revision : undefined;
+        json(response, 200, await (await getRuntime()).resolveFactConflict(decisions, actor, runId, expectedProjectionRevision));
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/workspace/operation/recover") {
         const parsed = await body(request);
         const operationId = operationIdValue(parsed);
@@ -827,7 +884,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       json(response, 404, { error: "NOT_FOUND" });
     } catch (error) {
       const errorCode = error !== null && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "";
-      const recoverableInput = error !== null && typeof error === "object" && "recoverable" in error && (error as { recoverable?: unknown }).recoverable === true && /^(?:AGENT_|INTERVIEW_|PROJECT_|REQUEST_|ISSUE_|TEMPLATE_|ZHUJI_|IMAGE_)/u.test(errorCode);
+      const recoverableInput = error !== null && typeof error === "object" && "recoverable" in error && (error as { recoverable?: unknown }).recoverable === true && /^(?:AGENT_|INTERVIEW_|PROJECT_|REQUEST_|ISSUE_|TEMPLATE_|ZHUJI_|IMAGE_|FACT_)/u.test(errorCode);
       const details = error !== null && typeof error === "object" && "details" in error ? (error as { details?: unknown }).details : undefined;
       if (new URL(request.url ?? "/", "http://localhost").pathname === "/mcp") {
         json(response, 200, { jsonrpc: "2.0", id: null, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } });

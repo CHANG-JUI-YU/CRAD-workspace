@@ -32,6 +32,8 @@ import {
   type AttachmentStore,
   type AuthoringKnowledgeContext,
   type FactReviewContext,
+  type FactReviewRunRecord,
+  type FactDecision,
   type InterviewFlow,
   type InterviewQuestion,
   type OperationCommand,
@@ -73,6 +75,7 @@ import {
   type SourceFetcher,
   type WorkflowGateResult,
   type ReviewExecutionResult,
+  type FactReviewExecutionResult,
 } from "@st-workspace/domain";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
 
@@ -719,6 +722,11 @@ export interface DashboardFactView {
   review_run_id?: string;
   decision_id?: string;
   evidence_quote?: string;
+  fact_revision?: number;
+  evidence_refs_count?: number;
+  locator?: string;
+  character_range?: { start: number; end: number };
+  chunk_id?: string;
   last_reviewer?: string;
   last_decision?: string;
 }
@@ -783,13 +791,26 @@ export interface DashboardSnapshot {
   primary_character_id?: string;
   images_stale: boolean;
   facts: DashboardFactView[];
-  sources: Array<{ id: string; candidate_id: string; title: string; revision: string }>;
-  candidates: Array<{ id: string; title: string; url?: string; status: string; official?: boolean }>;
+  sources: Array<{ id: string; candidate_id: string; title: string; revision: string; media_type: string; original_name?: string; url?: string; official?: boolean; chunk_count: number; canonical_chars: number; selection_snapshot?: unknown }>;
+  candidates: Array<{ id: string; title: string; snippet?: string; url?: string; domain?: string; status: string; official?: boolean; failure?: { code: string; message: string }; selection_snapshot?: unknown }>;
   operations: DashboardOperationView[];
   issues: DashboardIssueView[];
   reviews: Array<{ id: string; artifact_id: string; artifact_revision: string; reviewer: string; status: string }>;
   quality: { level?: string; blocking_severity: string; overrides: Record<string, string> };
-  review_runs: Array<{ id: string; status: string; candidate_occurrence_ids: string[] }>;
+  review_runs: Array<{
+    id: string;
+    status: string;
+    candidate_occurrence_ids: string[];
+    candidate_set_revision: string;
+    policy_revision: string;
+    created_by: string;
+    created_at: string;
+    completed_at?: string;
+    curation_run_id?: string;
+    source_revisions: Array<{ source_id: string; revision: string }>;
+    decisions: Array<{ candidate_occurrence_id: string; decision: string; reviewer_identity: string; reason: string }>;
+    candidates: Array<{ candidate_occurrence_id: string; statement: string; status: string }>;
+  }>;
   publishes: Array<{ id: string; content_hash: string; created_at: string; export_json_path?: string; export_png_path?: string }>;
   builds: Array<{ id: string; status: string; content_hash: string; created_at: string }>;
   repair: RepairInspection;
@@ -2605,6 +2626,7 @@ export class WorkspaceRuntime {
       })),
       facts: state.facts.map((fact) => {
         const evidenceQuote = fact.evidence[0] ?? fact.evidence_refs?.[0]?.quote;
+        const firstEvidenceRef = fact.evidence_refs?.[0];
         const decision = fact.decision_id === undefined ? undefined : state.fact_review_decisions.find((item) => item.id === fact.decision_id);
         return {
           id: fact.id,
@@ -2619,11 +2641,43 @@ export class WorkspaceRuntime {
           ...(fact.review_run_id === undefined ? {} : { review_run_id: fact.review_run_id }),
           ...(fact.decision_id === undefined ? {} : { decision_id: fact.decision_id }),
           ...(evidenceQuote === undefined ? {} : { evidence_quote: String(evidenceQuote) }),
+          ...(fact.fact_revision === undefined ? {} : { fact_revision: fact.fact_revision }),
+          ...(fact.evidence_refs === undefined ? {} : { evidence_refs_count: fact.evidence_refs.length }),
+          ...(firstEvidenceRef === undefined ? {} : {
+            ...(firstEvidenceRef.locator === undefined ? {} : { locator: firstEvidenceRef.locator }),
+            ...(firstEvidenceRef.character_range === undefined ? {} : { character_range: firstEvidenceRef.character_range }),
+            ...(firstEvidenceRef.chunk_id === undefined ? {} : { chunk_id: firstEvidenceRef.chunk_id }),
+          }),
           ...(decision === undefined ? {} : { last_reviewer: decision.reviewer_identity, last_decision: decision.decision }),
         };
       }),
-      sources: state.sources.map((source) => ({ id: source.id, candidate_id: source.candidate_id, title: source.title, revision: source.revision })),
-      candidates: state.candidates.map((candidate) => ({ id: candidate.id, title: candidate.title, ...(candidate.url === undefined ? {} : { url: candidate.url }), status: candidate.status, ...(candidate.official === undefined ? {} : { official: candidate.official }) })),
+      sources: state.sources.map((source) => {
+        const candidate = state.candidates.find((item) => item.id === source.candidate_id);
+        return {
+          id: source.id,
+          candidate_id: source.candidate_id,
+          title: source.title,
+          revision: source.revision,
+          media_type: source.media_type,
+          ...(source.original_name === undefined ? {} : { original_name: source.original_name }),
+          ...(candidate === undefined ? {} : { ...(candidate.url === undefined ? {} : { url: candidate.url }) }),
+          ...(candidate === undefined ? {} : { ...(candidate.official === undefined ? {} : { official: candidate.official }) }),
+          chunk_count: state.knowledge_chunks.filter((chunk) => chunk.source_id === source.id).length,
+          canonical_chars: source.canonical_text.length,
+          ...(source.selection_snapshot === undefined ? {} : { selection_snapshot: source.selection_snapshot }),
+        };
+      }),
+      candidates: state.candidates.map((candidate) => ({
+        id: candidate.id,
+        title: candidate.title,
+        ...(candidate.snippet === undefined ? {} : { snippet: candidate.snippet }),
+        ...(candidate.url === undefined ? {} : { url: candidate.url }),
+        ...(candidate.domain === undefined ? {} : { domain: candidate.domain }),
+        status: candidate.status,
+        ...(candidate.official === undefined ? {} : { official: candidate.official }),
+        ...(candidate.failure === undefined ? {} : { failure: candidate.failure }),
+        ...(candidate.selection_snapshot === undefined ? {} : { selection_snapshot: candidate.selection_snapshot }),
+      })),
       operations: (() => {
         const failedClasses = new Map<string, "recoverable" | "fatal">();
         for (const entry of state.audit) {
@@ -2675,7 +2729,32 @@ export class WorkspaceRuntime {
       }),
       reviews: state.reviews.map((review) => ({ id: review.id, artifact_id: review.artifact_id, artifact_revision: review.artifact_revision, reviewer: review.reviewer, status: review.status })),
       quality: { ...(state.quality_profile.level === undefined ? {} : { level: state.quality_profile.level }), blocking_severity: state.quality_profile.blocking_severity, overrides: state.quality_profile.overrides },
-      review_runs: state.fact_review_runs.map((run) => ({ id: run.id, status: run.status, candidate_occurrence_ids: run.candidate_occurrence_ids })),
+      review_runs: state.fact_review_runs.map((run) => ({
+        id: run.id,
+        status: run.status,
+        candidate_occurrence_ids: run.candidate_occurrence_ids,
+        candidate_set_revision: run.candidate_set_revision,
+        policy_revision: run.policy_revision,
+        created_by: run.created_by,
+        created_at: run.created_at,
+        ...(run.completed_at === undefined ? {} : { completed_at: run.completed_at }),
+        ...(run.curation_run_id === undefined ? {} : { curation_run_id: run.curation_run_id }),
+        source_revisions: run.source_revisions,
+        decisions: state.fact_review_decisions.filter((item) => item.review_run_id === run.id).map((item) => ({
+          candidate_occurrence_id: item.candidate_occurrence_id,
+          decision: item.decision,
+          reviewer_identity: item.reviewer_identity,
+          reason: item.reason,
+        })),
+        candidates: run.candidate_occurrence_ids.map((occurrenceId) => {
+          const fact = state.facts.find((item) => item.candidate_occurrence_id === occurrenceId);
+          return {
+            candidate_occurrence_id: occurrenceId,
+            statement: fact?.statement ?? "（候選事實不存在）",
+            status: fact?.status ?? "candidate",
+          };
+        }),
+      })),
       publishes: state.publishes.map((publish) => ({ id: publish.id, content_hash: publish.content_hash, created_at: publish.created_at, ...(publish.export_json_path === undefined ? {} : { export_json_path: publish.export_json_path }), ...(publish.export_png_path === undefined ? {} : { export_png_path: publish.export_png_path }) })),
       builds: state.builds.map((build) => ({ id: build.id, status: build.status, content_hash: build.content_hash, created_at: build.created_at })),
       repair,
@@ -2912,6 +2991,42 @@ export class WorkspaceRuntime {
 
   async repairRun(planHash?: string): Promise<RepairReport> {
     return this.repository.runRepair(planHash);
+  }
+
+  async factReviewContext(): Promise<FactReviewContext> {
+    return this.knowledge.factReviewContext();
+  }
+
+  async startFactReviewRun(actor: string): Promise<FactReviewRunRecord> {
+    return this.knowledge.beginFactReviewRun(await this.factReviewOperationId(), actor, undefined, actor);
+  }
+
+  async applyFactReviewBatch(
+    decisions: FactDecision[],
+    actor: string,
+    reviewerIdentity: string,
+    reviewRunId?: string,
+    expectedProjectionRevision?: string,
+  ): Promise<FactReviewExecutionResult> {
+    return this.knowledge.applyReviewBatch(await this.factReviewOperationId(), decisions, actor, reviewerIdentity, reviewRunId, expectedProjectionRevision);
+  }
+
+  async resolveFactConflict(
+    decisions: FactDecision[],
+    actor: string,
+    reviewRunId?: string,
+    expectedProjectionRevision?: string,
+  ): Promise<FactReviewExecutionResult> {
+    return this.knowledge.resolveFactConflict(await this.factReviewOperationId(), decisions, actor, "director", reviewRunId, expectedProjectionRevision);
+  }
+
+  private async factReviewOperationId(): Promise<string> {
+    const state = await this.repository.read();
+    const operation = [...state.operations].reverse().find((item) => item.kind === "review");
+    if (operation === undefined) {
+      throw new CoreError("OPERATION_NOT_FOUND", "No review operation is available to attach the fact review run.", true);
+    }
+    return operation.id;
   }
 
   async setProjectImage(context: WorkspaceContext, options: { character_id?: string; aspect_ratio?: string; source?: string; license?: string } = {}): Promise<{ image_id: string; width: number; height: number }> {

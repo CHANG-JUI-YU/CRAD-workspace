@@ -75,6 +75,10 @@ describe("local Dashboard", () => {
       "（primary）",
       "裁切輸出約",
       "請重新打包",
+      "建立 Review Run",
+      "送出裁決",
+      "Director 解析",
+      "事實裁決需要原因",
     ]) {
       expect(html).toContain(label);
     }
@@ -87,6 +91,9 @@ describe("local Dashboard", () => {
       "/workspace/operation/",
       "/workspace/repair/preview",
       "/workspace/repair/run",
+      "/workspace/fact/review/run",
+      "/workspace/fact/review/batch",
+      "/workspace/fact/review/conflict",
     ]) {
       expect(html).toContain(endpoint);
     }

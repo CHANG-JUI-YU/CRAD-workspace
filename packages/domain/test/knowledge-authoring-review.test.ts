@@ -607,4 +607,43 @@ describe("knowledge, authoring and review services", () => {
     expect(secondReview.artifact_id).toBe(characterArtifact.id);
     expect(state.artifacts.find((item) => item.kind === "review")?.id).not.toBe(secondReview.artifact_id);
   });
+
+  it("merges corroborating evidence from a second source into an existing fact", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    const text1 = "Yukino has a direct personality.";
+    const source1: SourceRecord = { id: "source-1", candidate_id: "candidate-1", title: "official", canonical_text: text1, original_hash: contentHash(text1), revision: contentHash(text1), media_type: "text/plain", created_at: new Date().toISOString() };
+    await repository.commit(0, (state) => ({ ...state, sources: [source1], operations: [operation("op-k1", "knowledge")] }));
+    const service = new KnowledgeService(repository);
+    const first = await service.refresh("op-k1", "整理知識", "curator");
+    expect(first.facts).toHaveLength(1);
+    const text2 = "Yukino has a direct personality.";
+    const source2: SourceRecord = { id: "source-2", candidate_id: "candidate-2", title: "second official", canonical_text: text2, original_hash: contentHash(text2), revision: contentHash(text2), media_type: "text/plain", created_at: new Date().toISOString() };
+    await repository.commit((await repository.read()).revision, (state) => ({ ...state, sources: [...state.sources, source2], operations: [...state.operations, operation("op-k2", "knowledge")] }));
+    const second = await service.refresh("op-k2", "整理知識", "curator");
+    expect(second.status).toBe("completed");
+    expect(second.facts).toHaveLength(0);
+    expect(second.summary).toContain("merged 1 corroborating evidence");
+    const state = await repository.read();
+    expect(state.facts).toHaveLength(1);
+    expect(state.facts[0]?.source_ids).toEqual(["source-1", "source-2"]);
+    expect(state.facts[0]?.fact_revision).toBe(2);
+    expect(state.audit.some((entry) => entry.event === "knowledge.refreshed" && entry.details.merged_count === 1)).toBe(true);
+  });
+
+  it("merges corroborating curation evidence into an existing fact", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    await repository.commit(0, (state) => ({ ...state, operations: [operation("op-curation-a", "authoring")], sources: [{ id: "source-a", candidate_id: "candidate-a", title: "official page", canonical_text: "Yukino is direct.", original_hash: contentHash("Yukino is direct."), revision: contentHash("Yukino is direct."), media_type: "text/plain", created_at: new Date().toISOString() }] }));
+    const claim: FactClaim = { subject: "Yukino", predicate: "has_trait", value: "direct", classification: "trait", confidence: 0.92, coverage: ["character"], evidence: [{ source: "official page", quote: "Yukino is direct." }] };
+    const service = new KnowledgeService(repository);
+    await service.applyCuration("op-curation-a", [claim], "fact-curator");
+    await repository.commit((await repository.read()).revision, (state) => ({ ...state, sources: [...state.sources, { id: "source-b", candidate_id: "candidate-b", title: "second official page", canonical_text: "Yukino is direct.", original_hash: contentHash("Yukino is direct."), revision: contentHash("Yukino is direct."), media_type: "text/plain", created_at: new Date().toISOString() }], operations: [...state.operations, operation("op-curation-b", "authoring")] }));
+    const claim2: FactClaim = { ...claim, evidence: [{ source: "second official page", quote: "Yukino is direct." }] };
+    const result = await service.applyCuration("op-curation-b", [claim2], "fact-curator");
+    expect(result.facts).toHaveLength(0);
+    expect(result.summary).toContain("merged 1 corroborating evidence");
+    const state = await repository.read();
+    expect(state.facts).toHaveLength(1);
+    expect(state.facts[0]?.source_ids).toEqual(["source-a", "source-b"]);
+    expect(state.facts[0]?.fact_revision).toBe(2);
+  });
 });
