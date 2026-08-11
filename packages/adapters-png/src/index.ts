@@ -1,4 +1,4 @@
-import { deflateSync } from "node:zlib";
+import { deflateSync, inflateSync } from "node:zlib";
 import { characterCardV3Schema, type CharacterCardV3 } from "@st-workspace/adapters-ccv3";
 
 export const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -202,4 +202,126 @@ export function writeCardToPng(input: Uint8Array | undefined, card: CharacterCar
     output.push(chunk.raw);
   }
   return Buffer.concat(output);
+}
+
+export interface PngImageInfo {
+  width: number;
+  height: number;
+  bitDepth: number;
+  colorType: number;
+  interlace: number;
+}
+
+export function readPngImageInfo(input: Uint8Array): PngImageInfo | undefined {
+  const buffer = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  if (buffer.length < pngSignature.length || !buffer.subarray(0, 8).equals(pngSignature)) return undefined;
+  const chunks = parsePngChunks(input);
+  const ihdr = chunks[0];
+  if (ihdr === undefined || ihdr.type !== "IHDR") return undefined;
+  const width = ihdr.data.readUInt32BE(0);
+  const height = ihdr.data.readUInt32BE(4);
+  const bitDepth = ihdr.data[8] ?? 0;
+  const colorType = ihdr.data[9] ?? 0;
+  const interlace = ihdr.data[12] ?? 0;
+  return { width, height, bitDepth, colorType, interlace };
+}
+
+export const CARD_IMAGE_MAX_DIMENSION = 2048;
+
+/**
+ * Cover-crop an 8-bit RGB/RGBA non-interlaced PNG to the requested aspect
+ * ratio without scaling: the larger side is trimmed around the centre.
+ */
+export function cropPngCover(input: Uint8Array, aspectRatio: string): Buffer {
+  const info = readPngImageInfo(input);
+  if (info === undefined) throw new PngFormatError("PNG_SIGNATURE_INVALID", "角色圖必須是 PNG 檔案");
+  const { width, height, bitDepth, colorType, interlace } = info;
+  if (width > CARD_IMAGE_MAX_DIMENSION || height > CARD_IMAGE_MAX_DIMENSION) {
+    throw new PngFormatError("CARD_IMAGE_TOO_LARGE", `角色圖尺寸 ${width}×${height} 超過上限 ${CARD_IMAGE_MAX_DIMENSION}×${CARD_IMAGE_MAX_DIMENSION}`);
+  }
+  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6) || interlace !== 0) {
+    throw new PngFormatError("CARD_IMAGE_FORMAT_UNSUPPORTED", "角色圖只支援 8-bit RGB/RGBA 的非交錯 PNG");
+  }
+  const match = /^(\d+):(\d+)$/u.exec(aspectRatio);
+  if (match === null) throw new PngFormatError("CARD_IMAGE_ASPECT_INVALID", `裁切比例 ${aspectRatio} 必須是 N:M 格式`);
+  const targetWidth = Number(match[1]);
+  const targetHeight = Number(match[2]);
+  if (targetWidth <= 0 || targetHeight <= 0) throw new PngFormatError("CARD_IMAGE_ASPECT_INVALID", `裁切比例 ${aspectRatio} 必須是正整數`);
+  const targetRatio = targetWidth / targetHeight;
+
+  const channels = colorType === 6 ? 4 : 3;
+  const scanlineBytes = 1 + width * channels;
+  const idat = Buffer.concat(parsePngChunks(input).filter((chunk) => chunk.type === "IDAT").map((chunk) => chunk.data));
+  const raw = inflateSync(idat);
+  if (raw.length < scanlineBytes * height) throw new PngFormatError("CARD_IMAGE_DECODE_FAILED", "角色圖像素資料不完整");
+
+  const unfiltered = Buffer.alloc(width * channels * height);
+  for (let row = 0; row < height; row += 1) {
+    const offset = row * scanlineBytes;
+    const filter = raw[offset] ?? 0;
+    const start = offset + 1;
+    for (let index = 0; index < width * channels; index += 1) {
+      const byte = raw[start + index] ?? 0;
+      const left = index >= channels ? (unfiltered[row * width * channels + index - channels] ?? 0) : 0;
+      const above = row > 0 ? (unfiltered[(row - 1) * width * channels + index] ?? 0) : 0;
+      const aboveLeft = row > 0 && index >= channels ? (unfiltered[(row - 1) * width * channels + index - channels] ?? 0) : 0;
+      let value = byte;
+      switch (filter) {
+        case 1:
+          value = (byte + left) & 0xff;
+          break;
+        case 2:
+          value = (byte + above) & 0xff;
+          break;
+        case 3:
+          value = (byte + Math.floor((left + above) / 2)) & 0xff;
+          break;
+        case 4: {
+          const estimate = left + above - aboveLeft;
+          const pa = Math.abs(estimate - left);
+          const pb = Math.abs(estimate - above);
+          const pc = Math.abs(estimate - aboveLeft);
+          const predictor = pa <= pb && pa <= pc ? left : pb <= pc ? above : aboveLeft;
+          value = (byte + predictor) & 0xff;
+          break;
+        }
+        default:
+          break;
+      }
+      unfiltered[row * width * channels + index] = value;
+    }
+  }
+
+  let cropWidth = width;
+  let cropHeight = height;
+  let offsetX = 0;
+  let offsetY = 0;
+  if (width / height > targetRatio) {
+    cropWidth = Math.max(1, Math.round(height * targetRatio));
+    offsetX = Math.floor((width - cropWidth) / 2);
+  } else if (width / height < targetRatio) {
+    cropHeight = Math.max(1, Math.round(width / targetRatio));
+    offsetY = Math.floor((height - cropHeight) / 2);
+  }
+
+  const cropped = Buffer.alloc(cropWidth * channels * cropHeight);
+  for (let row = 0; row < cropHeight; row += 1) {
+    const sourceRow = (row + offsetY) * width * channels + offsetX * channels;
+    unfiltered.copy(cropped, row * cropWidth * channels, sourceRow, sourceRow + cropWidth * channels);
+  }
+
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(cropWidth, 0);
+  ihdr.writeUInt32BE(cropHeight, 4);
+  ihdr[8] = 8;
+  ihdr[9] = colorType;
+  const compressed = Buffer.alloc(cropped.length + cropHeight);
+  let compressedOffset = 0;
+  for (let row = 0; row < cropHeight; row += 1) {
+    compressed[compressedOffset] = 0;
+    compressedOffset += 1;
+    cropped.copy(compressed, compressedOffset, row * cropWidth * channels, (row + 1) * cropWidth * channels);
+    compressedOffset += cropWidth * channels;
+  }
+  return Buffer.concat([pngSignature, encodePngChunk("IHDR", ihdr), encodePngChunk("IDAT", deflateSync(compressed)), encodePngChunk("IEND", Buffer.alloc(0))]);
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { deflateSync } from "node:zlib";
 import { MemoryProjectRepository, contentHash, type ArtifactRecord } from "@st-workspace/core";
-import { readCardFromPng } from "@st-workspace/adapters-png";
+import { encodePngChunk, pngSignature, readCardFromPng, readPngImageInfo } from "@st-workspace/adapters-png";
 import { compileProject, compileWorkspaceBundle } from "../src/index.js";
 
 const momoka = "\u4e00\u689d\u6843\u83ef";
@@ -416,4 +417,41 @@ value:
     expect(result.normalized.mode_selection).toBeUndefined();
     expect(result.normalized.latestArtifacts.map((item) => item.id)).toEqual(["character"]);
   });
+
+  it("embeds the project cover image into the exported PNG instead of the placeholder", async () => {
+    const repository = new MemoryProjectRepository("cover-image");
+    await repository.commit(0, (state) => ({
+      ...state,
+      artifacts: [artifact("character", "character:demo", "character", "Demo", character("demo", "Demo"))],
+    }));
+    const cover = makeTestPng(8, 4);
+    const result = compileProject(await repository.read(), { image: cover });
+    const info = readPngImageInfo(result.png);
+    expect(info?.width).toBe(8);
+    expect(info?.height).toBe(4);
+    expect(readCardFromPng(result.png).card).toEqual(result.card);
+  });
 });
+
+function makeTestPng(width: number, height: number): Buffer {
+  const channels = 4;
+  const stride = width * channels;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    const rowOffset = y * (stride + 1);
+    raw[rowOffset] = 0;
+    for (let x = 0; x < width; x += 1) {
+      const pixelOffset = rowOffset + 1 + x * channels;
+      raw[pixelOffset] = 255;
+      raw[pixelOffset + 1] = 0;
+      raw[pixelOffset + 2] = 0;
+      raw[pixelOffset + 3] = 255;
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  return Buffer.concat([pngSignature, encodePngChunk("IHDR", ihdr), encodePngChunk("IDAT", deflateSync(raw)), encodePngChunk("IEND", Buffer.alloc(0))]);
+}

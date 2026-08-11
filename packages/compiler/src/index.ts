@@ -29,6 +29,8 @@ export type CardModeSelection = "zhuji" | "palette" | "both";
 
 export interface CompileOptions {
   mode_selection?: CardModeSelection;
+  /** Cover image to embed in the PNG export; falls back to the built-in placeholder. */
+  image?: Uint8Array;
 }
 
 export interface CompilerDiagnostic {
@@ -847,7 +849,7 @@ export function compileProject(state: ProjectState, options: CompileOptions = {}
   const card = characterCardV3Schema.parse(emitCharacterCardV3(normalized.project, { pluginContributions: contributions }));
   const json = canonicalJson(card);
   const content_hash = contentHash(json);
-  const png = writeCardToPng(undefined, card, { includeV2Backfill: true });
+  const png = writeCardToPng(options.image, card, { includeV2Backfill: true });
   const pluginTrace: PluginBuildTrace = {
     schema_version: 1,
     project_id: state.project_id,

@@ -1,7 +1,7 @@
-import { inflateSync } from "node:zlib";
+﻿import { deflateSync, inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { emitCharacterCardV3, type Ccv3Project } from "@st-workspace/adapters-ccv3";
-import { encodePngChunk, parsePngChunks, pngSignature, readCardFromPng, readCardMetadataFromPng, writeCardToPng } from "../src/index.js";
+import { cropPngCover, encodePngChunk, parsePngChunks, pngSignature, readCardFromPng, readCardMetadataFromPng, readPngImageInfo, writeCardToPng } from "../src/index.js";
 
 const project: Ccv3Project = {
   project_id: "demo",
@@ -128,4 +128,88 @@ describe("PNG card adapter", () => {
     expect(() => readCardMetadataFromPng(Buffer.concat([pngSignature, ihdr, latin1, malformedBase64, iend]))).toThrow(/Base64/u);
     expect(() => readCardFromPng(Buffer.concat([pngSignature, ihdr, latin1, malformedJson, iend]))).toThrow(/required|invalid|card/u);
   });
+
+  it("reads PNG image dimensions and rejects non-PNG input", () => {
+    const png = makePng(8, 4);
+    expect(readPngImageInfo(png)).toEqual({ width: 8, height: 4, bitDepth: 8, colorType: 6, interlace: 0 });
+    expect(readPngImageInfo(Buffer.from("not a png"))).toBeUndefined();
+  });
+
+  it("cover-crops the wider side to the requested aspect ratio", () => {
+    const cropped = cropPngCover(makePng(8, 4), "1:1");
+    expect(readPngImageInfo(cropped)).toEqual({ width: 4, height: 4, bitDepth: 8, colorType: 6, interlace: 0 });
+    const pixels = inflateSync(Buffer.concat(parsePngChunks(cropped).filter((chunk) => chunk.type === "IDAT").map((chunk) => chunk.data)));
+    expect(pixels[1]).toBe(255);
+    expect(pixels[2 * 4 + 1]).toBe(0);
+  });
+
+  it("cover-crops the taller side and keeps identical ratios unchanged", () => {
+    expect(readPngImageInfo(cropPngCover(makePng(4, 8), "1:1"))?.width).toBe(4);
+    const unchanged = cropPngCover(makePng(4, 4), "1:1");
+    expect(readPngImageInfo(unchanged)?.width).toBe(4);
+    expect(readPngImageInfo(unchanged)?.height).toBe(4);
+  });
+
+  it("decodes Sub-filtered rows correctly before cropping", () => {
+    const cropped = cropPngCover(makePng(8, 4, 4, 1), "1:1");
+    const pixels = inflateSync(Buffer.concat(parsePngChunks(cropped).filter((chunk) => chunk.type === "IDAT").map((chunk) => chunk.data)));
+    expect(pixels[1]).toBe(255);
+    expect(pixels[2 * 4 + 1]).toBe(0);
+  });
+
+  it("rejects unsupported formats and invalid aspect ratios", () => {
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(4, 0);
+    ihdr.writeUInt32BE(4, 4);
+    ihdr[8] = 8;
+    ihdr[9] = 3;
+    const indexed = Buffer.concat([pngSignature, encodePngChunk("IHDR", ihdr), encodePngChunk("IDAT", deflateSync(Buffer.alloc(1 + 4 * 4))), encodePngChunk("IEND", Buffer.alloc(0))]);
+    let formatError: unknown;
+    try {
+      cropPngCover(indexed, "1:1");
+    } catch (error) {
+      formatError = error;
+    }
+    expect(formatError).toMatchObject({ code: "CARD_IMAGE_FORMAT_UNSUPPORTED" });
+    let aspectError: unknown;
+    try {
+      cropPngCover(makePng(4, 4), "wide");
+    } catch (error) {
+      aspectError = error;
+    }
+    expect(aspectError).toMatchObject({ code: "CARD_IMAGE_ASPECT_INVALID" });
+  });
 });
+
+function makePng(width: number, height: number, channels = 4, filter = 0): Buffer {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = channels === 4 ? 6 : 2;
+  const rowBytes = 1 + width * channels;
+  const raw = Buffer.alloc(rowBytes * height);
+  for (let row = 0; row < height; row += 1) {
+    const offset = row * rowBytes;
+    raw[offset] = filter;
+    for (let column = 0; column < width; column += 1) {
+      const pixel = offset + 1 + column * channels;
+      raw[pixel] = column < width / 2 ? 255 : 0;
+      raw[pixel + 1] = 0;
+      raw[pixel + 2] = 0;
+      raw[pixel + 3] = 255;
+    }
+  }
+  if (filter === 1) {
+    for (let row = 0; row < height; row += 1) {
+      const offset = row * rowBytes + 1;
+      for (let column = width - 1; column >= 1; column -= 1) {
+        for (let channel = 0; channel < channels; channel += 1) {
+          raw[offset + column * channels + channel] = (raw[offset + column * channels + channel] - raw[offset + (column - 1) * channels + channel] + 256) & 0xff;
+        }
+      }
+    }
+  }
+  return Buffer.concat([pngSignature, encodePngChunk("IHDR", ihdr), encodePngChunk("IDAT", deflateSync(raw)), encodePngChunk("IEND", Buffer.alloc(0))]);
+}
+

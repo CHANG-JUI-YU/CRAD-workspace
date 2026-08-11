@@ -1,4 +1,4 @@
-import { readCardFromPng } from "@st-workspace/adapters-png";
+import { readCardFromPng, cropPngCover, readPngImageInfo, pngSignature } from "@st-workspace/adapters-png";
 import {
   buildZhujiTemplateContext,
   buildTemplateContext,
@@ -689,6 +689,7 @@ export interface DashboardSnapshot {
   blueprint?: DashboardBlueprint;
   prechecks: Array<{ id: string; status: string; candidate_blueprint_revision: string; checks_count: number }>;
   artifacts: DashboardArtifactView[];
+  images: Array<{ id: string; character_id?: string; width: number; height: number; aspect_ratio?: string; source?: string; license?: string; created_at: string }>;
   facts: DashboardFactView[];
   sources: Array<{ id: string; candidate_id: string; title: string; revision: string }>;
   candidates: Array<{ id: string; title: string; url?: string; status: string; official?: boolean }>;
@@ -2233,6 +2234,16 @@ export class WorkspaceRuntime {
         ...(artifact.blueprint_precheck_id === undefined ? {} : { blueprint_precheck_id: artifact.blueprint_precheck_id }),
         ...(artifact.blueprint_precheck_revision === undefined ? {} : { blueprint_precheck_revision: artifact.blueprint_precheck_revision }),
       })),
+      images: state.images.map((image) => ({
+        id: image.id,
+        ...(image.character_id === undefined ? {} : { character_id: image.character_id }),
+        width: image.width,
+        height: image.height,
+        ...(image.aspect_ratio === undefined ? {} : { aspect_ratio: image.aspect_ratio }),
+        ...(image.source === undefined ? {} : { source: image.source }),
+        ...(image.license === undefined ? {} : { license: image.license }),
+        created_at: image.created_at,
+      })),
       facts: state.facts.map((fact) => {
         const evidenceQuote = fact.evidence[0] ?? fact.evidence_refs?.[0]?.quote;
         const decision = fact.decision_id === undefined ? undefined : state.fact_review_decisions.find((item) => item.id === fact.decision_id);
@@ -2365,16 +2376,15 @@ export class WorkspaceRuntime {
     if (latest.png_ref !== undefined) pngBytes = await this.repository.readBlob(latest.png_ref.hash);
     else if (latest.png_base64 !== undefined) pngBytes = Buffer.from(latest.png_base64, "base64");
     if (pngBytes !== undefined) {
-      const bytes = pngBytes;
-      if (bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
-        const width = (((bytes[16] ?? 0) << 24) | ((bytes[17] ?? 0) << 16) | ((bytes[18] ?? 0) << 8) | (bytes[19] ?? 0)) >>> 0;
-        const height = (((bytes[20] ?? 0) << 24) | ((bytes[21] ?? 0) << 16) | ((bytes[22] ?? 0) << 8) | (bytes[23] ?? 0)) >>> 0;
-        report.push(`PNG 尺寸 ${width}x${height}px。`);
+      const imageInfo = readPngImageInfo(pngBytes);
+      if (imageInfo !== undefined) {
+        const placeholder = imageInfo.width === 512 && imageInfo.height === 768;
+        report.push(`PNG 尺寸 ${imageInfo.width}×${imageInfo.height}px（${placeholder ? "使用內建佔位圖，請上傳角色圖後重新打包" : "已嵌入角色圖像"}）。`);
       } else {
         report.push("PNG 簽名不符（可能不是有效 PNG）。");
       }
       try {
-        const decoded = readCardFromPng(bytes);
+        const decoded = readCardFromPng(pngBytes);
         report.push(`PNG 內嵌卡片以 ${decoded.authority} 解析成功。`);
         if (jsonText !== undefined) {
           try {
@@ -2399,6 +2409,77 @@ export class WorkspaceRuntime {
 
   async repairRun(): Promise<RepairReport> {
     return this.repository.runRepair();
+  }
+
+  async setProjectImage(context: WorkspaceContext, options: { character_id?: string; aspect_ratio?: string; source?: string; license?: string } = {}): Promise<{ image_id: string; width: number; height: number }> {
+    if (context.attachments.length !== 1) throw new CoreError("CARD_IMAGE_REQUIRED", "角色圖需要剛好一張 PNG 附件", true, { received: context.attachments.length });
+    const attachment = context.attachments[0]!;
+    const content = Buffer.from(attachment.content.buffer, attachment.content.byteOffset, attachment.content.byteLength);
+    if (!pngSignature.equals(content.subarray(0, 8))) throw new CoreError("CARD_IMAGE_REQUIRED", "角色圖必須是 PNG 檔案", true);
+    let processed = content;
+    let aspectRatio: string | undefined;
+    let crop: { width: number; height: number; offset_x: number; offset_y: number } | undefined;
+    if (options.aspect_ratio !== undefined) {
+      aspectRatio = options.aspect_ratio;
+      const original = readPngImageInfo(processed);
+      if (original === undefined) throw new CoreError("CARD_IMAGE_REQUIRED", "角色圖必須是 PNG 檔案", true);
+      const cropped = cropPngCover(processed, aspectRatio);
+      const croppedInfo = readPngImageInfo(cropped);
+      if (croppedInfo === undefined) throw new CoreError("CARD_IMAGE_DECODE_FAILED", "角色圖裁切後無法讀取", true);
+      crop = {
+        width: croppedInfo.width,
+        height: croppedInfo.height,
+        offset_x: original.width === croppedInfo.width ? 0 : Math.max(0, Math.floor((original.width - croppedInfo.width) / 2)),
+        offset_y: original.height === croppedInfo.height ? 0 : Math.max(0, Math.floor((original.height - croppedInfo.height) / 2)),
+      };
+      processed = cropped;
+    }
+    const info = readPngImageInfo(processed);
+    if (info === undefined) throw new CoreError("CARD_IMAGE_REQUIRED", "角色圖必須是 PNG 檔案", true);
+    const blobHash = contentHash(processed);
+    await this.repository.writeBlob(blobHash, processed);
+    const now = new Date().toISOString();
+    const id = internalId("image");
+    const state = await this.repository.read();
+    await this.repository.commit(state.revision, (current) => {
+      return {
+        ...current,
+        images: [...current.images, {
+          id,
+          ...(options.character_id === undefined ? {} : { character_id: options.character_id }),
+          blob_hash: blobHash,
+          media_type: "image/png",
+          width: info.width,
+          height: info.height,
+          ...(aspectRatio === undefined ? {} : { aspect_ratio: aspectRatio }),
+          ...(crop === undefined ? {} : { crop }),
+          ...(options.source === undefined ? {} : { source: options.source }),
+          ...(options.license === undefined ? {} : { license: options.license }),
+          created_at: now,
+          updated_at: now,
+          ...(context.actor === undefined ? {} : { created_by: context.actor }),
+        }],
+      };
+    });
+    return { image_id: id, width: info.width, height: info.height };
+  }
+
+  async getProjectImage(imageId: string): Promise<{ media_type: string; content: Uint8Array } | undefined> {
+    const state = await this.repository.read();
+    const image = state.images.find((item) => item.id === imageId);
+    if (image === undefined) return undefined;
+    const content = await this.repository.readBlob(image.blob_hash);
+    if (content === undefined) return undefined;
+    return { media_type: image.media_type, content };
+  }
+
+  async removeProjectImage(imageId: string): Promise<boolean> {
+    const state = await this.repository.read();
+    if (!state.images.some((item) => item.id === imageId)) return false;
+    await this.repository.commit(state.revision, (current) => {
+      return { ...current, images: current.images.filter((item) => item.id !== imageId) };
+    });
+    return true;
   }
 
   private async resumePendingIfAnswered(pending: OperationRecord, trimmed: string, context: WorkspaceContext, kind: string): Promise<RequestResult | undefined> {

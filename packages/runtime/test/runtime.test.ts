@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { deflateSync } from "node:zlib";
 import { MemoryProjectRepository, contentHash, createProjectState, type ArtifactRecord, type BlueprintPrecheckRecord, type ProjectRepository, type ZhujiProposalValue } from "@st-workspace/core";
+import { encodePngChunk, pngSignature } from "@st-workspace/adapters-png";
 import { WorkspaceRuntime } from "../src/index.js";
 
 function zhujiProposal(): ZhujiProposalValue {
@@ -839,4 +841,69 @@ describe("natural language runtime boundary", () => {
     expect(result.status).toBe("completed");
     expect((await repository.read()).operations.find((item) => item.id === "op-pending-knowledge")?.status).toBe("completed");
   });
+
+  it("stores a project cover image with crop geometry and exposes it through the dashboard", async () => {
+    const repository = new MemoryProjectRepository("runtime-images");
+    const runtime = new WorkspaceRuntime(repository);
+    const png = makeTestPng(8, 4, 0);
+    const result = await runtime.setProjectImage(
+      { actor: "user", attachments: [{ name: "cover.png", content: png, media_type: "image/png" }] },
+      { aspect_ratio: "1:1", source: "繪師授權", license: "商用可" },
+    );
+    expect(result.image_id).toBeTruthy();
+    expect(result.width).toBe(4);
+    expect(result.height).toBe(4);
+    const state = await repository.read();
+    expect(state.images).toHaveLength(1);
+    const image = state.images[0]!;
+    expect(image.blob_hash).toBe(contentHash(await runtime.getProjectImage(result.image_id).then((entry) => entry?.content ?? new Uint8Array(0))));
+    expect(image.crop).toMatchObject({ width: 4, height: 4, offset_x: 2, offset_y: 0 });
+    expect(image.source).toBe("繪師授權");
+    expect(image.license).toBe("商用可");
+    const fetched = await runtime.getProjectImage(result.image_id);
+    expect(fetched?.media_type).toBe("image/png");
+    expect(fetched?.content.byteLength).toBeGreaterThan(0);
+    const snapshot = await runtime.dashboardSnapshot();
+    expect(snapshot.images).toHaveLength(1);
+    expect(snapshot.images[0]).toMatchObject({ width: 4, height: 4, source: "繪師授權" });
+    expect(await runtime.removeProjectImage(result.image_id)).toBe(true);
+    expect(await runtime.removeProjectImage(result.image_id)).toBe(false);
+    expect((await repository.read()).images).toHaveLength(0);
+  });
+
+  it("requires exactly one PNG attachment when setting a project cover image", async () => {
+    const runtime = new WorkspaceRuntime(new MemoryProjectRepository("runtime-images-required"));
+    await expect(runtime.setProjectImage({ actor: "user", attachments: [] }, {})).rejects.toMatchObject({ code: "CARD_IMAGE_REQUIRED" });
+    const notPng = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    await expect(runtime.setProjectImage({ actor: "user", attachments: [{ name: "cover.png", content: notPng, media_type: "image/png" }] }, {})).rejects.toMatchObject({ code: "CARD_IMAGE_REQUIRED" });
+    const oversized = await runtime.setProjectImage(
+      { actor: "user", attachments: [{ name: "cover.png", content: makeTestPng(2049, 1, 0), media_type: "image/png" }] },
+      {},
+    );
+    expect(oversized.width).toBe(2049);
+  });
 });
+
+function makeTestPng(width: number, height: number, filter = 0): Buffer {
+  const channels = 4;
+  const stride = width * channels;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    const rowOffset = y * (stride + 1);
+    raw[rowOffset] = filter;
+    for (let x = 0; x < width; x += 1) {
+      const pixelOffset = rowOffset + 1 + x * channels;
+      const left = x < Math.floor(width / 2);
+      raw[pixelOffset] = left ? 255 : 0;
+      raw[pixelOffset + 1] = left ? 0 : 0;
+      raw[pixelOffset + 2] = left ? 0 : 255;
+      raw[pixelOffset + 3] = 255;
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  return Buffer.concat([pngSignature, encodePngChunk("IHDR", ihdr), encodePngChunk("IDAT", deflateSync(raw)), encodePngChunk("IEND", Buffer.alloc(0))]);
+}

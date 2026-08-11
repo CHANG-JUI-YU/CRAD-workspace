@@ -113,7 +113,26 @@ export class BuildService {
       }));
       return { status: "needs_input", summary: question };
     }
-    const compiled = compileProject(initial, modeSelection === undefined ? {} : { mode_selection: modeSelection });
+    let coverImage: Uint8Array | undefined;
+    if (initial.images.length > 0) {
+      const blueprintValue = [...initial.artifacts].reverse().find((artifact) => artifact.kind === "blueprint");
+      let primaryCharacterId: string | undefined;
+      try {
+        if (blueprintValue !== undefined) {
+          const parsed = JSON.parse(blueprintValue.content) as { characters?: Array<{ id?: unknown }> };
+          if (Array.isArray(parsed.characters) && parsed.characters[0] !== undefined) primaryCharacterId = String(parsed.characters[0].id ?? "");
+        }
+      } catch {
+        primaryCharacterId = undefined;
+      }
+      const bound = primaryCharacterId === undefined ? undefined : [...initial.images].reverse().find((image) => image.character_id === primaryCharacterId);
+      const selected = bound ?? [...initial.images].at(-1);
+      if (selected !== undefined) {
+        const blob = await this.repository.readBlob(selected.blob_hash);
+        if (blob !== undefined) coverImage = blob;
+      }
+    }
+    const compiled = compileProject(initial, { ...(modeSelection === undefined ? {} : { mode_selection: modeSelection }), ...(coverImage === undefined ? {} : { image: coverImage }) });
     const normalized = compiled.normalized;
     const latest = normalized.latestArtifacts;
     /* c8 ignore next -- latestArtifacts is derived from the non-empty artifact list above. */

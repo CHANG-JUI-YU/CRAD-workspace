@@ -423,6 +423,18 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         json(response, 200, await (await getRuntime()).repairPreview());
         return;
       }
+      const imageMatch = request.method === "GET" ? /^\/workspace\/images\/([^/]+)$/u.exec(url.pathname) : null;
+      if (imageMatch !== null) {
+        const image = await (await getRuntime()).getProjectImage(imageMatch[1] ?? "");
+        if (image === undefined) {
+          json(response, 404, { error: "IMAGE_NOT_FOUND" });
+          return;
+        }
+        response.setHeader("content-type", image.media_type);
+        response.setHeader("cache-control", "no-store");
+        response.end(Buffer.from(image.content.buffer, image.content.byteOffset, image.content.byteLength));
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/workspace/health") {
         json(response, 200, { status: "ready", worker: worker.status() });
         return;
@@ -539,6 +551,30 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const parsed = await body(request);
         const result = await (await getRuntime()).submitTemplateProposal(parsed, { actor, attachments: [] });
         json(response, 200, result);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/images") {
+        const parsed = await body(request);
+        const input = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+        const attachments = attachmentsFrom(input.attachments);
+        const options: { character_id?: string; aspect_ratio?: string; source?: string; license?: string } = {};
+        if (typeof input.character_id === "string") options.character_id = input.character_id;
+        if (typeof input.aspect_ratio === "string") options.aspect_ratio = input.aspect_ratio;
+        if (typeof input.source === "string") options.source = input.source;
+        if (typeof input.license === "string") options.license = input.license;
+        json(response, 200, await (await getRuntime()).setProjectImage({ actor, attachments }, options));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/images/remove") {
+        const parsed = await body(request);
+        const input = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+        const imageId = typeof input.image_id === "string" && input.image_id.trim().length > 0 ? input.image_id : undefined;
+        if (imageId === undefined) {
+          json(response, 400, { error: "IMAGE_ID_REQUIRED" });
+          return;
+        }
+        const removed = await (await getRuntime()).removeProjectImage(imageId);
+        json(response, 200, { status: removed ? "removed" : "not_found", image_id: imageId });
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/issue") {

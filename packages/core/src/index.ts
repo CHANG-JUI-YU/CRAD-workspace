@@ -315,6 +315,23 @@ export interface ArtifactRecord {
   blueprint_precheck_revision?: string;
 }
 
+/** Cover image for a character or the whole project, stored as a content-addressed blob. */
+export interface ImageRecord {
+  id: string;
+  character_id?: string;
+  blob_hash: string;
+  media_type: string;
+  width: number;
+  height: number;
+  aspect_ratio?: string;
+  crop?: { width: number; height: number; offset_x: number; offset_y: number };
+  source?: string;
+  license?: string;
+  created_at: string;
+  updated_at: string;
+  created_by?: string;
+}
+
 export interface ReviewRecord {
   id: string;
   artifact_id: string;
@@ -462,6 +479,7 @@ export interface ProjectState {
   fact_review_runs: FactReviewRunRecord[];
   fact_review_decisions: FactReviewDecisionRecord[];
   artifacts: ArtifactRecord[];
+  images: ImageRecord[];
   reviews: ReviewRecord[];
   issues: IssueRecord[];
   quality_profile: QualityProfile;
@@ -629,6 +647,27 @@ const artifactSchema = z.object({
   based_on: z.string().optional(),
   blueprint_precheck_id: z.string().min(1).optional(),
   blueprint_precheck_revision: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+}).strict();
+
+const imageSchema = z.object({
+  id: z.string().min(1),
+  character_id: z.string().min(1).optional(),
+  blob_hash: z.string().regex(/^[a-f0-9]{64}$/u),
+  media_type: z.string().min(1),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  aspect_ratio: z.string().regex(/^\d+:\d+$/u).optional(),
+  crop: z.object({
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    offset_x: z.number().int().nonnegative(),
+    offset_y: z.number().int().nonnegative(),
+  }).optional(),
+  source: z.string().min(1).optional(),
+  license: z.string().min(1).optional(),
+  created_at: z.string().datetime({ offset: true }),
+  updated_at: z.string().datetime({ offset: true }),
+  created_by: z.string().min(1).optional(),
 }).strict();
 
 const qualityPolicySnapshotSchema = z.object({
@@ -886,6 +925,7 @@ export const projectStateSchema = z.object({
   fact_review_runs: z.array(factReviewRunSchema).default([]),
   fact_review_decisions: z.array(factReviewDecisionRecordSchema).default([]),
   artifacts: z.array(artifactSchema).default([]),
+  images: z.array(imageSchema).default([]),
   reviews: z.array(reviewSchema).default([]),
   issues: z.array(issueSchema).default([]),
   quality_profile: qualityProfileSchema.default({ level: "normal", blocking_severity: "error", overrides: {}, override_audit: [] }),
@@ -978,6 +1018,7 @@ export function createProjectState(projectId: string): ProjectState {
     fact_review_runs: [],
     fact_review_decisions: [],
     artifacts: [],
+    images: [],
     reviews: [],
     issues: [],
     quality_profile: { level: "normal", blocking_severity: "error", overrides: {}, override_audit: [] },

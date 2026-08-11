@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { deflateSync } from "node:zlib";
 import { MemoryProjectRepository } from "@st-workspace/core";
+import { encodePngChunk, pngSignature } from "@st-workspace/adapters-png";
 import { WorkspaceRuntime } from "@st-workspace/runtime";
 import { createWorkspaceServer } from "../src/index.js";
 import { dashboard } from "../src/dashboard.js";
@@ -65,6 +67,7 @@ describe("local Dashboard", () => {
       "Tavern 相容性",
       "逐項 issue 操作",
       "標記確認",
+      "角色圖像",
     ]) {
       expect(html).toContain(label);
     }
@@ -127,8 +130,74 @@ describe("local Dashboard", () => {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
   });
+
+  it("uploads, serves and removes project cover images", async () => {
+    const server = createWorkspaceServer({
+      runtime: new WorkspaceRuntime(new MemoryProjectRepository("dashboard-images")),
+      actor: "dashboard-test",
+      autoStartWorker: false,
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("server did not bind");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const png = makeTestPng(8, 4);
+      const uploaded = await (await fetch(`${base}/workspace/images`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          attachments: [{ name: "cover.png", content_base64: Buffer.from(png).toString("base64"), media_type: "image/png" }],
+          aspect_ratio: "1:1",
+          source: "繪師授權",
+        }),
+      })).json();
+      expect(uploaded).toMatchObject({ image_id: expect.any(String) });
+      expect(uploaded.width).toBe(4);
+      expect(uploaded.height).toBe(4);
+      const served = await fetch(`${base}/workspace/images/${uploaded.image_id}`);
+      expect(served.status).toBe(200);
+      expect(served.headers.get("content-type")).toBe("image/png");
+      const body = new Uint8Array(await served.arrayBuffer());
+      expect(Array.from(body.slice(0, 8))).toEqual(Array.from(pngSignature));
+      const removed = await (await fetch(`${base}/workspace/images/remove`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ image_id: uploaded.image_id }),
+      })).json();
+      expect(removed.status).toBe("removed");
+      const missing = await fetch(`${base}/workspace/images/${uploaded.image_id}`);
+      expect(missing.status).toBe(404);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  });
 });
 
 function isRecordWith(value: unknown, key: string): boolean {
   return value !== null && typeof value === "object" && key in value;
+}
+
+function makeTestPng(width: number, height: number): Buffer {
+  const channels = 4;
+  const stride = width * channels;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    const rowOffset = y * (stride + 1);
+    raw[rowOffset] = 0;
+    for (let x = 0; x < width; x += 1) {
+      const pixelOffset = rowOffset + 1 + x * channels;
+      const left = x < Math.floor(width / 2);
+      raw[pixelOffset] = left ? 255 : 0;
+      raw[pixelOffset + 1] = 0;
+      raw[pixelOffset + 2] = left ? 0 : 255;
+      raw[pixelOffset + 3] = 255;
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  return Buffer.concat([pngSignature, encodePngChunk("IHDR", ihdr), encodePngChunk("IDAT", deflateSync(raw)), encodePngChunk("IEND", Buffer.alloc(0))]);
 }

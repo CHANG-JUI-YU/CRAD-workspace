@@ -429,6 +429,33 @@ export function dashboard(): string {
       <div id="tavern-report" class="tavern-report"></div>
     </section>
 
+    <section class="panel" aria-labelledby="image-heading">
+      <div class="panel-heading">
+        <h2 id="image-heading">角色圖像</h2>
+      </div>
+      <div class="field-row">
+        <input id="image-character" type="text" placeholder="角色 id（空白=封面圖）">
+        <select id="image-ratio">
+          <option value="">不裁切</option>
+          <option value="1:1">1:1 方形</option>
+          <option value="2:3">2:3</option>
+          <option value="3:4">3:4</option>
+          <option value="9:16">9:16</option>
+          <option value="16:9">16:9</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <input id="image-source" type="text" placeholder="來源（檔案/網址）">
+        <input id="image-license" type="text" placeholder="使用權註記">
+      </div>
+      <div class="form-actions">
+        <input id="image-file" type="file" accept="image/png">
+        <button id="submit-image" class="primary" type="button">上傳角色圖</button>
+      </div>
+      <div id="image-message" class="panel-message" aria-live="polite">尚未上傳角色圖像。</div>
+      <div id="image-list" class="fact-list"></div>
+    </section>
+
     <section class="panel panel-wide" aria-labelledby="deferred-heading">
       <div class="panel-heading">
         <h2 id="deferred-heading">後續提供</h2>
@@ -1366,6 +1393,77 @@ export function dashboard(): string {
         }
       }
 
+      function renderImageList(images) {
+        var target = byId("image-list");
+        target.textContent = "";
+        var list = Array.isArray(images) ? images : [];
+        target.textContent = list.length === 0 ? "沒有角色圖像。" : "角色圖像 " + list.length + " 筆";
+        for (var i = 0; i < list.length; i += 1) {
+          var image = list[i];
+          if (!isRecord(image)) continue;
+          var row = document.createElement("div");
+          row.className = "fact-row";
+          var preview = document.createElement("img");
+          preview.setAttribute("src", "/workspace/images/" + (firstString(image, ["id"]) || ""));
+          preview.setAttribute("alt", "角色圖預覽");
+          preview.className = "image-thumb";
+          var text = document.createElement("span");
+          var parts = [];
+          parts.push((firstString(image, ["width"]) || "?") + "×" + (firstString(image, ["height"]) || "?"));
+          if (image.aspect_ratio) parts.push("裁切 " + image.aspect_ratio);
+          if (image.source) parts.push("來源：" + image.source);
+          if (image.license) parts.push("授權：" + image.license);
+          if (image.character_id) parts.push("角色 " + image.character_id);
+          text.textContent = parts.join(" · ");
+          var removeButton = document.createElement("button");
+          removeButton.className = "inline-button";
+          removeButton.textContent = "移除";
+          removeButton.addEventListener("click", function () { postImageRemove(firstString(image, ["id"]) || ""); });
+          row.append(preview, text, removeButton);
+          target.append(row);
+        }
+      }
+
+      function postImageRemove(imageId) {
+        if (state.busy || imageId === "") return;
+        void runTask("移除角色圖", async function () {
+          var payload = await postJson("/workspace/images/remove", { image_id: imageId });
+          await Promise.allSettled([loadDashboardData()]);
+          return payload;
+        });
+      }
+
+      function submitImage() {
+        if (state.busy) return;
+        var fileInput = byId("image-file");
+        var file = fileInput.files && fileInput.files.length > 0 ? fileInput.files[0] : undefined;
+        if (file === undefined) {
+          byId("image-message").textContent = "請先選擇 PNG 圖片檔案。";
+          return;
+        }
+        var reader = new FileReader();
+        reader.onload = function () {
+          var base64 = typeof reader.result === "string" ? reader.result.split(",")[1] || "" : "";
+          var body = {
+            attachments: [{ name: file.name, content_base64: base64, media_type: file.type || "image/png" }],
+          };
+          var characterId = byId("image-character").value;
+          if (characterId !== "") body.character_id = characterId;
+          var ratio = byId("image-ratio").value;
+          if (ratio !== "") body.aspect_ratio = ratio;
+          var source = byId("image-source").value.trim();
+          if (source !== "") body.source = source;
+          var license = byId("image-license").value.trim();
+          if (license !== "") body.license = license;
+          void runTask("上傳角色圖", async function () {
+            var payload = await postJson("/workspace/images", body);
+            await Promise.allSettled([loadDashboardData()]);
+            return payload;
+          });
+        };
+        reader.readAsDataURL(file);
+      }
+
       function renderBuildReadiness(readiness) {
         var target = byId("build-summary");
         target.textContent = "";
@@ -1476,6 +1574,7 @@ export function dashboard(): string {
           renderQuality(payload);
           renderIssueList(payload);
           renderSourceFact(payload);
+          renderImageList(payload.images);
           renderRepairInspection(payload.repair);
           return payload;
         } catch (error) {
@@ -1540,6 +1639,7 @@ export function dashboard(): string {
       });
       byId("repair-run").addEventListener("click", runRepair);
       byId("apply-quality").addEventListener("click", applyQuality);
+      byId("submit-image").addEventListener("click", submitImage);
       byId("refresh").addEventListener("click", function () { void refresh(); });
       byId("submit-request").addEventListener("click", submitRequest);
       byId("select-project").addEventListener("click", selectProject);
