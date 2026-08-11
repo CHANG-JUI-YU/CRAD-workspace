@@ -1,7 +1,7 @@
-﻿import { deflateSync, inflateSync } from "node:zlib";
+import { deflateSync, inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { emitCharacterCardV3, type Ccv3Project } from "@st-workspace/adapters-ccv3";
-import { cropPngCover, encodePngChunk, parsePngChunks, pngSignature, readCardFromPng, readCardMetadataFromPng, readPngImageInfo, writeCardToPng } from "../src/index.js";
+import { cropPngCover, encodePngChunk, parsePngChunks, pngSignature, readCardFromPng, readCardMetadataFromPng, readPngImageInfo, validatePngImage, writeCardToPng } from "../src/index.js";
 
 const project: Ccv3Project = {
   project_id: "demo",
@@ -178,6 +178,36 @@ describe("PNG card adapter", () => {
       aspectError = error;
     }
     expect(aspectError).toMatchObject({ code: "CARD_IMAGE_ASPECT_INVALID" });
+  });
+
+  it("rejects invalid scanline filter 5 (BUG2-18)", () => {
+    const invalidFilterPng = makePng(4, 4, 4, 5);
+    expect(() => cropPngCover(invalidFilterPng, "1:1")).toThrow(/filter: 5/u);
+  });
+
+  it("enforces max dimension limits in validatePngImage and cropPngCover (BUG2-18)", () => {
+    const oversizedPng = makePng(2049, 100);
+    expect(() => validatePngImage(oversizedPng)).toThrow(/2049×100/u);
+    expect(() => cropPngCover(oversizedPng, "1:1")).toThrow(/2049×100/u);
+
+    const boundaryPng = makePng(2048, 2048);
+    expect(validatePngImage(boundaryPng)).toMatchObject({ width: 2048, height: 2048 });
+  });
+
+  it("rejects truncated or malformed IDAT decompressed output (BUG2-18)", () => {
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(4, 0);
+    ihdr.writeUInt32BE(4, 4);
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    // Inflated bytes too short (only 1 byte instead of (1 + 4*4)*4)
+    const malformedIdat = Buffer.concat([
+      pngSignature,
+      encodePngChunk("IHDR", ihdr),
+      encodePngChunk("IDAT", deflateSync(Buffer.alloc(1))),
+      encodePngChunk("IEND", Buffer.alloc(0)),
+    ]);
+    expect(() => cropPngCover(malformedIdat, "1:1")).toThrow(/長度不符|解壓失敗/u);
   });
 });
 

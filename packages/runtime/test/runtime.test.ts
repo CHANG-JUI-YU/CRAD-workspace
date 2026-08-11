@@ -876,11 +876,17 @@ describe("natural language runtime boundary", () => {
     await expect(runtime.setProjectImage({ actor: "user", attachments: [] }, {})).rejects.toMatchObject({ code: "CARD_IMAGE_REQUIRED" });
     const notPng = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
     await expect(runtime.setProjectImage({ actor: "user", attachments: [{ name: "cover.png", content: notPng, media_type: "image/png" }] }, {})).rejects.toMatchObject({ code: "CARD_IMAGE_REQUIRED" });
-    const oversized = await runtime.setProjectImage(
-      { actor: "user", attachments: [{ name: "cover.png", content: makeTestPng(2049, 1, 0), media_type: "image/png" }] },
+    await expect(runtime.setProjectImage(
+      { actor: "user", attachments: [{ name: "cover.png", content: makeTestPng(2049, 2048, 0), media_type: "image/png" }] },
+      {},
+    )).rejects.toMatchObject({ code: "CARD_IMAGE_TOO_LARGE", recoverable: true });
+
+    const boundary = await runtime.setProjectImage(
+      { actor: "user", attachments: [{ name: "cover.png", content: makeTestPng(2048, 2048, 0), media_type: "image/png" }] },
       {},
     );
-    expect(oversized.width).toBe(2049);
+    expect(boundary.width).toBe(2048);
+    expect(boundary.height).toBe(2048);
   });
 });
 

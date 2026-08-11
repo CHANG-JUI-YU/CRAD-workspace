@@ -315,110 +315,144 @@ export class SourceService {
     const officialCandidates = candidates.filter(isOfficialCandidate);
     const officialCompleted = new Set<string>();
     for (const candidate of candidates) {
+      const preState = await this.repository.read();
+      const preCandidate = preState.candidates.find((item) => item.id === candidate.id);
+      if (preCandidate !== undefined && preCandidate.status === "ingested") {
+        completed.push(candidate.id);
+        if (isOfficialCandidate(candidate)) officialCompleted.add(candidate.id);
+        continue;
+      }
+      if (preCandidate !== undefined && preCandidate.status !== "approved") {
+        continue;
+      }
+
+      if ((candidate.url !== undefined || candidate.domain !== undefined) && !domainAllowed(candidateDomain(candidate), allowedDomains)) {
+        const failure = new CoreError("SOURCE_DOMAIN_NOT_ALLOWED", `Source domain ${candidateDomain(candidate) ?? "unknown"} is outside the approved domain policy.`, true);
+        await this.markCandidateBlockedOrFailed(operationId, candidate.id, failure, context);
+        blocked.push(candidate.id);
+        continue;
+      }
+
+      let acquired: FetchResult;
       try {
-        if ((candidate.url !== undefined || candidate.domain !== undefined) && !domainAllowed(candidateDomain(candidate), allowedDomains)) {
-          throw new CoreError("SOURCE_DOMAIN_NOT_ALLOWED", `Source domain ${candidateDomain(candidate) ?? "unknown"} is outside the approved domain policy.`, true);
-        }
-        const preState = await this.repository.read();
-        const preCandidate = preState.candidates.find((item) => item.id === candidate.id);
-        if (preCandidate !== undefined && preCandidate.status === "ingested") {
-          completed.push(candidate.id);
-          if (isOfficialCandidate(candidate)) officialCompleted.add(candidate.id);
-          continue;
-        }
-        const acquired = await this.acquire(candidate, context);
-        const text = decodeText(acquired.content);
-        const source: SourceRecord = {
-          id: internalId("source"),
-          candidate_id: candidate.id,
-          title: candidate.title,
-          canonical_text: text,
-          original_hash: contentHash(acquired.content),
-          revision: contentHash(text),
-          media_type: acquired.media_type ?? candidate.media_type ?? "text/plain",
-          ...(acquired.name === undefined ? {} : { original_name: acquired.name }),
-          ...(candidate.selection_snapshot === undefined ? {} : { selection_snapshot: candidate.selection_snapshot }),
-          created_at: now(),
-        };
-        const state = await this.repository.read();
-        let ingestedInCommit = false;
-        await this.repository.commit(state.revision, (current) => {
-          const currentOperation = current.operations.find((item) => item.id === operationId);
-          if (currentOperation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
-          const currentCandidate = current.candidates.find((item) => item.id === candidate.id);
-          if (currentCandidate === undefined || currentCandidate.status !== "approved") {
-            if (currentCandidate?.status === "ingested") {
-              return {
-                ...current,
-                operations: current.operations.map((item) => item.id === operationId
-                  ? updateOperation(item, {
-                    progress: [...item.progress, { item_id: candidate.id, status: "completed", message: "來源已被並行處理入庫。" }],
-                  })
-                  : item),
-              };
-            }
-            return current;
-          }
-          const currentDomains = sourceResearchPolicy(current);
-          if ((currentCandidate.url !== undefined || currentCandidate.domain !== undefined) && !domainAllowed(candidateDomain(currentCandidate), currentDomains)) {
-            throw new CoreError("SOURCE_DOMAIN_NOT_ALLOWED", `Source domain ${candidateDomain(currentCandidate) ?? "unknown"} is outside the approved domain policy.`, true);
-          }
-          ingestedInCommit = true;
-          return {
-            ...current,
-            sources: [...current.sources, source],
-            candidates: current.candidates.map((item) => {
-              if (item.id !== candidate.id) return item;
-              const { failure: _failure, ...withoutFailure } = item;
-              return { ...withoutFailure, status: "ingested" as const };
-            }),
-            operations: current.operations.map((item) => item.id === operationId
-              ? updateOperation(item, {
-                progress: [...item.progress, { item_id: candidate.id, status: "completed", message: "來源已正規化並入庫。", source_id: source.id }],
-              })
-              : item),
-            audit: [...current.audit, {
-              id: internalId("audit"),
-              operation_id: operationId,
-              event: "source.ingested",
-              actor: context.actor,
-              occurred_at: now(),
-              project_revision: current.revision + 1,
-              details: { candidate_id: candidate.id, source_id: source.id, revision: source.revision },
-            }],
-          };
-        });
-        if (ingestedInCommit) {
-          completed.push(candidate.id);
-          if (isOfficialCandidate(candidate)) officialCompleted.add(candidate.id);
-        }
+        acquired = await this.acquire(candidate, context);
       } catch (error) {
         const failure = error instanceof CoreError ? error : new CoreError("SOURCE_ACQUISITION_FAILED", error instanceof Error ? error.message : String(error), true);
+        await this.markCandidateBlockedOrFailed(operationId, candidate.id, failure, context);
+        blocked.push(candidate.id);
+        continue;
+      }
+
+      let text: string;
+      try {
+        text = decodeText(acquired.content);
+      } catch (error) {
+        const failure = error instanceof CoreError ? error : new CoreError("SOURCE_ACQUISITION_FAILED", error instanceof Error ? error.message : String(error), true);
+        await this.markCandidateBlockedOrFailed(operationId, candidate.id, failure, context);
+        blocked.push(candidate.id);
+        continue;
+      }
+
+      const source: SourceRecord = {
+        id: internalId("source"),
+        candidate_id: candidate.id,
+        title: candidate.title,
+        canonical_text: text,
+        original_hash: contentHash(acquired.content),
+        revision: contentHash(text),
+        media_type: acquired.media_type ?? candidate.media_type ?? "text/plain",
+        ...(acquired.name === undefined ? {} : { original_name: acquired.name }),
+        ...(candidate.selection_snapshot === undefined ? {} : { selection_snapshot: candidate.selection_snapshot }),
+        created_at: now(),
+      };
+
+      const maxRetries = 3;
+      let commitSuccess = false;
+      let isConflict = false;
+
+      for (let attempt = 0; attempt < maxRetries; attempt += 1) {
         const state = await this.repository.read();
         const currentCandidate = state.candidates.find((item) => item.id === candidate.id);
+
         if (currentCandidate?.status === "ingested") {
           completed.push(candidate.id);
           if (isOfficialCandidate(candidate)) officialCompleted.add(candidate.id);
-        } else if (currentCandidate?.status === "approved") {
-          await this.repository.commit(state.revision, (current) => ({
-            ...current,
-            candidates: current.candidates.map((item) => item.id === candidate.id
-              ? { ...item, status: failure.code === "SOURCE_FETCH_BLOCKED" ? "blocked_external" : "failed", failure: { code: failure.code, message: failure.message } }
-              : item),
-            operations: current.operations.map((item) => item.id === operationId
-              ? updateOperation(item, { progress: [...item.progress, { item_id: candidate.id, status: "blocked", message: failure.message }] })
-              : item),
-            audit: [...current.audit, {
-              id: internalId("audit"),
-              operation_id: operationId,
-              event: "source.blocked",
-              actor: context.actor,
-              occurred_at: now(),
-              project_revision: current.revision + 1,
-              details: { candidate_id: candidate.id, code: failure.code },
-            }],
-          }));
+          commitSuccess = true;
+          break;
         }
+
+        if (currentCandidate?.status !== "approved") {
+          break;
+        }
+
+        let ingestedInCommit = false;
+        try {
+          await this.repository.commit(state.revision, (current) => {
+            const currentOperation = current.operations.find((item) => item.id === operationId);
+            if (currentOperation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
+            const targetCandidate = current.candidates.find((item) => item.id === candidate.id);
+            if (targetCandidate === undefined || targetCandidate.status !== "approved") {
+              if (targetCandidate?.status === "ingested") {
+                return {
+                  ...current,
+                  operations: current.operations.map((item) => item.id === operationId
+                    ? updateOperation(item, {
+                      progress: [...item.progress, { item_id: candidate.id, status: "completed", message: "來源已被並行處理入庫。" }],
+                    })
+                    : item),
+                };
+              }
+              return current;
+            }
+            const currentDomains = sourceResearchPolicy(current);
+            if ((targetCandidate.url !== undefined || targetCandidate.domain !== undefined) && !domainAllowed(candidateDomain(targetCandidate), currentDomains)) {
+              throw new CoreError("SOURCE_DOMAIN_NOT_ALLOWED", `Source domain ${candidateDomain(targetCandidate) ?? "unknown"} is outside the approved domain policy.`, true);
+            }
+            ingestedInCommit = true;
+            return {
+              ...current,
+              sources: [...current.sources, source],
+              candidates: current.candidates.map((item) => {
+                if (item.id !== candidate.id) return item;
+                const { failure: _failure, ...withoutFailure } = item;
+                return { ...withoutFailure, status: "ingested" as const };
+              }),
+              operations: current.operations.map((item) => item.id === operationId
+                ? updateOperation(item, {
+                  progress: [...item.progress, { item_id: candidate.id, status: "completed", message: "來源已正規化並入庫。", source_id: source.id }],
+                })
+                : item),
+              audit: [...current.audit, {
+                id: internalId("audit"),
+                operation_id: operationId,
+                event: "source.ingested",
+                actor: context.actor,
+                occurred_at: now(),
+                project_revision: current.revision + 1,
+                details: { candidate_id: candidate.id, source_id: source.id, revision: source.revision },
+              }],
+            };
+          });
+
+          if (ingestedInCommit || (await this.repository.read()).candidates.find((item) => item.id === candidate.id)?.status === "ingested") {
+            completed.push(candidate.id);
+            if (isOfficialCandidate(candidate)) officialCompleted.add(candidate.id);
+            commitSuccess = true;
+            break;
+          }
+        } catch (commitErr) {
+          if (commitErr instanceof CoreError && commitErr.code === "REVISION_CONFLICT") {
+            isConflict = true;
+            continue;
+          }
+          const failure = commitErr instanceof CoreError ? commitErr : new CoreError("SOURCE_ACQUISITION_FAILED", commitErr instanceof Error ? commitErr.message : String(commitErr), true);
+          await this.markCandidateBlockedOrFailed(operationId, candidate.id, failure, context);
+          blocked.push(candidate.id);
+          break;
+        }
+      }
+
+      if (!commitSuccess && isConflict && !completed.includes(candidate.id) && !blocked.includes(candidate.id)) {
         blocked.push(candidate.id);
       }
     }
@@ -439,12 +473,16 @@ export class SourceService {
       result_summary: summary,
       ...(status === "needs_input" ? { question: "要上傳本地檔案、貼上內容，還是稍後重試？" } : {}),
     };
-    await this.repository.commit(finalState.revision, (current) => ({
-      ...current,
-      operations: current.operations.map((item) => item.id === operationId
-        ? updateOperation(item, operationPatch)
-        : item),
-    }));
+    try {
+      await this.repository.commit(finalState.revision, (current) => ({
+        ...current,
+        operations: current.operations.map((item) => item.id === operationId
+          ? updateOperation(item, operationPatch)
+          : item),
+      }));
+    } catch (err) {
+      if (!(err instanceof CoreError && err.code === "REVISION_CONFLICT")) throw err;
+    }
     return { completed, blocked, summary, status };
   }
 
@@ -475,5 +513,39 @@ export class SourceService {
       ...current,
       operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status, question }) : item),
     }));
+  }
+
+  private async markCandidateBlockedOrFailed(operationId: string, candidateId: string, failure: CoreError, context: SourceExecutionContext): Promise<void> {
+    const maxRetries = 3;
+    for (let attempt = 0; attempt < maxRetries; attempt += 1) {
+      const state = await this.repository.read();
+      const currentCandidate = state.candidates.find((item) => item.id === candidateId);
+      if (currentCandidate?.status === "ingested") return;
+      if (currentCandidate?.status !== "approved") return;
+      try {
+        await this.repository.commit(state.revision, (current) => ({
+          ...current,
+          candidates: current.candidates.map((item) => item.id === candidateId
+            ? { ...item, status: failure.code === "SOURCE_FETCH_BLOCKED" ? "blocked_external" : "failed", failure: { code: failure.code, message: failure.message } }
+            : item),
+          operations: current.operations.map((item) => item.id === operationId
+            ? updateOperation(item, { progress: [...item.progress, { item_id: candidateId, status: "blocked", message: failure.message }] })
+            : item),
+          audit: [...current.audit, {
+            id: internalId("audit"),
+            operation_id: operationId,
+            event: "source.blocked",
+            actor: context.actor,
+            occurred_at: now(),
+            project_revision: current.revision + 1,
+            details: { candidate_id: candidateId, code: failure.code },
+          }],
+        }));
+        return;
+      } catch (err) {
+        if (err instanceof CoreError && err.code === "REVISION_CONFLICT") continue;
+        throw err;
+      }
+    }
   }
 }

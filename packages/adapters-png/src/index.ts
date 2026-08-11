@@ -228,17 +228,45 @@ export function readPngImageInfo(input: Uint8Array): PngImageInfo | undefined {
 
 export const CARD_IMAGE_MAX_DIMENSION = 2048;
 
+const builtInPlaceholderBasePng = createBasePng();
+const builtInPlaceholderIdat = Buffer.concat(
+  parsePngChunks(builtInPlaceholderBasePng)
+    .filter((chunk) => chunk.type === "IDAT")
+    .map((chunk) => chunk.data)
+);
+
+export function isBuiltInPlaceholderImage(input: Uint8Array): boolean {
+  try {
+    const info = readPngImageInfo(input);
+    if (info === undefined || info.width !== 512 || info.height !== 768) return false;
+    const idat = Buffer.concat(
+      parsePngChunks(input)
+        .filter((chunk) => chunk.type === "IDAT")
+        .map((chunk) => chunk.data)
+    );
+    return idat.equals(builtInPlaceholderIdat);
+  } catch {
+    return false;
+  }
+}
+
+export function validatePngImage(input: Uint8Array, options: { maxDimension?: number } = {}): PngImageInfo {
+  const maxDimension = options.maxDimension ?? CARD_IMAGE_MAX_DIMENSION;
+  const info = readPngImageInfo(input);
+  if (info === undefined) throw new PngFormatError("PNG_SIGNATURE_INVALID", "角色圖必須是 PNG 檔案");
+  if (info.width > maxDimension || info.height > maxDimension) {
+    throw new PngFormatError("CARD_IMAGE_TOO_LARGE", `角色圖尺寸 ${info.width}×${info.height} 超過上限 ${maxDimension}×${maxDimension}`);
+  }
+  return info;
+}
+
 /**
  * Cover-crop an 8-bit RGB/RGBA non-interlaced PNG to the requested aspect
  * ratio without scaling: the larger side is trimmed around the centre.
  */
 export function cropPngCover(input: Uint8Array, aspectRatio: string): Buffer {
-  const info = readPngImageInfo(input);
-  if (info === undefined) throw new PngFormatError("PNG_SIGNATURE_INVALID", "角色圖必須是 PNG 檔案");
+  const info = validatePngImage(input, { maxDimension: CARD_IMAGE_MAX_DIMENSION });
   const { width, height, bitDepth, colorType, interlace } = info;
-  if (width > CARD_IMAGE_MAX_DIMENSION || height > CARD_IMAGE_MAX_DIMENSION) {
-    throw new PngFormatError("CARD_IMAGE_TOO_LARGE", `角色圖尺寸 ${width}×${height} 超過上限 ${CARD_IMAGE_MAX_DIMENSION}×${CARD_IMAGE_MAX_DIMENSION}`);
-  }
   if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6) || interlace !== 0) {
     throw new PngFormatError("CARD_IMAGE_FORMAT_UNSUPPORTED", "角色圖只支援 8-bit RGB/RGBA 的非交錯 PNG");
   }
@@ -252,13 +280,21 @@ export function cropPngCover(input: Uint8Array, aspectRatio: string): Buffer {
   const channels = colorType === 6 ? 4 : 3;
   const scanlineBytes = 1 + width * channels;
   const idat = Buffer.concat(parsePngChunks(input).filter((chunk) => chunk.type === "IDAT").map((chunk) => chunk.data));
-  const raw = inflateSync(idat);
-  if (raw.length < scanlineBytes * height) throw new PngFormatError("CARD_IMAGE_DECODE_FAILED", "角色圖像素資料不完整");
+  let raw: Buffer;
+  try {
+    raw = inflateSync(idat, { maxOutputLength: scanlineBytes * height });
+  } catch (error) {
+    throw new PngFormatError("CARD_IMAGE_DECODE_FAILED", `角色圖解壓失敗：${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (raw.length !== scanlineBytes * height) throw new PngFormatError("CARD_IMAGE_DECODE_FAILED", "角色圖像素資料長度不符");
 
   const unfiltered = Buffer.alloc(width * channels * height);
   for (let row = 0; row < height; row += 1) {
     const offset = row * scanlineBytes;
     const filter = raw[offset] ?? 0;
+    if (filter > 4) {
+      throw new PngFormatError("CARD_IMAGE_FORMAT_UNSUPPORTED", `不支援的 PNG scanline filter: ${filter}`);
+    }
     const start = offset + 1;
     for (let index = 0; index < width * channels; index += 1) {
       const byte = raw[start + index] ?? 0;
@@ -267,6 +303,9 @@ export function cropPngCover(input: Uint8Array, aspectRatio: string): Buffer {
       const aboveLeft = row > 0 && index >= channels ? (unfiltered[(row - 1) * width * channels + index - channels] ?? 0) : 0;
       let value = byte;
       switch (filter) {
+        case 0:
+          value = byte;
+          break;
         case 1:
           value = (byte + left) & 0xff;
           break;
@@ -286,7 +325,7 @@ export function cropPngCover(input: Uint8Array, aspectRatio: string): Buffer {
           break;
         }
         default:
-          break;
+          throw new PngFormatError("CARD_IMAGE_FORMAT_UNSUPPORTED", `不支援的 PNG scanline filter: ${filter}`);
       }
       unfiltered[row * width * channels + index] = value;
     }

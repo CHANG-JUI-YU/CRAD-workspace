@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MemoryProjectRepository, contentHash, internalId } from "@st-workspace/core";
+import { MemoryProjectRepository, CoreError, contentHash, internalId } from "@st-workspace/core";
 import { SourceService } from "../src/index.js";
 
 describe("source vertical slice", () => {
@@ -273,5 +273,100 @@ describe("source vertical slice", () => {
     expect(result.status).toBe("needs_input");
     const final = await repository.read();
     expect(final.candidates[0]!.failure?.code).toBe("SOURCE_DECODE_FAILED");
+  });
+
+  it("retries on REVISION_CONFLICT during commit and succeeds on second attempt (BUG2-20)", async () => {
+    const baseRepository = new MemoryProjectRepository("demo-cas-retry");
+    await baseRepository.commit(0, (state) => ({
+      ...state,
+      candidates: [{ id: "candidate-conflict", title: "Conflict candidate", status: "approved", content: "valid content" }],
+      operations: [{ id: "op-conflict", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+
+    let commitCount = 0;
+    const repository = {
+      read: () => baseRepository.read(),
+      readBlob: (hash: string) => baseRepository.readBlob(hash),
+      writeBlob: (hash: string, data: Uint8Array) => baseRepository.writeBlob(hash, data),
+      inspectRepair: () => baseRepository.inspectRepair(),
+      runRepair: () => baseRepository.runRepair(),
+      commit: async (expectedRevision: number, updateFn: any) => {
+        commitCount += 1;
+        if (commitCount === 1) {
+          await baseRepository.commit(expectedRevision, (s) => ({ ...s, audit: [...s.audit] }));
+          throw new CoreError("REVISION_CONFLICT", `Expected project revision ${expectedRevision}, found ${expectedRevision + 1}`, true);
+        }
+        return baseRepository.commit(expectedRevision, updateFn);
+      },
+    };
+
+    const service = new SourceService(repository as any);
+    const result = await service.execute("op-conflict", { actor: "director", attachments: [] });
+    expect(result.status).toBe("completed");
+    expect(result.completed).toEqual(["candidate-conflict"]);
+    const final = await baseRepository.read();
+    expect(final.candidates[0]?.status).toBe("ingested");
+    expect(final.candidates[0]?.failure).toBeUndefined();
+  });
+
+  it("does not mark candidate as failed on REVISION_CONFLICT and leaves it approved if retries exhaust (BUG2-20)", async () => {
+    const baseRepository = new MemoryProjectRepository("demo-cas-exhaust");
+    await baseRepository.commit(0, (state) => ({
+      ...state,
+      candidates: [{ id: "candidate-exhaust", title: "Exhaust candidate", status: "approved", content: "valid content" }],
+      operations: [{ id: "op-exhaust", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+
+    const repository = {
+      read: () => baseRepository.read(),
+      readBlob: (hash: string) => baseRepository.readBlob(hash),
+      writeBlob: (hash: string, data: Uint8Array) => baseRepository.writeBlob(hash, data),
+      inspectRepair: () => baseRepository.inspectRepair(),
+      runRepair: () => baseRepository.runRepair(),
+      commit: async (expectedRevision: number, updateFn: any) => {
+        throw new CoreError("REVISION_CONFLICT", "Revision mismatch simulated", true);
+      },
+    };
+
+    const service = new SourceService(repository as any);
+    const result = await service.execute("op-exhaust", { actor: "director", attachments: [] });
+    expect(result.blocked).toEqual(["candidate-exhaust"]);
+    const final = await baseRepository.read();
+    expect(final.candidates[0]?.status).toBe("approved");
+    expect(final.candidates[0]?.failure).toBeUndefined();
+  });
+
+  it("safely converges when another executor ingests candidate during CAS retry (BUG2-20)", async () => {
+    const baseRepository = new MemoryProjectRepository("demo-cas-concurrent");
+    await baseRepository.commit(0, (state) => ({
+      ...state,
+      candidates: [{ id: "candidate-concurrent", title: "Concurrent candidate", status: "approved", content: "valid content" }],
+      operations: [{ id: "op-concurrent", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+
+    let commitCount = 0;
+    const repository = {
+      read: () => baseRepository.read(),
+      readBlob: (hash: string) => baseRepository.readBlob(hash),
+      writeBlob: (hash: string, data: Uint8Array) => baseRepository.writeBlob(hash, data),
+      inspectRepair: () => baseRepository.inspectRepair(),
+      runRepair: () => baseRepository.runRepair(),
+      commit: async (expectedRevision: number, updateFn: any) => {
+        commitCount += 1;
+        if (commitCount === 1) {
+          await baseRepository.commit(expectedRevision, (s) => ({
+            ...s,
+            candidates: s.candidates.map((c) => c.id === "candidate-concurrent" ? { ...c, status: "ingested" as const } : c),
+          }));
+          throw new CoreError("REVISION_CONFLICT", "Conflict simulation", true);
+        }
+        return baseRepository.commit(expectedRevision, updateFn);
+      },
+    };
+
+    const service = new SourceService(repository as any);
+    const result = await service.execute("op-concurrent", { actor: "director", attachments: [] });
+    expect(result.status).toBe("completed");
+    expect(result.completed).toEqual(["candidate-concurrent"]);
   });
 });

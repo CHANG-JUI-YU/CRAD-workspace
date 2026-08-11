@@ -1,4 +1,5 @@
-import { readCardFromPng, cropPngCover, readPngImageInfo, pngSignature } from "@st-workspace/adapters-png";
+import { readCardFromPng, cropPngCover, readPngImageInfo, pngSignature, validatePngImage, CARD_IMAGE_MAX_DIMENSION, isBuiltInPlaceholderImage, PngFormatError } from "@st-workspace/adapters-png";
+import { characterCardV3Schema, canonicalCardJson, type CharacterCardV3 } from "@st-workspace/adapters-ccv3";
 import {
   buildZhujiTemplateContext,
   buildTemplateContext,
@@ -2352,22 +2353,31 @@ export class WorkspaceRuntime {
     } else {
       jsonText = latest.content;
     }
+    let parsedJsonCard: CharacterCardV3 | undefined;
     if (jsonText !== undefined) {
       try {
-        const card = JSON.parse(jsonText) as Record<string, unknown>;
-        const data = card.data !== null && typeof card.data === "object" && !Array.isArray(card.data) ? card.data as Record<string, unknown> : {};
-        report.push(`spec=${String(card.spec ?? "未知")} spec_version=${String(card.spec_version ?? "未知")}`);
-        const book = data.character_book !== null && typeof data.character_book === "object" && !Array.isArray(data.character_book) ? data.character_book as Record<string, unknown> : undefined;
+        const rawJson = JSON.parse(jsonText);
+        parsedJsonCard = characterCardV3Schema.parse(rawJson);
+        const card = parsedJsonCard;
+        const data = card.data;
+        report.push(`spec=${String(card.spec)} spec_version=${String(card.spec_version)}`);
+        const book = data.character_book;
         report.push(book === undefined ? "無 character_book 條目。" : `character_book「${String(book.name ?? "未命名")}」共 ${Array.isArray(book.entries) ? book.entries.length : 0} 條目。`);
         let greetings = 0;
         if (typeof data.first_mes === "string" && data.first_mes.length > 0) greetings += 1;
         if (Array.isArray(data.alternate_greetings)) greetings += data.alternate_greetings.filter((item) => typeof item === "string" && item.length > 0).length;
         report.push(`greeting 首發＋備選共 ${greetings} 組。`);
-        const extensions = data.extensions !== null && typeof data.extensions === "object" && !Array.isArray(data.extensions) ? data.extensions as Record<string, unknown> : {};
-        const pluginIds = Object.keys(extensions).filter((key) => key.startsWith("plugin."));
+        const extensions = (data.extensions ?? {}) as Record<string, unknown>;
+        const workspaceExt = extensions["card-workspace"] !== null && typeof extensions["card-workspace"] === "object" && !Array.isArray(extensions["card-workspace"])
+          ? extensions["card-workspace"] as Record<string, unknown>
+          : undefined;
+        const pluginsObj = workspaceExt?.plugins !== null && typeof workspaceExt?.plugins === "object" && !Array.isArray(workspaceExt?.plugins)
+          ? workspaceExt.plugins as Record<string, unknown>
+          : undefined;
+        const pluginIds = pluginsObj !== undefined ? Object.keys(pluginsObj) : [];
         report.push(pluginIds.length === 0 ? "無 plugin 依賴。" : `plugin 需求：${pluginIds.join(", ")}。`);
       } catch (error) {
-        report.push(`內容 JSON 解析失敗：${error instanceof Error ? error.message : String(error)}。`);
+        report.push(`內容 JSON Schema 驗證失敗：${error instanceof Error ? error.message : String(error)}。`);
       }
     } else {
       report.push("無內容 JSON（publish 只含 PNG 或 blob 遺失）。");
@@ -2378,7 +2388,7 @@ export class WorkspaceRuntime {
     if (pngBytes !== undefined) {
       const imageInfo = readPngImageInfo(pngBytes);
       if (imageInfo !== undefined) {
-        const placeholder = imageInfo.width === 512 && imageInfo.height === 768;
+        const placeholder = isBuiltInPlaceholderImage(pngBytes);
         report.push(`PNG 尺寸 ${imageInfo.width}×${imageInfo.height}px（${placeholder ? "使用內建佔位圖，請上傳角色圖後重新打包" : "已嵌入角色圖像"}）。`);
       } else {
         report.push("PNG 簽名不符（可能不是有效 PNG）。");
@@ -2386,13 +2396,12 @@ export class WorkspaceRuntime {
       try {
         const decoded = readCardFromPng(pngBytes);
         report.push(`PNG 內嵌卡片以 ${decoded.authority} 解析成功。`);
-        if (jsonText !== undefined) {
-          try {
-            const parsed = JSON.parse(jsonText) as Record<string, unknown>;
-            report.push(JSON.stringify(decoded.card) === JSON.stringify(parsed.data ?? parsed) ? "PNG 內嵌卡片與 JSON 內容一致。" : "PNG 內嵌卡片與 JSON 內容不一致（欄位順序或版本差異）。");
-          } catch {
-            report.push("JSON 無法解析，無法比對 PNG 內嵌卡片。");
-          }
+        if (parsedJsonCard !== undefined) {
+          const canonicalPng = canonicalCardJson(decoded.card);
+          const canonicalJsonStr = canonicalCardJson(parsedJsonCard);
+          report.push(canonicalPng === canonicalJsonStr ? "PNG 內嵌卡片與 JSON 內容一致。" : "PNG 內嵌卡片與 JSON 內容不一致（欄位順序或版本差異）。");
+        } else if (jsonText !== undefined) {
+          report.push("JSON Schema 不符，無法比對 PNG 內嵌卡片。");
         }
       } catch (error) {
         report.push(`PNG 卡片解析失敗：${error instanceof Error ? error.message : String(error)}。`);
@@ -2415,27 +2424,35 @@ export class WorkspaceRuntime {
     if (context.attachments.length !== 1) throw new CoreError("CARD_IMAGE_REQUIRED", "角色圖需要剛好一張 PNG 附件", true, { received: context.attachments.length });
     const attachment = context.attachments[0]!;
     const content = Buffer.from(attachment.content.buffer, attachment.content.byteOffset, attachment.content.byteLength);
-    if (!pngSignature.equals(content.subarray(0, 8))) throw new CoreError("CARD_IMAGE_REQUIRED", "角色圖必須是 PNG 檔案", true);
+
     let processed = content;
     let aspectRatio: string | undefined;
     let crop: { width: number; height: number; offset_x: number; offset_y: number } | undefined;
-    if (options.aspect_ratio !== undefined) {
-      aspectRatio = options.aspect_ratio;
-      const original = readPngImageInfo(processed);
-      if (original === undefined) throw new CoreError("CARD_IMAGE_REQUIRED", "角色圖必須是 PNG 檔案", true);
-      const cropped = cropPngCover(processed, aspectRatio);
-      const croppedInfo = readPngImageInfo(cropped);
-      if (croppedInfo === undefined) throw new CoreError("CARD_IMAGE_DECODE_FAILED", "角色圖裁切後無法讀取", true);
-      crop = {
-        width: croppedInfo.width,
-        height: croppedInfo.height,
-        offset_x: original.width === croppedInfo.width ? 0 : Math.max(0, Math.floor((original.width - croppedInfo.width) / 2)),
-        offset_y: original.height === croppedInfo.height ? 0 : Math.max(0, Math.floor((original.height - croppedInfo.height) / 2)),
-      };
-      processed = cropped;
+    let info;
+    try {
+      info = validatePngImage(processed, { maxDimension: CARD_IMAGE_MAX_DIMENSION });
+      if (options.aspect_ratio !== undefined) {
+        aspectRatio = options.aspect_ratio;
+        const cropped = cropPngCover(processed, aspectRatio);
+        const croppedInfo = readPngImageInfo(cropped);
+        if (croppedInfo === undefined) throw new CoreError("CARD_IMAGE_DECODE_FAILED", "角色圖裁切後無法讀取", true);
+        crop = {
+          width: croppedInfo.width,
+          height: croppedInfo.height,
+          offset_x: info.width === croppedInfo.width ? 0 : Math.max(0, Math.floor((info.width - croppedInfo.width) / 2)),
+          offset_y: info.height === croppedInfo.height ? 0 : Math.max(0, Math.floor((info.height - croppedInfo.height) / 2)),
+        };
+        processed = cropped;
+        info = croppedInfo;
+      }
+    } catch (error) {
+      if (error instanceof PngFormatError) {
+        const code = error.code === "PNG_SIGNATURE_INVALID" ? "CARD_IMAGE_REQUIRED" : error.code;
+        throw new CoreError(code, error.message, true);
+      }
+      throw error;
     }
-    const info = readPngImageInfo(processed);
-    if (info === undefined) throw new CoreError("CARD_IMAGE_REQUIRED", "角色圖必須是 PNG 檔案", true);
+
     const blobHash = contentHash(processed);
     await this.repository.writeBlob(blobHash, processed);
     const now = new Date().toISOString();
