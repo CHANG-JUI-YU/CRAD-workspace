@@ -95,6 +95,10 @@ importers:
       '@st-workspace/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      '@st-workspace/adapters-png':
+        specifier: workspace:*
+        version: link:../adapters-png
 
   packages/plugins:
     dependencies:

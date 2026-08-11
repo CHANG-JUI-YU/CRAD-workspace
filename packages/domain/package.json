@@ -16,5 +16,8 @@
   "dependencies": {
     "@st-workspace/core": "workspace:*",
     "@st-workspace/compiler": "workspace:*"
+  },
+  "devDependencies": {
+    "@st-workspace/adapters-png": "workspace:*"
   }
 }
