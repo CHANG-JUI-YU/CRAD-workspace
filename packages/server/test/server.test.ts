@@ -93,7 +93,7 @@ describe("runtime-facing server contract", () => {
       expect(JSON.stringify(await unknownMethod.json())).toContain("method not found");
       const badJson = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "not-json" });
       expect(badJson.status).toBe(200);
-      expect(JSON.stringify(await badJson.json())).toContain("-32603");
+      expect(JSON.stringify(await badJson.json())).toContain("-32602");
       const invalidUtf8 = Buffer.from([0x7b, 0x22, 0x61, 0x6e, 0x73, 0x77, 0x65, 0x72, 0x22, 0x3a, 0x22, 0xc3, 0x28, 0x22, 0x7d]);
       const invalidEncoding = await fetch(`${base}/workspace/interview/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: invalidUtf8 });
       expect(invalidEncoding.status).toBe(400);
@@ -220,15 +220,47 @@ describe("runtime-facing server contract", () => {
     try {
       const denied = await fetch(`${base}/workspace/status`);
       expect(denied.status).toBe(401);
-      expect(await denied.json()).toMatchObject({ error: "UNAUTHORIZED" });
+      expect(await denied.json()).toMatchObject({ code: "UNAUTHORIZED", recoverable: true });
       const wrong = await fetch(`${base}/workspace/status`, { headers: { authorization: "Bearer wrong" } });
       expect(wrong.status).toBe(401);
       const accepted = await fetch(`${base}/workspace/status`, { headers: { authorization: "Bearer secret-token" } });
       expect(accepted.status).toBe(200);
       const mcpAccepted = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer secret-token" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "workspace_status", arguments: {} } }) });
       expect(mcpAccepted.status).toBe(200);
+      const queryAccepted = await fetch(`${base}/?token=secret-token`);
+      expect(queryAccepted.status).toBe(200);
+      const queryDenied = await fetch(`${base}/`);
+      expect(queryDenied.status).toBe(401);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
+  });
+
+  it("returns a structured error payload for recoverable input errors", async () => {
+    const server = createWorkspaceServer({ runtime: new WorkspaceRuntime(new MemoryProjectRepository("demo")), actor: "test" });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("server did not bind");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const response = await fetch(`${base}/workspace/request`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: "   " }) });
+      expect(response.status).toBe(400);
+      const payload = await response.json() as { code: string; recoverable: boolean; message_zh: string; impact: string; next_actions: string[] };
+      expect(payload.code).toBe("REQUEST_REQUIRED");
+      expect(payload.recoverable).toBe(true);
+      expect(typeof payload.message_zh).toBe("string");
+      expect(typeof payload.impact).toBe("string");
+      expect(Array.isArray(payload.next_actions)).toBe(true);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  });
+
+  it("refuses to expose an external host without an auth token", async () => {
+    await expect(startWorkspaceServer({ port: 0, host: "0.0.0.0", projectRoot: os.tmpdir(), projectId: `server-ext-${Date.now()}` }))
+      .rejects.toMatchObject({ code: "EXTERNAL_HOST_AUTH_REQUIRED" });
+    const server = await startWorkspaceServer({ port: 0, host: "0.0.0.0", projectRoot: os.tmpdir(), projectId: `server-ext-auth-${Date.now()}`, authToken: "external-secret" });
+    expect(server.listening).toBe(true);
+    await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
   });
 });

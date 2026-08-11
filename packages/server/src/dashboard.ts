@@ -913,10 +913,18 @@ export function dashboard(): string {
       function errorText(error) {
         if (!error) return "發生未知錯誤。下一步：重新整理並確認本機 server。";
         var status = error.status ? "HTTP " + error.status + (error.statusText ? " " + error.statusText : "") + "；" : "";
-        var code = error.code || "未提供";
+        var payload = error.payload && isRecord(error.payload) ? error.payload : null;
+        var code = payload && firstString(payload, ["code"]) ? firstString(payload, ["code"]) : (error.code || "未提供");
+        var messageZh = payload && firstString(payload, ["message_zh"]);
         var message = error.message || "伺服器沒有提供錯誤訊息";
-        var hint = codeHint(code);
-        return status + "錯誤代碼：" + code + "；訊息：" + message + "；下一步：" + hint;
+        var impact = payload && firstString(payload, ["impact"]);
+        var actions = payload && Array.isArray(payload.next_actions) ? payload.next_actions : [];
+        var pieces = [status, "錯誤代碼：" + code];
+        if (messageZh) pieces.push("說明：" + messageZh);
+        else pieces.push("訊息：" + message);
+        if (impact) pieces.push("影響：" + impact);
+        pieces.push("下一步：" + (actions.length > 0 ? actions.join("；") : codeHint(code)));
+        return pieces.join("；");
       }
 
       function codeHint(code) {
@@ -1024,10 +1032,15 @@ export function dashboard(): string {
         });
       }
 
+      function tokenQuery() {
+        var match = /[?&]token=([^&]+)/u.exec(window.location.search || "");
+        return match ? "?token=" + encodeURIComponent(match[1] || "") : "";
+      }
+
       async function requestJson(path, options) {
         var response;
         try {
-          response = await fetch(path, options || { headers: { accept: "application/json" } });
+          response = await fetch(path + (path.indexOf("?") >= 0 ? "&" : "?") + tokenQuery().replace(/^\?/u, ""), options || { headers: { accept: "application/json" } });
         } catch (error) {
           var networkError = new Error("無法連線到本機 server");
           networkError.kind = "network";
@@ -1985,7 +1998,7 @@ export function dashboard(): string {
           var row = document.createElement("div");
           row.className = "fact-row";
           var preview = document.createElement("img");
-          preview.setAttribute("src", "/workspace/images/" + (firstString(image, ["id"]) || ""));
+          preview.setAttribute("src", "/workspace/images/" + (firstString(image, ["id"]) || "") + tokenQuery());
           preview.setAttribute("alt", "角色圖預覽");
           preview.className = "image-thumb";
           var text = document.createElement("span");

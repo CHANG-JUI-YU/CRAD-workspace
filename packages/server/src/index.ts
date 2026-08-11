@@ -4,6 +4,7 @@ import { HttpSourceFetcher } from "@st-workspace/adapters";
 import { CoreError, FileAttachmentStore, FileProjectRepository, templateProposalJsonSchema, type AdaptationDecision, type IssueSeverity, type RequestResult, type SourceAttachment, zhujiProposalJsonSchema } from "@st-workspace/core";
 import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
 import { dashboard } from "./dashboard.js";
+import { structuredError } from "./errors.js";
 
 export interface WorkspaceServerOptions {
   runtime?: WorkspaceRuntime;
@@ -414,9 +415,13 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://localhost");
-      if (options.authToken !== undefined && request.headers.authorization !== `Bearer ${options.authToken}`) {
-        json(response, 401, { error: "UNAUTHORIZED" });
-        return;
+      if (options.authToken !== undefined) {
+        const headerToken = request.headers.authorization === `Bearer ${options.authToken}`;
+        const queryToken = request.method === "GET" && url.searchParams.get("token") === options.authToken;
+        if (!headerToken && !queryToken) {
+          json(response, 401, structuredError(new CoreError("UNAUTHORIZED", "Missing or invalid bearer token", true)));
+          return;
+        }
       }
       if (request.method === "GET" && url.pathname === "/") {
         response.statusCode = 200;
@@ -487,7 +492,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       if (request.method === "GET" && url.pathname === "/workspace/template/context") {
         const kind = url.searchParams.get("kind");
         if (kind === null || !templateKinds.has(kind)) {
-          json(response, 400, { error: "TEMPLATE_KIND_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("TEMPLATE_KIND_REQUIRED", "TEMPLATE_KIND_REQUIRED", true)));
           return;
         }
         json(response, 200, await (await getRuntime()).templateContext(kind as Parameters<WorkspaceRuntime["templateContext"]>[0]));
@@ -529,7 +534,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       }
       if (request.method === "POST" && url.pathname === "/workspace/project/new") {
         if (options.projectManager === undefined) {
-          json(response, 400, { error: "PROJECT_MANAGER_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("PROJECT_MANAGER_REQUIRED", "PROJECT_MANAGER_REQUIRED", true)));
           return;
         }
         const runtime = await options.projectManager.startNewProject();
@@ -540,7 +545,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const parsed = await body(request);
         const requestText = requestValue(parsed);
         if (requestText === undefined) {
-          json(response, 400, { error: "REQUEST_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("REQUEST_REQUIRED", "The request field is required", true)));
           return;
         }
         const input = parsed as { attachments?: unknown };
@@ -555,7 +560,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const parsed = await body(request);
         const answer = answerValue(parsed);
         if (answer === undefined) {
-          json(response, 400, { error: "ANSWER_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("ANSWER_REQUIRED", "ANSWER_REQUIRED", true)));
           return;
         }
         const result = options.projectManager === undefined
@@ -568,7 +573,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const parsed = await body(request);
         const decisions = sourceSelectionValue(parsed);
         if (decisions === undefined) {
-          json(response, 400, { error: "SOURCE_SELECTION_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("SOURCE_SELECTION_REQUIRED", "SOURCE_SELECTION_REQUIRED", true)));
           return;
         }
         json(response, 200, await (await getRuntime()).selectSourceCandidates(decisions, { actor, attachments: [] }));
@@ -578,7 +583,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const parsed = await body(request);
         const decision = adaptationDecisionValue(parsed);
         if (decision === undefined) {
-          json(response, 400, { error: "ADAPTATION_DECISION_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("ADAPTATION_DECISION_REQUIRED", "ADAPTATION_DECISION_REQUIRED", true)));
           return;
         }
         json(response, 200, await (await getRuntime()).createAdaptationDecision(decision, { actor, attachments: [] }));
@@ -588,7 +593,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const parsed = await body(request);
         const project = projectValue(parsed);
         if (project === undefined || options.projectManager === undefined) {
-          json(response, 400, { error: project === undefined ? "PROJECT_REQUIRED" : "PROJECT_MANAGER_REQUIRED" });
+          json(response, 400, structuredError(new CoreError(project === undefined ? "PROJECT_REQUIRED" : "PROJECT_MANAGER_REQUIRED", project === undefined ? "PROJECT_REQUIRED" : "PROJECT_MANAGER_REQUIRED", true)));
           return;
         }
         json(response, 200, await options.projectManager.select(project));
@@ -623,7 +628,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const input = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
         const imageId = typeof input.image_id === "string" && input.image_id.trim().length > 0 ? input.image_id : undefined;
         if (imageId === undefined) {
-          json(response, 400, { error: "IMAGE_ID_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("IMAGE_ID_REQUIRED", "IMAGE_ID_REQUIRED", true)));
           return;
         }
         const removed = await (await getRuntime()).removeProjectImage(imageId, actor);
@@ -634,7 +639,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const parsed = await body(request);
         const input = issueUpdateValue(parsed);
         if (input === undefined) {
-          json(response, 400, { error: "ISSUE_UPDATE_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("ISSUE_UPDATE_REQUIRED", "ISSUE_UPDATE_REQUIRED", true)));
           return;
         }
         const { agent, ...issue } = input;
@@ -645,7 +650,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const parsed = await body(request);
         const level = qualityLevelValue(parsed);
         if (level === undefined) {
-          json(response, 400, { error: "QUALITY_LEVEL_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("QUALITY_LEVEL_REQUIRED", "QUALITY_LEVEL_REQUIRED", true)));
           return;
         }
         const overrides: Record<string, IssueSeverity> = {};
@@ -666,7 +671,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const parsed = await body(request);
         const decisions = factDecisionsValue(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && "decisions" in parsed ? parsed.decisions : undefined);
         if (decisions === undefined) {
-          json(response, 400, { error: "FACT_DECISIONS_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("FACT_DECISIONS_REQUIRED", "FACT_DECISIONS_REQUIRED", true)));
           return;
         }
         const input = parsed as { reviewer_identity?: unknown; run_id?: unknown; expected_projection_revision?: unknown };
@@ -680,7 +685,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const parsed = await body(request);
         const decisions = factDecisionsValue(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && "decisions" in parsed ? parsed.decisions : undefined);
         if (decisions === undefined) {
-          json(response, 400, { error: "FACT_DECISIONS_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("FACT_DECISIONS_REQUIRED", "FACT_DECISIONS_REQUIRED", true)));
           return;
         }
         const input = parsed as { run_id?: unknown; expected_projection_revision?: unknown };
@@ -693,7 +698,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const parsed = await body(request);
         const operationId = operationIdValue(parsed);
         if (operationId === undefined) {
-          json(response, 400, { error: "OPERATION_ID_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("OPERATION_ID_REQUIRED", "OPERATION_ID_REQUIRED", true)));
           return;
         }
         json(response, 200, await (await getRuntime()).recoverOperation(operationId, { actor, attachments: [] }));
@@ -703,14 +708,14 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const parsed = await body(request);
         const operationId = operationIdValue(parsed);
         if (operationId === undefined) {
-          json(response, 400, { error: "OPERATION_ID_REQUIRED" });
+          json(response, 400, structuredError(new CoreError("OPERATION_ID_REQUIRED", "OPERATION_ID_REQUIRED", true)));
           return;
         }
         try {
           json(response, 200, await (await getRuntime()).cancelOperation(operationId, actor));
         } catch (error) {
           if (error instanceof CoreError) {
-            json(response, 400, { error: error.code });
+            json(response, 400, structuredError(error));
             return;
           }
           throw error;
@@ -883,14 +888,12 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       }
       json(response, 404, { error: "NOT_FOUND" });
     } catch (error) {
-      const errorCode = error !== null && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "";
-      const recoverableInput = error !== null && typeof error === "object" && "recoverable" in error && (error as { recoverable?: unknown }).recoverable === true && /^(?:AGENT_|INTERVIEW_|PROJECT_|REQUEST_|ISSUE_|TEMPLATE_|ZHUJI_|IMAGE_|FACT_)/u.test(errorCode);
-      const details = error !== null && typeof error === "object" && "details" in error ? (error as { details?: unknown }).details : undefined;
+      const payload = structuredError(error);
       if (new URL(request.url ?? "/", "http://localhost").pathname === "/mcp") {
-        json(response, 200, { jsonrpc: "2.0", id: null, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } });
+        json(response, 200, { jsonrpc: "2.0", id: null, error: { code: payload.recoverable ? -32602 : -32603, message: payload.code === "INTERNAL_ERROR" ? payload.error : `${payload.code}: ${payload.message_zh}` } });
         return;
       }
-      json(response, recoverableInput ? 400 : 500, { error: error instanceof Error ? error.message : String(error), ...(errorCode === "" ? {} : { code: errorCode }), ...(details === undefined ? {} : { details }) });
+      json(response, payload.recoverable ? 400 : 500, payload);
     }
   });
   server.once("close", () => worker.stop());
@@ -898,6 +901,11 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
 }
 
 export async function startWorkspaceServer(options: { port?: number; host?: string; projectRoot?: string; projectId?: string; actor?: string; authToken?: string } = {}): Promise<Server> {
+  const host = options.host ?? process.env.ST_WORKSPACE_HOST ?? "127.0.0.1";
+  const isLocalHost = host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+  if (!isLocalHost && options.authToken === undefined) {
+    throw new CoreError("EXTERNAL_HOST_AUTH_REQUIRED", `Host ${host} exposes every read/write endpoint; refusing to start without an auth token.`, true);
+  }
   const projectRoot = options.projectRoot ?? process.env.ST_WORKSPACE_PROJECT_ROOT ?? "projects";
   const fetcher = new HttpSourceFetcher();
   // An explicitly supplied root is already a complete workspace selection;
@@ -913,7 +921,7 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
     ? { projectManager: manager, actor: options.actor ?? "server", ...(options.authToken === undefined ? {} : { authToken: options.authToken }) }
     : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server", ...(options.authToken === undefined ? {} : { authToken: options.authToken }) };
   const server = createWorkspaceServer(serverOptions);
-  await new Promise<void>((resolve) => server.listen(options.port ?? Number(process.env.ST_WORKSPACE_PORT ?? 8787), options.host ?? "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => server.listen(options.port ?? Number(process.env.ST_WORKSPACE_PORT ?? 8787), host, resolve));
   return server;
 }
 

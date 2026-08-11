@@ -141,7 +141,7 @@ describe("local Dashboard", () => {
         body: JSON.stringify({ operation_id: "missing-operation" }),
       });
       expect(missing.status).toBe(400);
-      expect((await missing.json()).error).toBe("OPERATION_NOT_FOUND");
+      expect((await missing.json()).code).toBe("OPERATION_NOT_FOUND");
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
@@ -184,7 +184,7 @@ describe("local Dashboard", () => {
         body: JSON.stringify({ operation_id: "op-done" }),
       });
       expect(terminal.status).toBe(400);
-      expect((await terminal.json()).error).toBe("OPERATION_NOT_CANCELLABLE");
+      expect((await terminal.json()).code).toBe("OPERATION_NOT_CANCELLABLE");
       const stateAfter = await repository.read();
       expect(stateAfter.operations.find((item) => item.id === "op-done")?.status).toBe("completed");
     } finally {
