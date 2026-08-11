@@ -243,7 +243,7 @@ describe("project interview engine", () => {
     expect(world.status).toBe("complete");
     expect(world.flow).toBe("world");
     expect(world.values.project_name).toBe("世界專案");
-    const continued = finish(["繼續專案", "雪乃專案", "雪乃專案", "不需要", "自由創作", "沒有"]);
+    const continued = finish(["繼續專案", "雪乃專案"]);
     expect(continued.status).toBe("complete");
     expect(continued.flow).toBe("continue");
     const legacy = finish(["舊卡審核", "C:/cards/yukino.json", "審核專案", "不需要", "協助創作", "沒有"]);
@@ -324,7 +324,7 @@ describe("project interview engine", () => {
     expect(zhuji.answers.some((item) => item.question_id === BLUEPRINT_DIRECTION_QUESTION_ID)).toBe(true);
 
     let expansion = beginInterview(createInterviewState());
-    for (const value of ["擴充既有角色", "新角色", "新增角色概念", "新增角色背景", "新增角色性格", "palette", "與既有 roster 的互信和衝突界線", "既有專案", "不需要", "新增角色先觀望、再以可靠行動建立信任", "自由創作", "沒有"]) expansion = answer(expansion, value);
+    for (const value of ["擴充既有角色", "既有專案", "新角色", "新增角色概念", "新增角色背景", "新增角色性格", "palette", "與既有 roster 的互信和衝突界線", "新增角色先觀望、再以可靠行動建立信任", "自由創作", "沒有"]) expansion = answer(expansion, value);
     expect(expansion.status).toBe("complete");
     expect(expansion.flow).toBe("character_expansion");
   });

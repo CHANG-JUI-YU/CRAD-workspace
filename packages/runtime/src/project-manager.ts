@@ -1,13 +1,18 @@
 import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { CoreError, FileProjectRepository, type ProjectState, type RequestResult, type WorkspaceContext } from "@st-workspace/core";
+import { CoreError, FileProjectRepository, internalId, type ProjectState, type RequestResult, type WorkspaceContext } from "@st-workspace/core";
 import type { WorkspaceRuntime } from "./index.js";
+
+function now(): string {
+  return new Date().toISOString();
+}
 
 export interface WorkspaceProjectSummary {
   readonly project_id: string;
   readonly project_name?: string;
   readonly status: ProjectState["project_status"];
   readonly path: string;
+  readonly revision?: number;
 }
 
 export interface WorkspaceProjectManagerOptions {
@@ -78,11 +83,31 @@ export class WorkspaceProjectManager {
     }
   }
 
+  /**
+   * Whether a concrete project has been selected or created for this session.
+   * A fresh manager that has only been constructed (no ensureRuntime call yet)
+   * stays unselected so the server can render a home screen without creating
+   * any project directory on disk.
+   */
+  sessionSelected(): boolean {
+    return this.sessionPrepared;
+  }
+
   private async prepareFreshSession(): Promise<WorkspaceRuntime> {
     // The constructor intentionally does not read the conventional placeholder.
     // If its directory already exists, it belongs to a previous session and must
-    // never become the implicit active project for this manager.
-    if (await exists(this.repositoryValue.projectDirectory)) await this.startNewProject();
+    // never become the implicit active project for this manager. The allocated
+    // placeholder stays re-usable by targeted interview flows (continue,
+    // existing-world, character expansion) that migrate onto a selected target.
+    if (await exists(this.repositoryValue.projectDirectory)) {
+      const existingDirectories = (await readdir(this.options.root, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => entry.name);
+      const used = new Set([...(await this.listProjects()).map((item) => item.project_id), ...existingDirectories]);
+      let sequence = 1;
+      while (used.has(`project-${String(sequence).padStart(3, "0")}`)) sequence += 1;
+      const id = `project-${String(sequence).padStart(3, "0")}`;
+      this.repositoryValue = new FileProjectRepository(this.options.root, id, { layout: "project", materialize: true });
+      this.runtimeValue = this.options.createRuntime(this.repositoryValue);
+    }
     await this.repositoryValue.read();
     this.sessionPrepared = true;
     return this.runtimeValue;
@@ -101,7 +126,13 @@ export class WorkspaceProjectManager {
       try {
         const raw = await readFile(primary, "utf8");
         const state = JSON.parse(raw) as ProjectState;
-        summaries.push({ project_id: state.project_id, ...(state.project_name === undefined ? {} : { project_name: state.project_name }), status: state.project_status, path: path.join(this.options.root, entry.name) });
+        summaries.push({
+          project_id: state.project_id,
+          ...(state.project_name === undefined ? {} : { project_name: state.project_name }),
+          status: state.project_status,
+          path: path.join(this.options.root, entry.name),
+          revision: state.revision,
+        });
       } catch {
         // A damaged state file is still surfaced so the folder is not silently hidden.
         summaries.push({ project_id: entry.name, status: "uninitialized", path: path.join(this.options.root, entry.name) });
@@ -182,34 +213,99 @@ export class WorkspaceProjectManager {
   async answerInterview(answer: string, context: WorkspaceContext): Promise<RequestResult> {
     await this.ensureRuntime();
     const result = await this.runtimeValue.answerInterview(answer, context);
+    const switched = await this.switchToTargetedProject(result, context);
+    if (switched !== undefined) return switched;
     if (result.status !== "completed" || result.flow === undefined) return this.finalizeIfNamed(result);
     const placeholderState = await this.repositoryValue.read();
     const values = placeholderState.interview.values;
-    if (result.flow === "continue") {
-      const target = values.continue_project;
-      if (typeof target === "string" && target.trim().length > 0) return this.relocateResultToProject(result, target.trim());
-    }
     if (result.flow === "legacy_review") {
       const importPath = values.import_path;
       if (typeof importPath === "string" && importPath.trim().length > 0) return this.importLegacyCard(importPath.trim(), result, context);
     }
-    if (result.flow === "world") {
-      const worldKind = values.world_kind;
-      if (typeof worldKind === "string" && worldKind.replace(/\s+/gu, "").includes("既有專案")) {
-        const target = values.world_project;
-        if (typeof target === "string" && target.trim().length > 0) return this.relocateResultToProject(result, target.trim());
-      }
-    }
     return this.finalizeIfNamed(result);
   }
 
-  private async relocateResultToProject(result: RequestResult, target: string): Promise<RequestResult> {
-    const selected = await this.select(target);
+  /**
+   * Targeted interview flows (continue, existing-world, character expansion)
+   * ask for the target project up front. As soon as the target value has been
+   * answered the interview (and its operation) is migrated onto the target
+   * repository so every remaining question — and the Blueprint/precheck that a
+   * world or expansion completion produces — is applied to the real project
+   * instead of the hidden placeholder.
+   */
+  private async switchToTargetedProject(result: RequestResult, context: WorkspaceContext): Promise<RequestResult | undefined> {
+    if (!this.placeholderReuseAllowed) return undefined;
+    const placeholderRepository = this.repositoryValue;
+    const placeholderState = await placeholderRepository.read();
+    const flow = placeholderState.interview.flow;
+    if (flow !== "continue" && flow !== "world" && flow !== "character_expansion") return undefined;
+    const values = placeholderState.interview.values;
+    const targetValue = flow === "continue"
+      ? values.continue_project
+      : flow === "world" && typeof values.world_kind === "string" && values.world_kind.replace(/\s+/gu, "").includes("既有專案")
+        ? values.world_project
+        : flow === "character_expansion"
+          ? values.expansion_project
+          : undefined;
+    if (typeof targetValue !== "string" || targetValue.trim().length === 0) return undefined;
+    const targetName = targetValue.trim();
+    const summaries = await this.listProjects();
+    const target = summaries.find((item) => item.project_id === targetName || item.project_name === targetName || path.basename(item.path) === targetName);
+    if (target === undefined) {
+      return {
+        ...result,
+        status: "needs_input" as const,
+        summary: `找不到專案「${targetName}」；此流程已中止，請重新開始並從專案清單選擇目標。`,
+        completed: [],
+        blocked: [...(result.operation_id === undefined ? [] : [result.operation_id])],
+      };
+    }
+    if (target.project_id === placeholderState.project_id) return undefined;
+    const interviewOperation = [...placeholderState.operations].reverse().find((item) => item.kind === "interview");
+    await this.select(target.project_id);
+    const targetState = await this.repositoryValue.read();
+    const operationToMigrate = interviewOperation === undefined
+      ? undefined
+      : targetState.operations.some((item) => item.id === interviewOperation.id)
+        ? { ...interviewOperation, id: internalId("operation") }
+        : interviewOperation;
+    const migrated = await this.repositoryValue.commit(targetState.revision, (current) => ({
+      ...current,
+      project_status: "interviewing",
+      interview: placeholderState.interview,
+      operations: operationToMigrate === undefined ? current.operations : [...current.operations, operationToMigrate],
+      audit: [
+        ...current.audit,
+        {
+          id: internalId("audit"),
+          operation_id: operationToMigrate?.id ?? internalId("operation"),
+          event: "interview.target.migrated",
+          actor: context.actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: { source_project: placeholderState.project_id, target_project: target.project_id, flow, target_revision: targetState.revision },
+        },
+      ],
+    }));
+    await placeholderRepository.commit(placeholderState.revision, (current) => ({
+      ...current,
+      project_status: "uninitialized",
+      interview: {
+        schema_version: 1,
+        status: "idle",
+        flow: "new_project",
+        answers: [],
+        values: {},
+      },
+      operations: interviewOperation === undefined ? current.operations : current.operations.filter((item) => item.id !== interviewOperation.id),
+    }));
+    const continued = placeholderState.interview.status !== "complete";
     return {
       ...result,
-      project_id: selected.project_id,
-      ...(selected.project_name === undefined ? {} : { project_name: selected.project_name }),
-      project_path: selected.path,
+      project_id: migrated.project_id,
+      ...(migrated.project_name === undefined ? {} : { project_name: migrated.project_name }),
+      project_path: this.repositoryValue.projectDirectory,
+      summary: `已切換至專案「${target.project_name ?? target.project_id}」（revision ${migrated.revision}）${continued ? "，訪談將於目標專案上繼續" : ""}。${result.summary}`.trim(),
     };
   }
 

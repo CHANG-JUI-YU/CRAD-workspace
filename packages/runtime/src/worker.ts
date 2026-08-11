@@ -10,7 +10,7 @@ export interface WorkspaceWorkerOptions {
   readonly onEvent?: (event: WorkspaceWorkerEvent) => void;
 }
 
-export type WorkspaceRuntimeProvider = WorkspaceRuntime | (() => WorkspaceRuntime | Promise<WorkspaceRuntime>);
+export type WorkspaceRuntimeProvider = WorkspaceRuntime | (() => WorkspaceRuntime | Promise<WorkspaceRuntime> | undefined);
 
 export type WorkspaceWorkerEvent =
   | { type: "ready" }
@@ -67,7 +67,7 @@ export class WorkspaceWorker {
   private activeOperationId: string | undefined;
   private lastError: string | undefined;
 
-  private readonly runtimeProvider: () => WorkspaceRuntime | Promise<WorkspaceRuntime>;
+  private readonly runtimeProvider: () => WorkspaceRuntime | Promise<WorkspaceRuntime> | undefined;
 
   constructor(runtime: WorkspaceRuntimeProvider, options: WorkspaceWorkerOptions = {}) {
     this.runtimeProvider = typeof runtime === "function" ? runtime : () => runtime;
@@ -150,7 +150,9 @@ export class WorkspaceWorker {
       await this.runJob(job);
       return;
     }
-    const recoverable = await (await this.runtimeProvider()).recoverableOperations();
+    const runtime = await this.runtimeProvider();
+    if (runtime === undefined) return;
+    const recoverable = await runtime.recoverableOperations();
     for (const operation of recoverable) {
       if (this.activeOperationId !== undefined) break;
       await this.runOperation(operation.id, operation.actor ?? this.actor);
@@ -165,7 +167,12 @@ export class WorkspaceWorker {
     while (job.attempts <= this.maxRetries) {
       job.attempts += 1;
       try {
-        const result = await (await this.runtimeProvider()).request(job.request, job.context, job.agent === undefined ? {} : { agent: job.agent });
+        const runtime = await this.runtimeProvider();
+        if (runtime === undefined) {
+          this.jobs.unshift(job);
+          return;
+        }
+        const result = await runtime.request(job.request, job.context, job.agent === undefined ? {} : { agent: job.agent });
         job.resolve(result);
         this.lastError = undefined;
         return;
@@ -184,6 +191,7 @@ export class WorkspaceWorker {
 
   private async runOperation(operationId: string, actor: string): Promise<void> {
     const runtime = await this.runtimeProvider();
+    if (runtime === undefined) return;
     const claimed = await runtime.claimOperation(operationId, actor);
     if (claimed === undefined) return;
     const token = claimed.lease_token ?? "";

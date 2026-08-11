@@ -922,14 +922,13 @@ describe("natural language runtime boundary", () => {
     expect(restarted.status).toBe("needs_input");
     const expansionPass = [
       "擴充既有角色卡",
+      "測試專案",
       "小町",
       "小町的角色概念",
       "小町的背景",
       "小町的性格",
       "zhuji",
       "關係已整理",
-      "擴充後專案",
-      "不需要",
       "維持原有方向",
       "自由創作",
       "不需要",

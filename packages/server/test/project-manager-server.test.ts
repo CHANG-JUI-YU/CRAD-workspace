@@ -95,14 +95,21 @@ describe("project manager HTTP and MCP boundary", () => {
     if (address === null || typeof address === "string") throw new Error("server did not bind");
     const base = `http://127.0.0.1:${address.port}`;
     try {
-      const context = await (await fetch(`${base}/workspace/interview/context`)).json() as { project_id: string; status: string; answers: unknown[] };
-      expect(context).toMatchObject({ project_id: "project-002", status: "idle", answers: [] });
+      const context = await (await fetch(`${base}/workspace/interview/context`)).json() as { status: string; selected?: boolean };
+      expect(context).toMatchObject({ status: "idle", selected: false });
+      const statusBefore = await (await fetch(`${base}/workspace/status`)).json() as { ok?: boolean; selected?: boolean; projects?: Array<{ project_id: string }> };
+      expect(statusBefore).toMatchObject({ ok: true, selected: false });
+      expect(statusBefore.projects?.map((project) => project.project_id)).toEqual(["project-001"]);
       const listed = await (await fetch(`${base}/workspace/projects`)).json() as { projects: Array<{ project_id: string; project_name?: string }> };
-      expect(listed.projects).toEqual([{ project_id: "project-001", project_name: "舊專案", status: "ready", path: expect.any(String) }]);
+      expect(listed.projects).toEqual([{ project_id: "project-001", project_name: "舊專案", status: "ready", path: expect.any(String), revision: 1 }]);
       const mcpProjects = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "workspace_projects", arguments: {} } }) });
       const mcpProjectsText = JSON.stringify(await mcpProjects.json());
       expect(mcpProjectsText).toContain("project-001");
       expect(mcpProjectsText).not.toContain("project-002");
+
+      const created = await fetch(`${base}/workspace/project/new`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      const createdPayload = await created.json() as { selected?: boolean; project_id?: string; status?: string };
+      expect(createdPayload).toMatchObject({ selected: true, project_id: "project-002", status: "idle" });
 
       const selected = await fetch(`${base}/workspace/project/select`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: "舊專案" }) });
       expect(await selected.json()).toMatchObject({ project_id: "project-001", project_name: "舊專案" });

@@ -2816,14 +2816,33 @@ export class InMemoryAttachmentStore implements AttachmentStore {
   }
 }
 
-/** File-backed attachment store under `<projectRoot>/<projectId>/.workspace/attachments/<operationId>`. */
+/**
+ * File-backed attachment store under `<projectDirectory>/.workspace/attachments/<operationId>`.
+ * Accepts a FileProjectRepository so that the target directory follows the repository
+ * through renames (relocate) instead of freezing the original project id at construction.
+ */
 export class FileAttachmentStore implements AttachmentStore {
-  constructor(
-    private readonly projectRoot: string,
-    private readonly projectId: string,
-  ) {}
+  private readonly repository: FileProjectRepository | undefined;
+  private readonly projectRoot: string;
+  private readonly projectId: string;
+
+  constructor(repository: FileProjectRepository, projectId?: never);
+  constructor(projectRoot: string, projectId: string);
+  constructor(rootOrRepository: FileProjectRepository | string, projectId?: string) {
+    if (typeof rootOrRepository === "object") {
+      this.repository = rootOrRepository;
+      this.projectRoot = "";
+      this.projectId = "";
+    } else {
+      this.projectRoot = rootOrRepository;
+      this.projectId = projectId ?? "default";
+    }
+  }
 
   private directoryFor(operationId: string): string {
+    if (this.repository !== undefined) {
+      return path.join(this.repository.projectDirectory, ".workspace", "attachments", operationId);
+    }
     return path.join(this.projectRoot, this.projectId, ".workspace", "attachments", operationId);
   }
 

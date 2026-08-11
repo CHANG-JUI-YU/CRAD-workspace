@@ -32,7 +32,7 @@ if (command === "agents") {
   const requestedProject = process.env.ST_WORKSPACE_PROJECT;
   const selectedProject = typeof requestedProject === "string" && requestedProject.trim().length > 0 ? requestedProject.trim() : undefined;
   const manager = selectedProject === undefined
-    ? new WorkspaceProjectManager({ root, createRuntime: (repository) => new WorkspaceRuntime(repository, { interviewRequired: true, attachmentStore: new FileAttachmentStore(root, repository.projectId) }) })
+    ? new WorkspaceProjectManager({ root, createRuntime: (repository) => new WorkspaceRuntime(repository, { interviewRequired: true, attachmentStore: new FileAttachmentStore(repository) }) })
     : undefined;
   const runtime = manager?.runtime ?? new WorkspaceRuntime(new FileProjectRepository(root, selectedProject ?? "default", { layout: "project", materialize: true }), { attachmentStore: new FileAttachmentStore(root, selectedProject ?? "default") });
   const agentAdapter = new AgentAdapter(runtime);
@@ -73,7 +73,7 @@ const attachments = attachmentPath === undefined ? [] : [{ name: attachmentPath.
 const requestedProject = process.env.ST_WORKSPACE_PROJECT;
 const selectedProject = typeof requestedProject === "string" && requestedProject.trim().length > 0 ? requestedProject.trim() : undefined;
 const manager = selectedProject === undefined
-  ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true, attachmentStore: new FileAttachmentStore(projectRoot, repository.projectId) }) })
+  ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true, attachmentStore: new FileAttachmentStore(repository) }) })
   : undefined;
 const runtime = manager?.runtime ?? new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject ?? "default", { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject ?? "default") });
 const agentAdapter = new AgentAdapter(runtime);

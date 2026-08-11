@@ -380,7 +380,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
   const router = new AgentRouter();
   const runtimeForWorker = options.projectManager === undefined
     ? options.runtime
-    : () => options.projectManager!.ensureRuntime();
+    : () => (options.projectManager!.sessionSelected() ? options.projectManager!.ensureRuntime() : undefined);
   if (runtimeForWorker === undefined) throw new Error("workspace server could not initialize a runtime");
   const worker = options.worker ?? new WorkspaceWorker(runtimeForWorker, { actor: `${actor}-worker`, ...options.workerOptions });
   const getRuntime = async (): Promise<WorkspaceRuntime> => options.projectManager === undefined ? options.runtime! : options.projectManager.ensureRuntime();
@@ -400,11 +400,21 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         return;
       }
       if (request.method === "GET" && url.pathname === "/workspace/status") {
-        json(response, 200, options.projectManager === undefined ? await options.runtime!.status() : await options.projectManager.status());
+        if (options.projectManager === undefined) {
+          json(response, 200, await options.runtime!.status());
+        } else if (!options.projectManager.sessionSelected()) {
+          json(response, 200, { ok: true, selected: false, projects: await options.projectManager.listProjects() });
+        } else {
+          json(response, 200, await options.projectManager.status());
+        }
         return;
       }
       if (request.method === "GET" && url.pathname === "/workspace/dashboard/data") {
-        json(response, 200, await (await getRuntime()).dashboardSnapshot());
+        if (options.projectManager !== undefined && !options.projectManager.sessionSelected()) {
+          json(response, 200, { selected: false, projects: await options.projectManager.listProjects() });
+        } else {
+          json(response, 200, await (await getRuntime()).dashboardSnapshot());
+        }
         return;
       }
       if (request.method === "GET" && url.pathname === "/workspace/publish/preview") {
@@ -467,7 +477,11 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         return;
       }
       if (request.method === "GET" && url.pathname === "/workspace/interview/context") {
-        json(response, 200, await (await getRuntime()).interviewContext());
+        if (options.projectManager !== undefined && !options.projectManager.sessionSelected()) {
+          json(response, 200, { status: "idle", answers: [], selected: false });
+        } else {
+          json(response, 200, await (await getRuntime()).interviewContext());
+        }
         return;
       }
       if (request.method === "GET" && url.pathname === "/workspace/projects") {
@@ -475,14 +489,26 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
           json(response, 200, { projects: [] });
         } else {
           const manager = options.projectManager;
-          await manager.ensureRuntime();
           const projects = await manager.listProjects();
-          const current = await manager.repository.read();
-          const visible = current.project_status === "uninitialized" && current.interview.status === "idle" && current.operations.length === 0
-            ? projects.filter((project) => project.project_id !== current.project_id)
-            : projects;
-          json(response, 200, { projects: visible });
+          if (!manager.sessionSelected()) {
+            json(response, 200, { projects });
+          } else {
+            const current = await manager.repository.read();
+            const visible = current.project_status === "uninitialized" && current.interview.status === "idle" && current.operations.length === 0
+              ? projects.filter((project) => project.project_id !== current.project_id)
+              : projects;
+            json(response, 200, { projects: visible });
+          }
         }
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/project/new") {
+        if (options.projectManager === undefined) {
+          json(response, 400, { error: "PROJECT_MANAGER_REQUIRED" });
+          return;
+        }
+        const runtime = await options.projectManager.startNewProject();
+        json(response, 200, { selected: true, ...(await runtime.interviewContext()) });
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/request") {
@@ -716,11 +742,18 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
             return;
           }
           if (params?.name === "workspace_status") {
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(options.projectManager === undefined ? await options.runtime!.status() : await options.projectManager.status()) }] } });
+            const statusValue = options.projectManager === undefined
+              ? await options.runtime!.status()
+              : options.projectManager.sessionSelected()
+                ? await options.projectManager.status()
+                : { ok: true, selected: false, projects: await options.projectManager.listProjects() };
+            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(statusValue) }] } });
             return;
           }
           if (params?.name === "workspace_interview_context") {
-            const context = await (await getRuntime()).interviewContext();
+            const context = options.projectManager !== undefined && !options.projectManager.sessionSelected()
+              ? { status: "idle", answers: [], selected: false }
+              : await (await getRuntime()).interviewContext();
             json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(context) }] } });
             return;
           }
@@ -741,8 +774,11 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
               json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify({ projects: [] }) }] } });
             } else {
               const manager = options.projectManager;
-              await manager.ensureRuntime();
               const projects = await manager.listProjects();
+              if (!manager.sessionSelected()) {
+                json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify({ projects }) }] } });
+                return;
+              }
               const current = await manager.repository.read();
               const visible = current.project_status === "uninitialized" && current.interview.status === "idle" && current.operations.length === 0
                 ? projects.filter((project) => project.project_id !== current.project_id)
@@ -806,9 +842,8 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
   const requestedProject = options.projectId ?? (options.projectRoot === undefined ? process.env.ST_WORKSPACE_PROJECT : undefined);
   const selectedProject = typeof requestedProject === "string" && requestedProject.trim().length > 0 ? requestedProject.trim() : undefined;
   const manager = selectedProject === undefined
-    ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true, attachmentStore: new FileAttachmentStore(projectRoot, repository.projectId) }) })
+    ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true, attachmentStore: new FileAttachmentStore(repository) }) })
     : undefined;
-  if (manager !== undefined) await manager.ensureRuntime();
   const serverOptions: WorkspaceServerOptions = manager !== undefined
     ? { projectManager: manager, actor: options.actor ?? "server", ...(options.authToken === undefined ? {} : { authToken: options.authToken }) }
     : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server", ...(options.authToken === undefined ? {} : { authToken: options.authToken }) };

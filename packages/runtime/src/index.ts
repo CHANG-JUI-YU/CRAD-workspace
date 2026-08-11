@@ -1024,7 +1024,7 @@ export class WorkspaceRuntime {
     }
     const projectName = typeof interview.values.project_name === "string" ? interview.values.project_name : undefined;
     const interviewComplete = interview.status === "complete";
-    const precheck = interviewComplete ? buildBlueprintPrecheck(state.project_id, operation.id, interview, context.actor) : undefined;
+    const precheck = interviewComplete && interview.flow !== "continue" ? buildBlueprintPrecheck(state.project_id, operation.id, interview, context.actor) : undefined;
     const workflowComplete = interviewComplete && precheck?.status !== "needs_input";
     const complete = workflowComplete;
     const firstConfirmQuestion = precheck !== undefined && precheck.status === "needs_input"

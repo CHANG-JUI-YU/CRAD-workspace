@@ -220,6 +220,8 @@ const characterCoreQuestion = (state: InterviewState, subject: InterviewCharacte
   };
 };
 
+const expansionProjectQuestion = (): InterviewQuestion => question("expansion_project", "要擴充哪個既有專案？請提供專案名稱。", "free_text");
+
 const expansionNameQuestion = (): InterviewQuestion => question("expansion_name", "請提供要新增角色的正式顯示名稱；這會作為卡片與 Blueprint 的顯示名稱。", "name");
 
 const worldProjectQuestion = (): InterviewQuestion => question("world_project", "請提供要補世界的既有專案名稱或路徑。", "free_text");
@@ -482,7 +484,7 @@ const nextQuestion = (state: InterviewState, current: InterviewQuestion, answer:
   }
   switch (current.id) {
     case "work_type":
-      if (isExpansion(answer)) return { flow: "character_expansion", question: expansionNameQuestion(), characters: [{ id: "character-1", label: "新角色", ordinal: 1 }], active_character_id: "character-1" };
+      if (isExpansion(answer)) return { flow: "character_expansion", question: expansionProjectQuestion(), characters: [{ id: "character-1", label: "新角色", ordinal: 1 }], active_character_id: "character-1" };
       // Keep accepting the legacy free-text source entry, but still ask card shape first.
       if (isSourceAdaptation(answer)) return { flow: "source_adaptation", question: characterShapeQuestion() };
       if (isWorld(answer)) return { flow: "world", question: question("world_kind", "這是獨立世界書、既有專案補世界，還是建立含世界的角色卡？", "choice", ["獨立世界書", "既有專案補世界", "建立含世界的角色卡"]) };
@@ -574,6 +576,7 @@ const nextQuestion = (state: InterviewState, current: InterviewQuestion, answer:
         ? next(question("world_kind", "這是獨立世界書、既有專案補世界，還是建立含世界的角色卡？", "choice", ["獨立世界書", "既有專案補世界", "建立含世界的角色卡"]), state.flow)
         : { flow: state.flow, question: nextBeforeCollaboration(state) };
     case "world_timing":
+      if (state.flow === "world" && isExistingWorld(state.values.world_kind ?? "")) return { flow: "world", complete: true, confirmed: true };
       return state.flow === "world"
         ? (isWorldCharacterCard(state.values.world_kind ?? "")
           ? { flow: state.flow, question: characterShapeQuestion() }
@@ -588,9 +591,11 @@ const nextQuestion = (state: InterviewState, current: InterviewQuestion, answer:
     case "supplement":
       return { flow: state.flow, question: confirmationQuestion() };
     case "continue_project":
-      return { flow: state.flow, question: projectNameQuestion() };
+      return { flow: "continue", complete: true, confirmed: true };
     case "import_path":
       return { flow: state.flow, question: projectNameQuestion() };
+    case "expansion_project":
+      return { flow: state.flow, question: expansionNameQuestion() };
     case "expansion_name":
       return { flow: state.flow, question: conceptQuestion("expansion_concept", "要新增的角色") };
     case "expansion_concept":
@@ -602,7 +607,7 @@ const nextQuestion = (state: InterviewState, current: InterviewQuestion, answer:
     case "expansion_mode":
       return { flow: state.flow, question: question("expansion_relationships", "請描述新角色與既有 roster 的關係：互信與衝突界線。", "free_text") };
     case "expansion_relationships":
-      return { flow: state.flow, question: projectNameQuestion() };
+      return { flow: state.flow, question: nextBeforeCollaboration(state) };
     default:
       if (current.id.startsWith("zhuji_intro:")) {
         const index = ZHUJI_SELF_INTRODUCTION_FIELDS.indexOf(current.id.slice("zhuji_intro:".length) as (typeof ZHUJI_SELF_INTRODUCTION_FIELDS)[number]);

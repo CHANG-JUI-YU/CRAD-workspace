@@ -206,6 +206,21 @@ export function dashboard(): string {
   </header>
 
   <main class="app-shell dashboard-grid">
+    <section id="home-panel" class="panel panel-wide" aria-labelledby="home-heading" hidden>
+      <div class="panel-heading">
+        <div>
+          <h2 id="home-heading">尚未選擇專案</h2>
+          <p class="muted">先建立新專案或開啟既有專案；本機不會在啟動時自動建立任何資料夾。</p>
+        </div>
+      </div>
+      <div class="home-actions">
+        <button id="home-new-project" class="primary" type="button">建立新專案</button>
+        <button id="home-open-project" type="button">開啟既有專案</button>
+        <button id="home-legacy-review" type="button">舊卡審核</button>
+      </div>
+      <div id="home-projects" class="panel-message" aria-live="polite">正在讀取專案清單…</div>
+    </section>
+
     <section id="project-panel" class="panel panel-wide" aria-labelledby="project-heading">
       <div class="panel-heading">
         <div>
@@ -220,6 +235,7 @@ export function dashboard(): string {
       </select>
       <div class="form-actions">
         <button id="select-project" class="primary" type="button">切換專案</button>
+        <button id="new-project" type="button">建立新專案</button>
       </div>
       <div id="current-project" class="notice info" aria-live="polite">尚未取得目前專案。</div>
     </section>
@@ -276,6 +292,14 @@ export function dashboard(): string {
       </div>
       <div id="interview-message" class="panel-message" aria-live="polite">正在讀取訪談內容…</div>
       <h3 id="interview-question">尚未取得目前問題。</h3>
+      <div id="interview-target-area" hidden>
+        <label for="interview-target-select">目標專案</label>
+        <select id="interview-target-select" aria-describedby="interview-target-note"></select>
+        <div id="interview-target-note" class="muted"></div>
+        <div class="form-actions">
+          <button id="interview-target-submit" class="primary" type="button">以此專案為目標</button>
+        </div>
+      </div>
       <div id="interview-choices" class="choice-list" aria-live="polite"></div>
       <label for="interview-answer-input">回答</label>
       <textarea id="interview-answer-input" placeholder="輸入這一題的回答"></textarea>
@@ -565,8 +589,9 @@ export function dashboard(): string {
           var folder = firstString(item, ["folder_name", "slug"]);
           var visiblePath = lastPathSegment(firstString(item, ["path", "project_path"]));
           var fallback = firstString(item, ["project", "project_id", "id"]) || visiblePath || "未命名專案";
+          var revision = typeof item.revision === "number" ? "（r" + item.revision + "）" : "";
           return {
-            label: name || folder || visiblePath || fallback,
+            label: (name || folder || visiblePath || fallback) + revision,
             value: name || folder || visiblePath || fallback,
             record: item
           };
@@ -692,10 +717,11 @@ export function dashboard(): string {
       function renderStatus(payload) {
         var record = isRecord(payload) ? payload : { value: payload };
         state.status = record;
+        renderSession(record);
         var status = firstString(record, ["status", "project_status"]);
         var badge = byId("status-badge");
         badge.className = "status-badge " + statusClass(status);
-        badge.textContent = readableStatus(status);
+        badge.textContent = status === undefined && record.selected === false ? "未選擇專案" : readableStatus(status);
         var summary = firstString(record, ["summary", "message"]);
         byId("status-summary").className = "panel-message" + (statusClass(status) === "error" ? " error" : "");
         byId("status-summary").textContent = summary || "API 未提供摘要；請查看下方欄位與原始 JSON。";
@@ -703,6 +729,41 @@ export function dashboard(): string {
         byId("status-json").textContent = jsonText(payload);
         renderCurrentProject(record);
         syncProjectSelection(record);
+      }
+
+      var TARGET_QUESTION_SCOPES = {
+        "continue_project": "將在目標專案上繼續工作，不會建立新的 Blueprint。",
+        "world_project": "將在目標專案上補充世界設定，並以選定範圍更新其 Blueprint。",
+        "expansion_project": "將在目標專案上把新角色合併進既有 Blueprint。"
+      };
+
+      function renderSession(record) {
+        var unselected = isRecord(record) && record.selected === false;
+        state.sessionUnselected = unselected;
+        var home = byId("home-panel");
+        if (home) home.hidden = !unselected;
+        document.querySelectorAll(".app-shell .panel").forEach(function (panel) {
+          if (panel.id === "home-panel") return;
+          if (unselected) {
+            panel.hidden = true;
+          } else {
+            panel.hidden = false;
+          }
+        });
+        if (unselected) renderHomeProjects(record.projects);
+      }
+
+      function renderHomeProjects(projects) {
+        var target = byId("home-projects");
+        if (!target) return;
+        var entries = projectEntries(projects);
+        if (entries.length === 0) {
+          target.className = "panel-message";
+          target.textContent = "目前沒有既有專案；請建立新專案開始。";
+          return;
+        }
+        target.className = "panel-message success";
+        target.textContent = "既有專案：" + entries.map(function (entry) { return entry.label; }).join("、");
       }
 
       function renderAgents(payload) {
@@ -781,6 +842,21 @@ export function dashboard(): string {
         var questionNode = byId("interview-question");
         var choices = byId("interview-choices");
         choices.replaceChildren();
+        var questionId = question ? firstString(question, ["id"]) : undefined;
+        var targetArea = byId("interview-target-area");
+        if (questionId && TARGET_QUESTION_SCOPES[questionId]) {
+          var targetSelect = byId("interview-target-select");
+          targetSelect.replaceChildren();
+          state.projects.forEach(function (entry) {
+            var option = makeElement("option", "", entry.label);
+            option.value = entry.value;
+            targetSelect.append(option);
+          });
+          byId("interview-target-note").textContent = TARGET_QUESTION_SCOPES[questionId];
+          targetArea.hidden = false;
+        } else if (targetArea) {
+          targetArea.hidden = true;
+        }
         if (!question) {
           questionNode.textContent = isRecord(payload) && payload.status === "complete"
             ? "訪談已完成，目前沒有待回答問題。"
@@ -799,9 +875,11 @@ export function dashboard(): string {
             choices.append(button);
           });
           byId("interview-message").className = "panel-message success";
-          byId("interview-message").textContent = questionChoices.length > 0
-            ? "請點選一個選項，或在下方輸入文字。選項會提交 canonical value。"
-            : "這一題沒有 choices/options，請在下方輸入文字回答。";
+          byId("interview-message").textContent = questionId && TARGET_QUESTION_SCOPES[questionId]
+            ? "請從清單選擇目標專案（revision 顯示在括號中），或直接在下方輸入專案名稱。"
+            : questionChoices.length > 0
+              ? "請點選一個選項，或在下方輸入文字。選項會提交 canonical value。"
+              : "這一題沒有 choices/options，請在下方輸入文字回答。";
         }
         byId("interview-json").textContent = jsonText(payload);
         updateControls();
@@ -1022,7 +1100,15 @@ export function dashboard(): string {
         if (state.busy) return;
         setBusy(true);
         setNotice("info", "重新整理中…");
-        var outcomes = await Promise.allSettled([loadProjects(), loadStatus(), loadAgents(), loadInterview(), loadDashboardData()]);
+        var outcomes = await Promise.allSettled([loadStatus()]);
+        var statusFailed = outcomes[0].status === "rejected" || state.sessionUnselected === undefined;
+        if (statusFailed) {
+          outcomes = outcomes.concat(await Promise.allSettled([loadProjects(), loadAgents(), loadInterview(), loadDashboardData()]));
+        } else if (state.sessionUnselected) {
+          outcomes = outcomes.concat(await Promise.allSettled([loadProjects()]));
+        } else {
+          outcomes = outcomes.concat(await Promise.allSettled([loadProjects(), loadAgents(), loadInterview(), loadDashboardData()]));
+        }
         var failures = outcomes.filter(function (outcome) { return outcome.status === "rejected"; });
         if (failures.length > 0) {
           renderLatestError("重新整理", failures[0].reason, "重新整理有 " + failures.length + " 個區塊失敗");
@@ -1701,6 +1787,30 @@ export function dashboard(): string {
         });
       }
 
+      function createNewProject() {
+        if (state.busy) return;
+        void runTask("建立新專案", async function () {
+          var payload = await postJson("/workspace/project/new", {});
+          await refreshAfterAction();
+          return payload;
+        });
+      }
+
+      function revealProjectPanel() {
+        var panel = byId("project-panel");
+        if (panel) {
+          panel.hidden = false;
+          panel.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        var select = byId("project-select");
+        if (select) select.focus();
+      }
+
+      function legacyReviewEntry() {
+        revealProjectPanel();
+        setNotice("info", "舊卡審核：請先選擇或建立專案，再於結構化訪談中選擇「舊卡審核」。");
+      }
+
       byId("operation-filter").addEventListener("change", function () {
         renderOperationList(cachedOperations);
       });
@@ -1741,6 +1851,13 @@ export function dashboard(): string {
       byId("refresh").addEventListener("click", function () { void refresh(); });
       byId("submit-request").addEventListener("click", submitRequest);
       byId("select-project").addEventListener("click", selectProject);
+      byId("new-project").addEventListener("click", createNewProject);
+      byId("home-new-project").addEventListener("click", createNewProject);
+      byId("home-open-project").addEventListener("click", revealProjectPanel);
+      byId("home-legacy-review").addEventListener("click", legacyReviewEntry);
+      byId("interview-target-submit").addEventListener("click", function () {
+        submitInterviewAnswer(byId("interview-target-select").value);
+      });
       byId("submit-interview").addEventListener("click", function () {
         submitInterviewAnswer(byId("interview-answer-input").value);
       });

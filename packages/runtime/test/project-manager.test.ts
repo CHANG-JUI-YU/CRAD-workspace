@@ -108,7 +108,7 @@ describe("workspace project manager", () => {
     expect(result.project_id).toBe("project-002");
   });
 
-  it("switches to the selected project when a continue interview completes", { timeout: 30000 }, async () => {
+  it("migrates a continue interview onto the selected project without creating anything on the placeholder", { timeout: 30000 }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-continue-"));
     roots.push(root);
     const previous = new FileProjectRepository(root, "project-001", { layout: "project", materialize: true });
@@ -122,14 +122,22 @@ describe("workspace project manager", () => {
 
     const projects = manager(root);
     expect((await projects.interviewContext()).project_id).toBe("project-002");
-    const answers = ["繼續專案", "目標專案", "繼續的專案", "不需要", "自由創作", "不需要"];
+    const answers = ["繼續專案", "目標專案"];
     let result;
     for (const answer of answers) {
       result = await projects.answerInterview(answer, { actor: "user", attachments: [] });
     }
     expect(result?.status).toBe("completed");
     expect(result?.project_id).toBe("project-001");
+    expect(result?.summary).toContain("目標專案");
     expect((await projects.status()).project_id).toBe("project-001");
+    const target = await previous.read();
+    expect(target.interview.status).toBe("complete");
+    expect(target.blueprint_prechecks).toHaveLength(0);
+    expect(target.artifacts).toHaveLength(0);
+    const placeholder = await new FileProjectRepository(root, "project-002", { layout: "project", materialize: true }).read();
+    expect(placeholder.interview.status).toBe("idle");
+    expect(placeholder.operations).toHaveLength(0);
   });
 
   it("imports a legacy card when a legacy review interview completes", { timeout: 30000 }, async () => {
@@ -163,7 +171,7 @@ describe("workspace project manager", () => {
     throw new Error("expected LEGACY_CARD_NOT_FOUND");
   });
 
-  it("switches to an existing project when a world interview targets it", { timeout: 30000 }, async () => {
+  it("migrates an existing-world interview and records the Blueprint on the target project", { timeout: 30000 }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-world-"));
     roots.push(root);
     const previous = new FileProjectRepository(root, "project-001", { layout: "project", materialize: true });
@@ -181,7 +189,7 @@ describe("workspace project manager", () => {
     const worldKind = (await projects.interviewContext()).question?.options?.find((option) => option.includes("既有專案"));
     expect(worldKind).toBeDefined();
     result = await projects.answerInterview(worldKind!, { actor: "user", attachments: [] });
-    const answers = ["世界專案", "一個蒸汽龐克都市", undefined, "世界書專案", "自由創作", "不需要"];
+    const answers = ["世界專案", "一個蒸汽龐克都市", undefined];
     for (let index = 0; index < answers.length; index += 1) {
       let answer = answers[index];
       if (answer === undefined) {
@@ -194,5 +202,56 @@ describe("workspace project manager", () => {
     expect(result?.status).toBe("completed");
     expect(result?.project_id).toBe("project-001");
     expect((await projects.status()).project_id).toBe("project-001");
+    const target = await previous.read();
+    expect(target.blueprint_prechecks).toHaveLength(1);
+    expect(target.blueprint_prechecks[0]?.status).toBe("recorded");
+    expect(target.artifacts.filter((item) => item.kind === "blueprint")).toHaveLength(1);
+    expect(target.interview.status).toBe("complete");
+    const worldPlaceholder = await new FileProjectRepository(root, "project-002", { layout: "project", materialize: true }).read();
+    expect(worldPlaceholder.blueprint_prechecks).toHaveLength(0);
+    expect(worldPlaceholder.interview.status).toBe("idle");
+    expect(worldPlaceholder.operations).toHaveLength(0);
+  });
+
+  it("migrates a character expansion interview and merges the new character into the target Blueprint", { timeout: 30000 }, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-expansion-"));
+    roots.push(root);
+    const previous = new FileProjectRepository(root, "project-001", { layout: "project", materialize: true });
+    const previousState = await previous.read();
+    await previous.commit(previousState.revision, (state) => ({
+      ...state,
+      project_name: "擴充專案",
+      project_slug: "擴充專案",
+      project_status: "ready",
+    }));
+
+    const projects = manager(root);
+    expect((await projects.interviewContext()).project_id).toBe("project-002");
+    const answers = ["擴充既有角色卡", "擴充專案"];
+    for (const answer of answers) {
+      await projects.answerInterview(answer, { actor: "user", attachments: [] });
+    }
+    expect((await projects.status()).project_id).toBe("project-001");
+    const remaining = ["小町", "小町的角色概念", "小町的背景", "小町的性格", "zhuji", "關係已整理", "維持原有方向", "自由創作", "不需要"];
+    let result;
+    for (const answer of remaining) {
+      result = await projects.answerInterview(answer, { actor: "user", attachments: [] });
+    }
+    expect(result?.status).toBe("completed");
+    expect(result?.project_id).toBe("project-001");
+    const target = await previous.read();
+    expect(target.blueprint_prechecks).toHaveLength(1);
+    expect(target.blueprint_prechecks[0]?.status).toBe("recorded");
+    const blueprints = target.artifacts.filter((item) => item.kind === "blueprint");
+    expect(blueprints).toHaveLength(1);
+    const merged = JSON.parse(blueprints[0]!.content) as { characters?: Array<{ display_name?: unknown; mode?: unknown }> };
+    expect(merged.characters?.[0]?.display_name).toBe("小町");
+    expect(merged.characters?.[0]?.mode).toBe("zhuji");
+    expect(target.interview.status).toBe("complete");
+    const placeholder = await new FileProjectRepository(root, "project-002", { layout: "project", materialize: true }).read();
+    expect(placeholder.interview.status).toBe("idle");
+    expect(placeholder.blueprint_prechecks).toHaveLength(0);
+    expect(placeholder.artifacts.filter((item) => item.kind === "blueprint")).toHaveLength(0);
+    expect(placeholder.operations).toHaveLength(0);
   });
 });
