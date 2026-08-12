@@ -185,9 +185,6 @@ export class BuildService {
     const jsonBlobRef = { hash, size: Buffer.byteLength(canonicalIr, "utf8") };
     const pngBlobRef = { hash: contentHash(compiled.png), size: compiled.png.byteLength };
     await assertExecutionLease(this.repository, execution);
-    await this.repository.writeBlob(jsonBlobRef.hash, Buffer.from(canonicalIr, "utf8"));
-    await this.repository.writeBlob(pngBlobRef.hash, compiled.png);
-    await assertExecutionLease(this.repository, execution);
     const diagnostics = [...buildWarnings, ...compiled.diagnostics.map((item) => `${item.code}: ${item.message}`)];
     const errorDiagnostics = compiled.diagnostics.filter((item) => item.severity === "error");
     const qualityPolicy = createQualityPolicySnapshot(initial.quality_profile, actor, now());
@@ -197,7 +194,7 @@ export class BuildService {
       operation_id: operationId,
       status: errorDiagnostics.length > 0 ? "failed" : (isPublish ? "built" : "previewed"),
       artifact_ids: artifactIds,
-      canonical_ir_ref: jsonBlobRef,
+      ...(errorDiagnostics.length === 0 ? { canonical_ir_ref: jsonBlobRef } : {}),
       content_hash: hash,
       diagnostics,
       created_at: now(),
@@ -250,20 +247,26 @@ export class BuildService {
       item.export_json_path,
       item.export_png_path,
     ]).filter((item): item is string => item !== undefined);
-    const writeSet: RepositoryWriteSet = isPublish ? {
-      files: [
-        { path: exportJsonPath, content: compiled.json },
-        { path: exportPngPath, content: compiled.png },
-        { path: ".workspace/plugin-build-trace.json", content: `${canonicalJson(compiled.plugin_trace)}\n` },
+    const writeSet: RepositoryWriteSet = {
+      blobs: [
+        { hash: jsonBlobRef.hash, content: Buffer.from(canonicalIr, "utf8") },
+        ...(isPublish ? [{ hash: pngBlobRef.hash, content: compiled.png }] : []),
       ],
-      remove: [
-        "exports/ccv3.json",
-        "exports/card.json",
-        "exports/card.png",
-        "exports/manifest.json",
-        ...previousExportPaths.filter((item) => item !== exportJsonPath && item !== exportPngPath),
-      ],
-    } : {};
+      ...(isPublish ? {
+        files: [
+          { path: exportJsonPath, content: compiled.json },
+          { path: exportPngPath, content: compiled.png },
+          { path: ".workspace/plugin-build-trace.json", content: `${canonicalJson(compiled.plugin_trace)}\n` },
+        ],
+        remove: [
+          "exports/ccv3.json",
+          "exports/card.json",
+          "exports/card.png",
+          "exports/manifest.json",
+          ...previousExportPaths.filter((item) => item !== exportJsonPath && item !== exportPngPath),
+        ],
+      } : {}),
+    };
     await this.repository.commit(initial.revision, (current) => {
       assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
       return {

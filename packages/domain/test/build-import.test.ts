@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -6,6 +6,7 @@ import { compileProject } from "@st-workspace/compiler";
 import {
   FileProjectRepository,
   MemoryProjectRepository,
+  CoreError,
   contentHash,
   qualityProfileForLevel,
   type ArtifactRecord,
@@ -100,6 +101,12 @@ describe("build, publish and import", () => {
       await expect(readFile(path.join(root, "demo", "exports", "ccv3.json"))).rejects.toThrow();
       await expect(readFile(path.join(root, "demo", "exports", "card.json"))).rejects.toThrow();
       await expect(readFile(path.join(root, "demo", "exports", "manifest.json"))).rejects.toThrow();
+      const state = await repository.read();
+      const publish = state.publishes[0];
+      expect(publish?.content_ref).toBeDefined();
+      expect(publish?.png_ref).toBeDefined();
+      await expect(repository.readBlob(publish!.content_ref!.hash)).resolves.toBeDefined();
+      await expect(repository.readBlob(publish!.png_ref!.hash)).resolves.toBeDefined();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -126,6 +133,76 @@ describe("build, publish and import", () => {
     const pngBlob = await repository.readBlob(state.publishes[0]!.png_ref!.hash);
     expect(pngBlob).toBeDefined();
     expect(state.project_status).toBe("published");
+  });
+
+  it("stores the successful preview JSON blob in the same state commit and reuses an existing hash", async () => {
+    const repository = new MemoryProjectRepository("preview-blob-lifecycle");
+    await repository.commit(0, (state) => ({ ...state, artifacts: [artifact("op-author", "A complete character with personality and goals.")], operations: [operation("op-preview-1", "build")] }));
+    const service = new BuildService(repository);
+    const first = await service.run("op-preview-1", "preview current card", "builder");
+    expect(first.status).toBe("completed");
+    const afterFirst = await repository.read();
+    const firstHash = afterFirst.builds[0]?.canonical_ir_ref?.hash;
+    expect(firstHash).toBeDefined();
+    await expect(repository.readBlob(firstHash!)).resolves.toBeDefined();
+
+    await repository.commit(afterFirst.revision, (state) => ({ ...state, operations: [...state.operations, operation("op-preview-2", "build")] }));
+    const second = await service.run("op-preview-2", "preview current card", "builder");
+    expect(second.status).toBe("completed");
+    const afterSecond = await repository.read();
+    expect(afterSecond.builds[1]?.canonical_ir_ref?.hash).toBe(firstHash);
+    await expect(repository.readBlob(firstHash!)).resolves.toBeDefined();
+  });
+
+  it.each(["REVISION_CONFLICT", "REPOSITORY_LOCK_LOST"] as const)("does not install BuildService blobs when commit returns %s", async (code) => {
+    const repository = new MemoryProjectRepository(`build-${code.toLowerCase()}`);
+    await repository.commit(0, (state) => ({ ...state, artifacts: [artifact("op-author", "A complete character.")], operations: [operation("op-build", "build")] }));
+    const originalCommit = repository.commit.bind(repository);
+    let attemptedBlobs: readonly { hash: string; content: Uint8Array }[] | undefined;
+    repository.commit = async (expectedRevision, mutate, writeSet) => {
+      attemptedBlobs = writeSet?.blobs;
+      throw new CoreError(code, `injected ${code}`, true);
+    };
+
+    await expect(new BuildService(repository).run("op-build", "preview current card", "builder"))
+      .rejects.toMatchObject({ code });
+    expect(attemptedBlobs).toHaveLength(1);
+    for (const attempted of attemptedBlobs ?? []) await expect(repository.readBlob(attempted.hash)).resolves.toBeUndefined();
+    repository.commit = originalCommit;
+    expect((await repository.read()).builds).toHaveLength(0);
+  });
+
+  it("does not leave JSON or PNG blobs when the File repository commit fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-build-commit-failure-"));
+    try {
+      const setup = new FileProjectRepository(root, "demo", { layout: "project", materialize: true });
+      await setup.read();
+      await setup.commit(0, (state) => ({ ...state, artifacts: [artifact("op-author", "A complete character.")], operations: [operation("op-build", "build")] }));
+      const failingRepository = new FileProjectRepository(root, "demo", {
+        layout: "project",
+        materialize: true,
+        failure_injection: { point: "before_install", mode: "error" },
+      });
+
+      await expect(new BuildService(failingRepository).run("op-build", "publish current card", "publisher"))
+        .rejects.toMatchObject({ code: "INJECTED_FAILURE" });
+      const recovered = new FileProjectRepository(root, "demo", { layout: "project", materialize: true });
+      const state = await recovered.read();
+      expect(state.revision).toBe(1);
+      expect(state.builds).toHaveLength(0);
+      expect(state.publishes).toHaveLength(0);
+      await expect(readFile(path.join(root, "demo", "exports", "demo-角色卡.json"))).rejects.toThrow();
+      await expect(readFile(path.join(root, "demo", "exports", "demo-角色卡.png"))).rejects.toThrow();
+      let blobEntries: string[] = [];
+      try {
+        blobEntries = await readdir(path.join(root, "demo", ".workspace", "blobs"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      expect(blobEntries).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("asks for the mode on every dual-mode build and resumes the same operation after selection", async () => {
