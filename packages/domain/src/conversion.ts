@@ -15,6 +15,7 @@ import {
   type TemplateProposalValue,
 } from "@st-workspace/core";
 import { PALETTE_REQUIRED_MODULES, ZHUJI_REQUIRED_MODULES } from "./required-artifacts.js";
+import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 
 type ConversionProposal = Extract<TemplateProposalValue, { kind: "conversion" }>;
 type TargetProposal = Extract<TemplateProposalValue, { kind: "zhuji" | "palette" }>;
@@ -304,7 +305,9 @@ function withConversionProvenance(
 export class ConversionService {
   constructor(private readonly repository: ProjectRepository) {}
 
-  async materialize(operationId: string, proposal: ConversionProposal, actor: string, auditActor = actor): Promise<ConversionExecutionResult> {
+  async materialize(operationId: string, proposal: ConversionProposal, actorInput: ExecutionActorInput, legacyAuditActor?: string): Promise<ConversionExecutionResult> {
+    const { executionAgent: actor, auditActor, context: execution } = resolveExecutionActors(actorInput, legacyAuditActor);
+    await assertExecutionLease(this.repository, execution);
     const parsed = conversionProposalValueSchema.safeParse(proposal);
     if (!parsed.success) throw new CoreError("CONVERSION_SCHEMA_INVALID", parsed.error.message, true);
     const targetModules = validateTargetModules(parsed.data);
@@ -313,6 +316,7 @@ export class ConversionService {
     const result = await this.repository.transaction(initial.revision, (current) => {
       const operation = current.operations.find((item) => item.id === operationId);
       if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
+      assertExecutionLeaseForOperation(operation, execution);
       const projection = computeProjectProjection(current);
       const binding = currentBlueprintBinding(current);
       const sourceReferences = sourceReferencesFor(projection, normalizedProposal, binding);

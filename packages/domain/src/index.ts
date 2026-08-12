@@ -8,7 +8,9 @@ import {
   type SourceCandidate,
   type SourceSelectionSnapshot,
   type SourceRecord,
+  type ExecutionContext,
 } from "@st-workspace/core";
+import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 
 export { AuthoringService, type AuthoringExecutionResult, inferAuthoringKind } from "./authoring.js";
 export { BuildService, type BuildExecutionResult } from "./build.js";
@@ -17,6 +19,7 @@ export { ImportService, type ImportExecutionResult } from "./import.js";
 export { KnowledgeService, reviewRunProjectionRevision, type FactReviewExecutionResult, type FactReviewRunExecutionResult, type KnowledgeExecutionResult } from "./knowledge.js";
 export { ReviewService, type IssueUpdateAction, type IssueUpdateInput, type IssueUpdateResult, type ReviewExecutionResult } from "./review.js";
 export { validateWorkflow, type WorkflowDiagnostic, type WorkflowGatePhase, type WorkflowGateResult } from "./workflow-gate.js";
+export { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput, type ResolvedExecutionActors } from "./execution-context.js";
 export {
   PALETTE_REQUIRED_MODULES,
   ZHUJI_REQUIRED_MODULES,
@@ -42,6 +45,7 @@ export interface SourceExecutionContext {
   attachments: SourceAttachment[];
   actor: string;
   fetcher?: SourceFetcher;
+  execution?: ExecutionContext;
 }
 
 export interface SourceExecutionResult {
@@ -148,6 +152,8 @@ export class SourceService {
   constructor(private readonly repository: ProjectRepository) {}
 
   async resume(operationId: string, request: string, context: SourceExecutionContext): Promise<SourceExecutionResult> {
+    const { executionAgent, context: execution } = resolveExecutionActors(context.execution ?? context.actor);
+    await assertExecutionLease(this.repository, execution);
     const state = await this.repository.read();
     const operation = state.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -162,20 +168,25 @@ export class SourceService {
         approved_candidate_ids: additions.map((candidate) => candidate.id),
         rejected_candidate_ids: [],
         selected_at: now(),
-        selected_by: context.actor,
+        selected_by: executionAgent,
       };
-      await this.repository.commit(state.revision, (current) => ({
+      await this.repository.commit(state.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
         ...current,
         candidates: [...current.candidates, ...additions.map((candidate) => ({ ...candidate, selection_snapshot: selectionSnapshot }))],
-      }));
+        };
+      });
     }
     return this.execute(operationId, context);
   }
 
-  async registerCandidates(operationId: string, results: CandidateSearchResult[], actor: string): Promise<SourceExecutionResult> {
+  async registerCandidates(operationId: string, results: CandidateSearchResult[], actorInput: ExecutionActorInput): Promise<SourceExecutionResult> {
+    const { auditActor, context: execution } = resolveExecutionActors(actorInput);
+    await assertExecutionLease(this.repository, execution);
     if (results.length === 0) {
       const state = await this.repository.read();
-      await this.setOperation(operationId, "needs_input", "沒有找到候選來源；請提供 URL、檔案或更明確的搜尋描述。", state.revision);
+      await this.setOperation(operationId, "needs_input", "沒有找到候選來源；請提供 URL、檔案或更明確的搜尋描述。", state.revision, execution);
       return { completed: [], blocked: [], summary: "沒有找到候選來源。", status: "needs_input" };
     }
     const state = await this.repository.read();
@@ -190,7 +201,9 @@ export class SourceService {
       ...(result.media_type === undefined ? {} : { media_type: result.media_type }),
       status: "pending" as const,
     }));
-    await this.repository.commit(state.revision, (current) => ({
+    await this.repository.commit(state.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+      return {
       ...current,
       ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
       candidates: [...current.candidates, ...candidates],
@@ -205,12 +218,13 @@ export class SourceService {
         id: internalId("audit"),
         operation_id: operationId,
         event: "source.candidates_registered",
-        actor,
+        actor: auditActor,
         occurred_at: now(),
         project_revision: current.revision + 1,
         details: { count: candidates.length, candidate_ids: candidates.map((candidate) => candidate.id) },
       }],
-    }));
+      };
+    });
     return {
       completed: candidates.map((candidate) => candidate.id),
       blocked: [],
@@ -219,7 +233,12 @@ export class SourceService {
     };
   }
 
-  async selectCandidates(operationId: string, decisions: SourceSelectionDecision[], actor: string): Promise<SourceSelectionResult> {
+  async selectCandidates(operationId: string, decisions: SourceSelectionDecision[], actorInput: ExecutionActorInput): Promise<SourceSelectionResult> {
+    const actors = resolveExecutionActors(actorInput);
+    const actor = actors.executionAgent;
+    const auditActor = actors.auditActor;
+    const execution = actors.context;
+    await assertExecutionLease(this.repository, execution);
     if (decisions.length === 0) throw new CoreError("SOURCE_SELECTION_EMPTY", "至少要選擇一個候選來源。", true);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
@@ -243,7 +262,9 @@ export class SourceService {
       selected_at: selectedAt,
       selected_by: actor,
     };
-    await this.repository.commit(initial.revision, (current) => ({
+    await this.repository.commit(initial.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+      return {
       ...current,
       candidates: current.candidates.map((candidate) => {
         const decision = decisions.find((item) => item.candidate_id === candidate.id);
@@ -268,7 +289,7 @@ export class SourceService {
           id: internalId("audit"),
           operation_id: operationId,
           event: decision.decision === "approve" ? "source.approved" : "source.rejected",
-          actor,
+          actor: auditActor,
           occurred_at: selectedAt,
           project_revision: current.revision + 1,
           details: { candidate_id: decision.candidate_id },
@@ -277,13 +298,14 @@ export class SourceService {
           id: internalId("audit"),
           operation_id: operationId,
           event: "source.selection.updated",
-          actor,
+          actor: auditActor,
           occurred_at: selectedAt,
           project_revision: current.revision + 1,
           details: { decisions },
         },
       ],
-    }));
+      };
+    });
     return {
       approved,
       rejected,
@@ -293,6 +315,8 @@ export class SourceService {
   }
 
   async execute(operationId: string, context: SourceExecutionContext): Promise<SourceExecutionResult> {
+    const { auditActor, context: execution } = resolveExecutionActors(context.execution ?? context.actor);
+    await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
     const operation = initial.operations.find((candidate) => candidate.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -304,12 +328,12 @@ export class SourceService {
         && (candidate.selection_snapshot === undefined || candidate.selection_snapshot.operation_id === operationId));
       if (concurrent.length > 0) {
         const summary = `${concurrent.length} 個候選來源已被並行處理入庫。`;
-        await this.setOperation(operationId, "completed", summary, initial.revision);
+        await this.setOperation(operationId, "completed", summary, initial.revision, execution);
         return { completed: concurrent.map((candidate) => candidate.id), blocked: [], summary, status: "completed" };
       }
       const hasPending = initial.candidates.some((candidate) => candidate.status === "pending");
       const question = hasPending ? "請先明確批准要使用的候選來源，再執行來源入庫。" : "沒有已批准且尚未入庫的候選來源。";
-      await this.setOperation(operationId, "needs_input", question, initial.revision);
+      await this.setOperation(operationId, "needs_input", question, initial.revision, execution);
       return { completed: [], blocked: [], summary: question, status: "needs_input" };
     }
 
@@ -399,6 +423,7 @@ export class SourceService {
           await this.repository.commit(state.revision, (current) => {
             const currentOperation = current.operations.find((item) => item.id === operationId);
             if (currentOperation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
+            assertExecutionLeaseForOperation(currentOperation, execution);
             const targetCandidate = current.candidates.find((item) => item.id === candidate.id);
             if (targetCandidate === undefined || targetCandidate.status !== "approved") {
               if (targetCandidate?.status === "ingested") {
@@ -435,7 +460,7 @@ export class SourceService {
                 id: internalId("audit"),
                 operation_id: operationId,
                 event: "source.ingested",
-                actor: context.actor,
+                actor: auditActor,
                 occurred_at: now(),
                 project_revision: current.revision + 1,
                 details: { candidate_id: candidate.id, source_id: source.id, revision: source.revision },
@@ -494,7 +519,9 @@ export class SourceService {
     };
 
     try {
-      await this.repository.commit(finalState.revision, (current) => ({
+      await this.repository.commit(finalState.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
         ...current,
         operations: current.operations.map((item) => item.id === operationId
           ? updateOperation(item, {
@@ -509,7 +536,8 @@ export class SourceService {
             ],
           })
           : item),
-      }));
+        };
+      });
     } catch (err) {
       if (!(err instanceof CoreError && err.code === "REVISION_CONFLICT")) throw err;
     }
@@ -540,14 +568,20 @@ export class SourceService {
     throw new CoreError("SOURCE_CONTENT_REQUIRED", `來源「${candidate.title}」沒有可用內容；請提供檔案、文字或稍後重試。`, true);
   }
 
-  private async setOperation(operationId: string, status: OperationRecord["status"], question: string, expectedRevision: number): Promise<void> {
-    await this.repository.commit(expectedRevision, (current) => ({
+  private async setOperation(operationId: string, status: OperationRecord["status"], question: string, expectedRevision: number, execution?: ExecutionContext): Promise<void> {
+    await assertExecutionLease(this.repository, execution);
+    await this.repository.commit(expectedRevision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+      return {
       ...current,
       operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status, question }) : item),
-    }));
+      };
+    });
   }
 
   private async markCandidateBlockedOrFailed(operationId: string, candidateId: string, failure: CoreError, context: SourceExecutionContext): Promise<void> {
+    const { auditActor, context: execution } = resolveExecutionActors(context.execution ?? context.actor);
+    await assertExecutionLease(this.repository, execution);
     const maxRetries = 3;
     let lastError: unknown;
     for (let attempt = 0; attempt < maxRetries; attempt += 1) {
@@ -556,7 +590,9 @@ export class SourceService {
       if (currentCandidate?.status === "ingested") return;
       if (currentCandidate?.status !== "approved") return;
       try {
-        await this.repository.commit(state.revision, (current) => ({
+        await this.repository.commit(state.revision, (current) => {
+          assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+          return {
           ...current,
           candidates: current.candidates.map((item) => item.id === candidateId
             ? { ...item, status: failure.code === "SOURCE_FETCH_BLOCKED" ? "blocked_external" : "failed", failure: { code: failure.code, message: failure.message } }
@@ -568,12 +604,13 @@ export class SourceService {
             id: internalId("audit"),
             operation_id: operationId,
             event: "source.blocked",
-            actor: context.actor,
+            actor: auditActor,
             occurred_at: now(),
             project_revision: current.revision + 1,
             details: { candidate_id: candidateId, code: failure.code },
           }],
-        }));
+          };
+        });
         return;
       } catch (err) {
         if (err instanceof CoreError && err.code === "REVISION_CONFLICT") {

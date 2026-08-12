@@ -10,6 +10,7 @@ import {
   type ProjectRepository,
   type SourceAttachment,
 } from "@st-workspace/core";
+import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 
 export interface ImportServiceOptions {
   pngDecoder?: (input: Uint8Array) => Promise<{ authority: "ccv3" | "chara"; card: Record<string, unknown> }>;
@@ -478,15 +479,23 @@ export class ImportService {
     return { record, artifacts };
   }
 
-  async run(operationId: string, request: string, actor: string, attachments: SourceAttachment[]): Promise<ImportExecutionResult> {
+  async run(operationId: string, request: string, actorInput: ExecutionActorInput, attachments: SourceAttachment[]): Promise<ImportExecutionResult> {
+    const actors = resolveExecutionActors(actorInput);
+    const actor = actors.executionAgent;
+    const auditActor = actors.auditActor;
+    const execution = actors.context;
+    await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
     if (attachments.length === 0) {
-      await this.repository.commit(initial.revision, (current) => ({
+      await this.repository.commit(initial.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
         ...current,
         operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "needs_input", question: "請附上要匯入的角色卡或 JSON 檔案。" }) : item),
-      }));
+        };
+      });
       return { status: "needs_input", summary: "匯入需要至少一個附件。" };
     }
     const dryRun = /dry[- ]?run|只檢查|檢視轉換|預覽轉換/iu.test(request);
@@ -507,7 +516,9 @@ export class ImportService {
       : `匯入完成${failedCount === 0 ? "" : `，${failedCount} 個附件失敗`}，已建立 ${importedArtifacts.length} 個 artifact（角色 ${characterCount}、問候 ${greetingCount}、世界 ${worldCount}）${dryRun ? "（dry-run，未寫入）" : ""}。`;
     const status: "completed" | "needs_input" = imported.length === 0 ? "needs_input" : "completed";
     const state = await this.repository.read();
+    await assertExecutionLease(this.repository, execution);
     await this.repository.commit(state.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
       const existingByKeyHash = new Set(current.artifacts.filter((item) => importedArtifacts.some((entry) => entry.key === item.key)).map((item) => `${item.key}:${item.content_hash}`));
       return {
         ...current,
@@ -532,13 +543,14 @@ export class ImportService {
         id: internalId("audit"),
         operation_id: operationId,
         event: dryRun ? "import.inspected" : "import.committed",
-        actor,
+        actor: auditActor,
         occurred_at: now(),
         project_revision: current.revision + 1,
         details: { import_ids: imported.map((item) => item.record.id), failed_count: failedCount },
       }],
     };
     });
+    await assertExecutionLease(this.repository, execution);
     return { ...(imported[0] === undefined ? {} : { import_id: imported[0].record.id }), ...(dryRun || importedArtifacts.length === 0 ? {} : { artifact_id: (importedArtifacts[0] as ArtifactRecord).id }), status, summary };
   }
 }

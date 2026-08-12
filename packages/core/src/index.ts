@@ -685,11 +685,18 @@ function planRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-function getArtifactCharacterId(artifact: ArtifactRecord): string | undefined {
+function getArtifactCharacterId(artifact: ArtifactRecord, rosterIds?: ReadonlySet<string>): string | undefined {
   if (!["character", "wardrobe", "greeting", "zhuji", "palette"].includes(artifact.kind)) return undefined;
   const parts = artifact.key.split(":");
   if (parts.length >= 2 && parts[1]?.trim()) {
-    const rawCid = parts[1].trim().split("/")[0];
+    const rawKey = parts[1].trim();
+    if (rosterIds !== undefined) {
+      const matched = [...rosterIds].find((characterId) => rawKey === characterId
+        || rawKey.startsWith(`${characterId}/`)
+        || rawKey.startsWith(`${characterId}-`));
+      if (matched !== undefined) return matched;
+    }
+    const rawCid = rawKey.split("/")[0];
     if (rawCid !== undefined && rawCid.trim().length > 0) return rawCid.trim();
   }
   const parsed = parseArtifactValue(artifact);
@@ -715,6 +722,76 @@ function stringValues(value: unknown): string[] {
     : [];
 }
 
+/**
+ * Read the small, stable Blueprint YAML shape emitted by the authoring
+ * workflow.  Projection consumers must not each grow their own YAML parser;
+ * this deliberately handles only routing metadata and leaves module/content
+ * YAML to the compiler's content-specific readers.
+ */
+function parseBlueprintYaml(content: string): Record<string, unknown> | undefined {
+  const lines = content.replaceAll("\r", "").split("\n");
+  const scalar = (value: string): string => {
+    const trimmed = value.trim();
+    if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) return trimmed.slice(1, -1).replaceAll("''", "'");
+    if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) return trimmed.slice(1, -1);
+    return trimmed;
+  };
+  const indent = (line: string): number => line.match(/^\s*/u)?.[0].length ?? 0;
+  const topLevel = (key: string): string | undefined => {
+    const match = lines.find((line) => new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}\\s*:\\s*(.*)$`, "u").test(line));
+    return match?.replace(new RegExp(`^${key}\\s*:\\s*`, "u"), "");
+  };
+  const charactersField = lines.findIndex((line) => /^\s*characters\s*:\s*$/u.test(line));
+  const characters: Array<Record<string, unknown>> = [];
+  if (charactersField >= 0) {
+    const charactersIndent = indent(lines[charactersField] ?? "");
+    for (let index = charactersField + 1; index < lines.length; index += 1) {
+      const line = lines[index] ?? "";
+      if (line.trim().length > 0 && indent(line) <= charactersIndent) break;
+      const item = line.match(/^(\s*)-\s+(?:id|character_id)\s*:\s*(.+)$/u);
+      if (item === null) continue;
+      const itemIndent = item[1]?.length ?? charactersIndent + 2;
+      const character: Record<string, unknown> = { id: scalar(item[2] ?? "") };
+      for (let next = index + 1; next < lines.length; next += 1) {
+        const child = lines[next] ?? "";
+        if (child.trim().length > 0 && indent(child) <= itemIndent) break;
+        const field = child.match(/^\s+(label|display_name|mode|subject_name)\s*:\s*(.+)$/u);
+        if (field === null) continue;
+        const fieldName = field[1];
+        if (fieldName === undefined) continue;
+        const key = fieldName === "display_name" ? "label" : fieldName === "subject_name" ? "aliases" : fieldName;
+        const value = scalar(field[2] ?? "");
+        if (key === "aliases") character.aliases = [value];
+        else character[key] = value;
+      }
+      if (typeof character.id === "string" && character.id.length > 0) {
+        character.ordinal = characters.length + 1;
+        characters.push(character);
+      }
+    }
+  }
+  const primary = topLevel("primary_character_id");
+  const flow = topLevel("flow");
+  if (characters.length === 0 && primary === undefined && flow === undefined) return undefined;
+  return {
+    ...(characters.length === 0 ? {} : { characters }),
+    ...(primary === undefined ? {} : { primary_character_id: scalar(primary) }),
+    ...(flow === undefined ? {} : { flow: scalar(flow) }),
+  };
+}
+
+function parseBlueprintArtifact(artifact: ArtifactRecord): Record<string, unknown> | undefined {
+  const parsed = blueprintValue(parseArtifactValue(artifact));
+  return parsed !== undefined && Object.keys(parsed).length > 0 ? parsed : parseBlueprintYaml(artifact.content);
+}
+
+function hasBlueprintRoster(value: Record<string, unknown> | undefined): boolean {
+  return Array.isArray(value?.characters) && value.characters.some((item) => {
+    const entry = planRecord(item);
+    return textValue(entry?.id) !== undefined || textValue(entry?.character_id) !== undefined;
+  });
+}
+
 function parseBlueprintProjection(
   value: Record<string, unknown> | undefined,
   refs: { artifact?: ArtifactRecord; precheck?: BlueprintPrecheckRecord } = {},
@@ -723,17 +800,26 @@ function parseBlueprintProjection(
   const rawCharacters = Array.isArray(value.characters) ? value.characters : [];
   const characters: ProjectBlueprintCharacter[] = [];
   const seen = new Set<string>();
+  const sourceAdaptation = planRecord(value.source_adaptation);
+  const subjectAliases = new Map<string, string[]>();
+  for (const item of Array.isArray(sourceAdaptation?.subjects) ? sourceAdaptation.subjects : []) {
+    const subject = planRecord(item);
+    const characterId = textValue(subject?.character_id);
+    const subjectName = textValue(subject?.subject_name) ?? textValue(subject?.name);
+    if (characterId !== undefined && subjectName !== undefined) subjectAliases.set(characterId, [...(subjectAliases.get(characterId) ?? []), subjectName]);
+  }
   rawCharacters.forEach((item, index) => {
     const entry = planRecord(item);
-    const id = textValue(entry?.id);
+    const id = textValue(entry?.id) ?? textValue(entry?.character_id);
     if (id === undefined || seen.has(id)) return;
     seen.add(id);
+    const aliases = [...new Set([...stringValues(entry?.aliases), ...(subjectAliases.get(id) ?? [])])];
     characters.push({
       id,
       label: textValue(entry?.label) ?? textValue(entry?.display_name) ?? id,
       ordinal: typeof entry?.ordinal === "number" && Number.isFinite(entry.ordinal) ? entry.ordinal : index + 1,
       ...(entry?.mode === "zhuji" || entry?.mode === "palette" ? { mode: entry.mode } : {}),
-      aliases: stringValues(entry?.aliases),
+      aliases,
     });
   });
   const world = planRecord(value.world);
@@ -742,7 +828,7 @@ function parseBlueprintProjection(
   const precheck = refs.precheck;
   const primary = textValue(value.primary_character_id);
   const timing = textValue(world?.authoring_timing);
-  const artifactRaw = artifact === undefined ? undefined : blueprintValue(parseArtifactValue(artifact));
+  const artifactRaw = artifact === undefined ? undefined : parseBlueprintArtifact(artifact);
   const precheckRaw = precheck?.candidate_blueprint;
   return {
     ...(artifact === undefined ? {} : { artifact_id: artifact.id, artifact_revision: artifact.revision }),
@@ -750,10 +836,11 @@ function parseBlueprintProjection(
     characters,
     ...(primary === undefined ? {} : { primary_character_id: primary }),
     primary_character_id_explicit: primary !== undefined,
-    world_enabled: world === undefined ? true : world.enabled === true,
+    world_enabled: world === undefined ? precheck !== undefined ? false : true : world.enabled === true,
     ...(timing === undefined ? {} : { world_authoring_timing: timing }),
-    relationships_enabled: relationships === undefined ? true : relationships.enabled === true,
-    source_adaptation: value.intent === "source_adaptation"
+    relationships_enabled: relationships === undefined ? precheck !== undefined ? false : true : relationships.enabled === true,
+    source_adaptation: value.flow === "source_adaptation"
+      || value.intent === "source_adaptation"
       || value.intent_kind === "source_adaptation"
       || value.source_adaptation !== undefined,
     ...(artifactRaw === undefined ? {} : { artifact_value: artifactRaw }),
@@ -765,10 +852,12 @@ function parseLatestBlueprint(state: ProjectState, current: readonly ArtifactRec
   const artifact = [...current].reverse().find((item) => item.kind === "blueprint");
   const precheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
   const precheckValue = precheck === undefined ? undefined : blueprintValue(precheck.candidate_blueprint);
-  const artifactValue = artifact === undefined ? undefined : blueprintValue(parseArtifactValue(artifact));
+  const artifactValue = artifact === undefined ? undefined : parseBlueprintArtifact(artifact);
   // A recorded precheck is the authoritative publish roster. Legacy projects
-  // without one continue to use the latest Blueprint artifact.
-  return parseBlueprintProjection(precheckValue ?? artifactValue, {
+  // without a usable roster falls back to the latest Blueprint artifact for
+  // older projects whose precheck stored only confirmation metadata.
+  const selectedValue = hasBlueprintRoster(precheckValue) ? precheckValue : artifactValue ?? precheckValue;
+  return parseBlueprintProjection(selectedValue, {
     ...(artifact === undefined ? {} : { artifact }),
     ...(precheck === undefined ? {} : { precheck }),
   });
@@ -798,8 +887,8 @@ function publishPlanFromProjection(
   const blueprint = projection.blueprint;
   const worldEnabled = blueprint?.world_enabled ?? true;
   const relationshipsEnabled = blueprint?.relationships_enabled ?? true;
-  const rosterIds = blueprint === undefined ? undefined : new Set(blueprint.characters.map((character) => character.id));
-  const characterModes = blueprint === undefined
+  const rosterIds = blueprint === undefined || blueprint.characters.length === 0 ? undefined : new Set(blueprint.characters.map((character) => character.id));
+  const characterModes = blueprint === undefined || blueprint.characters.length === 0
     ? undefined
     : new Map(blueprint.characters.flatMap((character) => character.mode === undefined ? [] : [[character.id, character.mode] as const]));
   let effectiveMode = modeSelection;
@@ -813,7 +902,7 @@ function publishPlanFromProjection(
     if (NON_PLAN_ARTIFACT_KINDS.has(artifact.kind)) continue;
     if (artifact.kind === "world_lore" && !worldEnabled) continue;
     if (artifact.kind === "relationship" && !relationshipsEnabled) continue;
-    const boundCid = getArtifactCharacterId(artifact);
+    const boundCid = getArtifactCharacterId(artifact, rosterIds);
     if (boundCid !== undefined && rosterIds !== undefined && !rosterIds.has(boundCid)) continue;
     if (boundCid !== undefined && effectiveMode !== undefined && effectiveMode !== "both" && characterModes !== undefined) {
       const declaredMode = characterModes.get(boundCid);
@@ -1335,6 +1424,75 @@ export interface WorkspaceContext {
   actor: string;
   attachments: SourceAttachment[];
   research_results?: Array<{ title: string; url: string; snippet?: string; content?: string; media_type?: string; domain?: string; official?: boolean }>;
+}
+
+/**
+ * Durable execution identity and fencing data.  This is deliberately kept
+ * separate from WorkspaceContext: the latter describes the transport/session
+ * that initiated a request, while this context describes who may perform the
+ * operation's durable side effects.
+ */
+export interface ExecutionContextTarget {
+  artifactId: string;
+  artifactKind?: ArtifactKind;
+}
+
+export interface ExecutionLeaseContext {
+  owner: string;
+  token: string;
+  generation?: number;
+}
+
+export interface ExecutionContext {
+  operationId: string;
+  executionAgent: {
+    id: string;
+    role: string;
+  };
+  initiatedBy: string;
+  auditActor: string;
+  target?: ExecutionContextTarget;
+  lease?: ExecutionLeaseContext;
+  capabilities: readonly string[];
+}
+
+export interface ExecutionContextInput {
+  auditActor: string;
+  executionAgent?: ExecutionContext["executionAgent"];
+  initiatedBy?: string;
+  target?: ExecutionContextTarget;
+  lease?: ExecutionLeaseContext;
+  capabilities?: readonly string[];
+}
+
+/**
+ * Build an execution context at an operation boundary.  A persisted snapshot
+ * is authoritative for identity, target, capabilities, and initiation data;
+ * caller-provided values are only used when the snapshot has no value (legacy
+ * operations).  Recovery performs its separate identity-suitability check
+ * before calling this helper, so this fallback never performs routing.
+ */
+export function executionContextFromOperation(operation: OperationRecord, input: ExecutionContextInput): ExecutionContext {
+  const snapshot = operation.execution_snapshot;
+  const executionAgent = snapshot?.execution_agent_id !== undefined && snapshot.execution_agent_id.trim().length > 0
+    ? { id: snapshot.execution_agent_id.trim(), role: snapshot.execution_agent_role ?? input.executionAgent?.role ?? "specialist" }
+    : input.executionAgent ?? { id: operation.actor ?? input.auditActor, role: "specialist" };
+  const target = snapshot?.target_artifact_id === undefined
+    ? input.target
+    : {
+      artifactId: snapshot.target_artifact_id,
+      ...(snapshot.target_artifact_kind === undefined ? {} : { artifactKind: snapshot.target_artifact_kind as ArtifactKind }),
+    };
+  const capabilities = snapshot?.capabilities ?? input.capabilities ?? [];
+  return {
+    operationId: operation.id,
+    executionAgent,
+    initiatedBy: snapshot?.initiated_by ?? input.initiatedBy ?? operation.actor ?? input.auditActor,
+    auditActor: input.auditActor,
+    ...(target === undefined ? {} : { target }),
+    ...(input.lease === undefined ? {} : { lease: input.lease }),
+    capabilities: [...capabilities],
+  };
 }
 
 export interface RequestResult {

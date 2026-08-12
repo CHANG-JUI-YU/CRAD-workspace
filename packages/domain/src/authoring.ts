@@ -13,6 +13,7 @@ import {
   type ZhujiProposalValue,
 } from "@st-workspace/core";
 import { ConversionService } from "./conversion.js";
+import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 
 export interface AuthoringExecutionResult {
   artifact_id?: string;
@@ -141,11 +142,14 @@ export class AuthoringService {
   }
 
   /** Persist any model-facing structured template using one common path. */
-  async createTemplate(operationId: string, proposal: TemplateProposalValue, actor: string, auditActor = actor): Promise<AuthoringExecutionResult> {
+  async createTemplate(operationId: string, proposal: TemplateProposalValue, actorInput: ExecutionActorInput, legacyAuditActor?: string): Promise<AuthoringExecutionResult> {
+    const actors = resolveExecutionActors(actorInput, legacyAuditActor);
+    const { executionAgent: actor, auditActor, context: execution } = actors;
+    await assertExecutionLease(this.repository, execution);
     const parsed = templateProposalValueSchema.safeParse(proposal);
     if (!parsed.success) throw new CoreError("TEMPLATE_SCHEMA_INVALID", parsed.error.message, true);
-    if (parsed.data.kind === "zhuji") return this.createZhuji(operationId, parsed.data, actor, auditActor);
-    if (parsed.data.kind === "conversion") return this.conversion.materialize(operationId, parsed.data, actor, auditActor);
+    if (parsed.data.kind === "zhuji") return this.createZhuji(operationId, parsed.data, actorInput, legacyAuditActor);
+    if (parsed.data.kind === "conversion") return this.conversion.materialize(operationId, parsed.data, actorInput, legacyAuditActor);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -175,6 +179,7 @@ export class AuthoringService {
     const summary = `Stored ${parsed.data.kind} template ${name}.`;
     let reusedId: string | undefined;
     await this.repository.commit(initial.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
       const currentPrevious = [...current.artifacts].reverse().find((item) => item.key === key);
       if (currentPrevious?.content_hash === hash) {
         reusedId = currentPrevious.id;
@@ -207,11 +212,14 @@ export class AuthoringService {
     return { artifact_id: artifact.id, artifact_key: key, status: "completed", summary };
   }
 
-  async createStructured(operationId: string, proposal: TemplateProposalValue, actor: string, auditActor = actor): Promise<AuthoringExecutionResult> {
-    return this.createTemplate(operationId, proposal, actor, auditActor);
+  async createStructured(operationId: string, proposal: TemplateProposalValue, actorInput: ExecutionActorInput, legacyAuditActor?: string): Promise<AuthoringExecutionResult> {
+    return this.createTemplate(operationId, proposal, actorInput, legacyAuditActor);
   }
 
-  async createZhuji(operationId: string, proposal: ZhujiProposalValue, actor: string, auditActor = actor): Promise<AuthoringExecutionResult> {
+  async createZhuji(operationId: string, proposal: ZhujiProposalValue, actorInput: ExecutionActorInput, legacyAuditActor?: string): Promise<AuthoringExecutionResult> {
+    const actors = resolveExecutionActors(actorInput, legacyAuditActor);
+    const { executionAgent: actor, auditActor, context: execution } = actors;
+    await assertExecutionLease(this.repository, execution);
     const parsed = zhujiProposalValueSchema.safeParse(proposal);
     if (!parsed.success) throw new CoreError("ZHUJI_SCHEMA_INVALID", parsed.error.message, true);
     const initial = await this.repository.read();
@@ -243,6 +251,7 @@ export class AuthoringService {
     const summary = `已建立珠璣模組「${name}」revision ${artifact.revision.slice(0, 12)}。`;
     let reusedId: string | undefined;
     await this.repository.commit(initial.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
       const currentPrevious = [...current.artifacts].reverse().find((item) => item.key === key);
       if (currentPrevious?.content_hash === hash) {
         reusedId = currentPrevious.id;
@@ -275,7 +284,10 @@ export class AuthoringService {
     return { artifact_id: artifact.id, artifact_key: key, status: "completed", summary };
   }
 
-  async create(operationId: string, request: string, actor: string, auditActor = actor): Promise<AuthoringExecutionResult> {
+  async create(operationId: string, request: string, actorInput: ExecutionActorInput, legacyAuditActor?: string): Promise<AuthoringExecutionResult> {
+    const actors = resolveExecutionActors(actorInput, legacyAuditActor);
+    const { executionAgent: actor, auditActor, context: execution } = actors;
+    await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);

@@ -16,6 +16,7 @@ import {
 import { availableCardModes, compileProject, type CardModeSelection } from "@st-workspace/compiler";
 import { buildRequiredArtifactManifest } from "./required-artifacts.js";
 import { validateWorkflow } from "./workflow-gate.js";
+import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 
 export interface BuildExecutionResult {
   build_id?: string;
@@ -36,16 +37,21 @@ function updateOperation(operation: OperationRecord, patch: Partial<OperationRec
 export class BuildService {
   constructor(private readonly repository: ProjectRepository) {}
 
-  async run(operationId: string, request: string, actor: string, options: { mode_selection?: CardModeSelection } = {}): Promise<BuildExecutionResult> {
+  async run(operationId: string, request: string, actorInput: ExecutionActorInput, options: { mode_selection?: CardModeSelection } = {}): Promise<BuildExecutionResult> {
+    const { auditActor: actor, context: execution } = resolveExecutionActors(actorInput);
+    await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
     const isPublishRequest = /publish|release|發布|發佈|上線/iu.test(request);
     if (initial.artifacts.length === 0) {
-      await this.repository.commit(initial.revision, (current) => ({
+      await this.repository.commit(initial.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
         ...current,
         operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "needs_input", question: "目前沒有可建置的 artifact，請先建立角色或其他產物。" }) : item),
-      }));
+        };
+      });
       return { status: "needs_input", summary: "目前沒有可建置的 artifact。" };
     }
     const projection = computeProjectProjection(initial);
@@ -65,7 +71,9 @@ export class BuildService {
       const question = manifestMode === undefined
         ? "本次打包同時有珠璣與調色盤模組，請選擇：珠璣、調色盤，或兩者。"
         : `本次打包同時有珠璣與調色盤模組；Blueprint 選定 ${manifestMode === "zhuji" ? "珠璣" : "調色盤"}，本次只能打包該模式。請確認後再試。`;
-      await this.repository.commit(initial.revision, (current) => ({
+      await this.repository.commit(initial.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
         ...current,
         operations: current.operations.map((item) => item.id === operationId
           ? updateOperation(item, { status: "needs_input", question, result_summary: "等待本次打包的模式選擇。" })
@@ -79,23 +87,29 @@ export class BuildService {
           project_revision: current.revision + 1,
           details: { available_modes: ["zhuji", "palette"], ...(manifestMode === undefined ? {} : { manifest_mode: manifestMode }) },
         }],
-      }));
+        };
+      });
       return { status: "needs_input", summary: question };
     }
     if (modeSelection !== undefined && !modeUsable(modeSelection)) {
       const question = `本次打包可用模式為${availableModes.zhuji ? "珠璣" : ""}${availableModes.zhuji && availableModes.palette ? "、" : ""}${availableModes.palette ? "調色盤" : ""}，請重新選擇。`;
-      await this.repository.commit(initial.revision, (current) => ({
+      await this.repository.commit(initial.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
         ...current,
         operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "needs_input", question }) : item),
-      }));
+        };
+      });
       return { status: "needs_input", summary: question };
     }
     const exactManifest = buildRequiredArtifactManifest(initial, modeSelection === "zhuji" || modeSelection === "palette" ? modeSelection : undefined);
     if (isPublishRequest) {
       const gate = validateWorkflow(initial, "publish", exactManifest);
       if (!gate.ok) {
-        const diagnostics = gate.diagnostics.map((item) => `${item.code}: ${item.message}`);
-        await this.repository.commit(initial.revision, (current) => ({
+      const diagnostics = gate.diagnostics.map((item) => `${item.code}: ${item.message}`);
+        await this.repository.commit(initial.revision, (current) => {
+          assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+          return {
           ...current,
           operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, {
             status: "blocked",
@@ -112,7 +126,8 @@ export class BuildService {
             project_revision: current.revision + 1,
             details: { diagnostics, codes: gate.diagnostics.map((item) => item.code) },
           }],
-        }));
+          };
+        });
         return { status: "blocked", summary: `Publish blocked: ${diagnostics.join(" ")}` };
       }
     }
@@ -145,10 +160,13 @@ export class BuildService {
     const latest = normalized.latestArtifacts;
     /* c8 ignore next -- latestArtifacts is derived from the non-empty artifact list above. */
     if (latest.length === 0) {
-      await this.repository.commit(initial.revision, (current) => ({
+      await this.repository.commit(initial.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
         ...current,
         operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "needs_input", question: "目前沒有可建置的 artifact，請先建立角色或其他產物。" }) : item),
-      }));
+        };
+      });
       return { status: "needs_input", summary: "目前沒有可建置的 artifact。" };
     }
     const artifactIds = latest.map((artifact) => artifact.id);
@@ -156,8 +174,10 @@ export class BuildService {
     const hash = compiled.content_hash;
     const jsonBlobRef = { hash, size: Buffer.byteLength(canonicalIr, "utf8") };
     const pngBlobRef = { hash: contentHash(compiled.png), size: compiled.png.byteLength };
+    await assertExecutionLease(this.repository, execution);
     await this.repository.writeBlob(jsonBlobRef.hash, Buffer.from(canonicalIr, "utf8"));
     await this.repository.writeBlob(pngBlobRef.hash, compiled.png);
+    await assertExecutionLease(this.repository, execution);
     const diagnostics = [...buildWarnings, ...compiled.diagnostics.map((item) => `${item.code}: ${item.message}`)];
     const errorDiagnostics = compiled.diagnostics.filter((item) => item.severity === "error");
     const qualityPolicy = createQualityPolicySnapshot(initial.quality_profile, actor, now());
@@ -175,7 +195,9 @@ export class BuildService {
     };
     if (errorDiagnostics.length > 0) {
       const summary = `Build failed: ${diagnostics.join(" ")}`;
-      await this.repository.commit(initial.revision, (current) => ({
+      await this.repository.commit(initial.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
         ...current,
         builds: [...current.builds, build],
         operations: current.operations.map((item) => item.id === operationId
@@ -195,7 +217,8 @@ export class BuildService {
           project_revision: current.revision + 1,
           details: { build_id: build.id, artifact_ids: artifactIds, content_hash: hash, codes: errorDiagnostics.map((item) => item.code) },
         }],
-      }));
+        };
+      });
       return { build_id: build.id, ...(modeSelection === undefined ? {} : { mode_selection: modeSelection }), status: "blocked", summary };
     }
     const publish: PublishRecord | undefined = isPublish ? {
@@ -231,7 +254,9 @@ export class BuildService {
         ...previousExportPaths.filter((item) => item !== exportJsonPath && item !== exportPngPath),
       ],
     } : {};
-    await this.repository.commit(initial.revision, (current) => ({
+    await this.repository.commit(initial.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+      return {
       ...current,
       ...(publish === undefined ? {} : { project_status: "published" as const }),
       builds: [...current.builds, build],
@@ -254,7 +279,9 @@ export class BuildService {
           ...(diagnostics.length > 0 ? { diagnostics } : {}),
         },
       }],
-    }), writeSet);
+      };
+    }, writeSet);
+    await assertExecutionLease(this.repository, execution);
     return { build_id: build.id, ...(publish === undefined ? {} : { publish_id: publish.id }), ...(modeSelection === undefined ? {} : { mode_selection: modeSelection }), status: "completed", summary };
   }
 }

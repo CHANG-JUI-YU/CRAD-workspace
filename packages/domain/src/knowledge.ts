@@ -17,6 +17,7 @@ import {
   type ProjectRepository,
   type SourceRecord,
 } from "@st-workspace/core";
+import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 
 export interface KnowledgeExecutionResult {
   chunks: string[];
@@ -338,7 +339,9 @@ function factFromSentence(source: SourceRecord, statement: string, actor: string
 export class KnowledgeService {
   constructor(private readonly repository: ProjectRepository) {}
 
-  async refresh(operationId: string, request: string, actor: string): Promise<KnowledgeExecutionResult> {
+  async refresh(operationId: string, request: string, actorInput: ExecutionActorInput): Promise<KnowledgeExecutionResult> {
+    const { executionAgent: actor, auditActor, context: execution } = resolveExecutionActors(actorInput);
+    await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -348,6 +351,7 @@ export class KnowledgeService {
     let committedChunks: string[] = [];
     let committedFacts: string[] = [];
     await this.repository.commit(initial.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
       const currentKnownSourceIds = new Set(current.knowledge_chunks.map((chunk) => chunk.source_id));
       const currentSources = current.sources.filter((source) => !currentKnownSourceIds.has(source.id));
       if (currentSources.length === 0) {
@@ -426,7 +430,7 @@ export class KnowledgeService {
           id: internalId("audit"),
           operation_id: operationId,
           event: "knowledge.refreshed",
-          actor,
+          actor: auditActor,
           occurred_at: now(),
           project_revision: current.revision + 1,
           details: { source_ids: currentSources.map((source) => source.id), chunk_count: chunks.length, fact_count: facts.length, structured: true, ...(mergedCount > 0 ? { merged_count: mergedCount } : {}) },
@@ -533,7 +537,9 @@ export class KnowledgeService {
     return { chunks: committedChunks, facts: committedFacts, status: "completed", summary: committedSummary };
   }
 
-  async applyCuration(operationId: string, claims: FactClaim[], actor: string, auditActor = actor): Promise<KnowledgeExecutionResult> {
+  async applyCuration(operationId: string, claims: FactClaim[], actorInput: ExecutionActorInput, legacyAuditActor?: string): Promise<KnowledgeExecutionResult> {
+    const { executionAgent: actor, auditActor, context: execution } = resolveExecutionActors(actorInput, legacyAuditActor);
+    await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -589,7 +595,9 @@ export class KnowledgeService {
     }
     const facts = [...newFactsByKey.values()];
     const summary = `Applied ${facts.length} structured fact candidates from curation${mergedCount > 0 ? `; merged ${mergedCount} corroborating evidence into existing facts.` : "."}`;
-    await this.repository.commit(initial.revision, (current) => ({
+    await this.repository.commit(initial.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+      return {
       ...current,
       ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
       knowledge_chunks: [...current.knowledge_chunks, ...chunks],
@@ -601,11 +609,14 @@ export class KnowledgeService {
         id: internalId("audit"), operation_id: operationId, event: "fact.curation.applied", actor: auditActor, occurred_at: now(), project_revision: current.revision + 1,
         details: { fact_ids: facts.map((fact) => fact.id), claim_count: claims.length, agent_id: actor, ...(mergedCount > 0 ? { merged_count: mergedCount } : {}) },
       }],
-    }));
+      };
+    });
     return { chunks: chunks.map((chunk) => chunk.id), facts: facts.map((fact) => fact.id), status: "completed", summary };
   }
 
-  async beginFactReviewRun(operationId: string, actor: string, curationRunId?: string, auditActor = actor): Promise<FactReviewRunRecord> {
+  async beginFactReviewRun(operationId: string, actorInput: ExecutionActorInput, curationRunId?: string, legacyAuditActor?: string): Promise<FactReviewRunRecord> {
+    const { executionAgent: actor, auditActor, context: execution } = resolveExecutionActors(actorInput, legacyAuditActor);
+    await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -654,7 +665,9 @@ export class KnowledgeService {
       created_by: actor,
       created_at: now(),
     };
-    await this.repository.commit(initial.revision, (current) => ({
+    await this.repository.commit(initial.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+      return {
       ...current,
       fact_review_runs: [...current.fact_review_runs, run],
       audit: [...current.audit, {
@@ -666,7 +679,8 @@ export class KnowledgeService {
         project_revision: current.revision + 1,
         details: { review_run_id: run.id, candidate_set_revision: run.candidate_set_revision, candidate_count: run.candidate_occurrence_ids.length, source_revisions: run.source_revisions, agent_id: actor },
       }],
-    }));
+      };
+    });
     return run;
   }
 
@@ -723,11 +737,13 @@ export class KnowledgeService {
   async applyReviewBatch(
     operationId: string,
     decisions: FactDecision[],
-    actor: string,
+    actorInput: ExecutionActorInput,
     reviewerIdentity: string,
     reviewRunId?: string,
     expectedProjectionRevision?: string,
   ): Promise<FactReviewExecutionResult> {
+    const { auditActor: actor, context: execution } = resolveExecutionActors(actorInput);
+    await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -738,8 +754,8 @@ export class KnowledgeService {
       ? [...initial.fact_review_runs].reverse().find((candidate) => candidate.status === "open" || candidate.status === "blocked")
       : initial.fact_review_runs.find((candidate) => candidate.id === reviewRunId);
     if (run === undefined) {
-      run = await this.beginFactReviewRun(operationId, reviewerIdentity, undefined, actor);
-      return this.applyReviewBatch(operationId, decisions, actor, reviewerIdentity, run.id, expectedProjectionRevision);
+      run = await this.beginFactReviewRun(operationId, execution ?? reviewerIdentity, undefined, actor);
+      return this.applyReviewBatch(operationId, decisions, actorInput, reviewerIdentity, run.id, expectedProjectionRevision);
     }
     if (run.status === "completed" || run.status === "superseded") throw new CoreError("FACT_REVIEW_RUN_CLOSED", `Fact review run ${run.id} is no longer open.`, true);
     const actualProjectionRevision = reviewRunProjectionRevision(initial, run.id);
@@ -824,6 +840,7 @@ export class KnowledgeService {
       : `Adjudicated ${targetIds.length} fact candidates in review run ${run.id}.`;
     try {
       await this.repository.commit(initial.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
         const decisionsForRun = [...current.fact_review_decisions, ...records];
         const latestByOccurrence = new Map<string, FactReviewDecisionRecord>();
         for (const item of decisionsForRun) {

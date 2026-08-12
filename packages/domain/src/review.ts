@@ -12,6 +12,7 @@ import {
   type QualityLevel,
   qualityProfileForLevel,
 } from "@st-workspace/core";
+import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 
 export interface ReviewExecutionResult {
   review_id?: string;
@@ -86,7 +87,9 @@ export class ReviewService {
   constructor(private readonly repository: ProjectRepository) {}
 
   /** Update quality policy through a single high-level operation. */
-  async configureQualityProfile(operationId: string, level: QualityLevel, actor: string, overrides: Record<string, IssueSeverity> = {}): Promise<{ status: "completed"; summary: string }> {
+  async configureQualityProfile(operationId: string, level: QualityLevel, actorInput: ExecutionActorInput, overrides: Record<string, IssueSeverity> = {}): Promise<{ status: "completed"; summary: string }> {
+    const { auditActor: actor, context: execution } = resolveExecutionActors(actorInput);
+    await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -100,7 +103,9 @@ export class ReviewService {
     const invalidatedIssueIds = new Set(invalidatedIssueOverrides.map((item) => item.issue.id));
     const preservedIssueOverrideIds = initial.issues.filter((issue) => issue.status === "open" && issue.override !== undefined && !invalidatedIssueIds.has(issue.id)).map((issue) => issue.id);
     const summary = `Quality profile set to ${level}.`;
-    await this.repository.commit(initial.revision, (current) => ({
+    await this.repository.commit(initial.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+      return {
       ...current,
       quality_profile: profile,
       issues: current.issues.map((issue) => {
@@ -148,12 +153,15 @@ export class ReviewService {
           },
         },
       ],
-    }));
+      };
+    });
     return { status: "completed", summary };
   }
 
   /** Resolve, ignore, or explicitly override one recorded issue. */
-  async updateIssue(operationId: string, input: IssueUpdateInput, operator: string, auditActor = operator): Promise<IssueUpdateResult> {
+  async updateIssue(operationId: string, input: IssueUpdateInput, operatorInput: ExecutionActorInput, legacyAuditActor?: string): Promise<IssueUpdateResult> {
+    const { executionAgent: operator, auditActor, context: execution } = resolveExecutionActors(operatorInput, legacyAuditActor);
+    await assertExecutionLease(this.repository, execution);
     const reason = input.reason.trim();
     if (reason.length === 0) throw new CoreError("ISSUE_ACTION_REASON_REQUIRED", "Issue actions require a non-empty reason.", true);
     if (input.action === "override" && input.severity === undefined) {
@@ -184,6 +192,7 @@ export class ReviewService {
       : `Issue ${issue.id} marked ${nextStatus}.`;
     const occurredAt = now();
     await this.repository.commit(initial.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
       const issueOverride: IssueOverride | undefined = input.action === "override" && input.severity !== undefined
         ? {
           by: operator,
@@ -231,28 +240,40 @@ export class ReviewService {
     return { issue_id: issue.id, action: input.action, status: "completed", summary };
   }
 
-  async review(operationId: string, request: string, actor: string, auditActor = actor, targetId?: string): Promise<ReviewExecutionResult> {
+  async review(operationId: string, request: string, actorInput: ExecutionActorInput, legacyAuditActor?: string, targetId?: string): Promise<ReviewExecutionResult> {
+    const actors = resolveExecutionActors(actorInput, legacyAuditActor);
+    const actor = actors.executionAgent;
+    const auditActor = actors.auditActor;
+    const execution = actors.context;
+    await assertExecutionLease(this.repository, execution);
+    const effectiveTargetId = actors.context?.target?.artifactId ?? targetId;
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
-    const target = targetId === undefined ? this.pickTarget(initial.artifacts, request) : initial.artifacts.find((artifact) => artifact.id === targetId);
+    const target = effectiveTargetId === undefined ? this.pickTarget(initial.artifacts, request) : initial.artifacts.find((artifact) => artifact.id === effectiveTargetId);
     if (target === undefined) {
-      await this.repository.commit(initial.revision, (current) => ({
+      await this.repository.commit(initial.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
         ...current,
         operations: current.operations.map((item) => item.id === operationId
           ? updateOperation(item, { status: "needs_input", question: "目前沒有可審查的 artifact，請先建立角色或其他產物。" })
           : item),
-      }));
+        };
+      });
       return { issue_ids: [], status: "needs_input", summary: "目前沒有可審查的 artifact。" };
     }
     const creatorAgent = target.created_by ?? initial.operations.find((item) => item.id === target.operation_id)?.execution_snapshot?.execution_agent_id;
     if (creatorAgent !== undefined && creatorAgent === actor) {
-      await this.repository.commit(initial.revision, (current) => ({
+      await this.repository.commit(initial.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
         ...current,
         operations: current.operations.map((item) => item.id === operationId
           ? updateOperation(item, { status: "blocked", question: "建立者不能審查自己的 artifact，請交由不同 reviewer 執行。" })
           : item),
-      }));
+        };
+      });
       return { issue_ids: [], status: "blocked", summary: "已阻擋作者自審。" };
     }
     const issueDrafts: Array<{ code: string; message: string; severity: IssueSeverity }> = [];
@@ -296,7 +317,10 @@ export class ReviewService {
     }));
     const summary = reviewStatus === "passed" ? "審查通過，沒有發現問題。" : `審查完成：${issues.length} 個問題，最高嚴重度為 ${highest}。`;
     const state = await this.repository.read();
-    await this.repository.commit(state.revision, (current) => ({
+    assertExecutionLeaseForOperation(state.operations.find((item) => item.id === operationId), execution);
+    await this.repository.commit(state.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+      return {
       ...current,
       reviews: [...current.reviews, review],
       issues: [...current.issues, ...issues],
@@ -331,12 +355,15 @@ export class ReviewService {
           agent_id: actor,
         },
       }],
-    }));
+      };
+    });
     return { review_id: review.id, issue_ids: review.issue_ids, status: "completed", summary };
   }
 
   /** Apply a model-produced review proposal to the same review/issue ledger used by rule-based review. */
-  async applyProposal(operationId: string, proposal: { target: { kind: string; name: string; id?: string | undefined }; findings: ReviewFinding[]; summary: string }, actor: string, auditActor = actor): Promise<ReviewExecutionResult> {
+  async applyProposal(operationId: string, proposal: { target: { kind: string; name: string; id?: string | undefined }; findings: ReviewFinding[]; summary: string }, actorInput: ExecutionActorInput, legacyAuditActor?: string): Promise<ReviewExecutionResult> {
+    const { executionAgent: actor, auditActor, context: execution } = resolveExecutionActors(actorInput, legacyAuditActor);
+    await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -393,7 +420,9 @@ export class ReviewService {
       occurred_at: capturedAt,
     }));
     const summary = proposal.summary;
-    await this.repository.commit(initial.revision, (current) => ({
+    await this.repository.commit(initial.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+      return {
       ...current,
       reviews: [...current.reviews, review],
       issues: [...current.issues, ...issues],
@@ -424,21 +453,27 @@ export class ReviewService {
           agent_id: actor,
         },
       }],
-    }));
+      };
+    });
     return { review_id: review.id, issue_ids: review.issue_ids, status: "completed", summary };
   }
 
-  async reevaluate(operationId: string, actor: string): Promise<ReviewExecutionResult> {
+  async reevaluate(operationId: string, actorInput: ExecutionActorInput): Promise<ReviewExecutionResult> {
+    const { auditActor: actor, context: execution } = resolveExecutionActors(actorInput);
+    await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
     const openIssues = initial.issues.filter((issue) => issue.status === "open");
     if (openIssues.length === 0) {
       const summary = "目前沒有待重新評估的 open issue。";
-      await this.repository.commit(initial.revision, (current) => ({
+      await this.repository.commit(initial.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
         ...current,
         operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "completed", result_summary: summary }) : item),
-      }));
+        };
+      });
       return { issue_ids: [], status: "completed", summary };
     }
     const invalidatedIssueOverrides = openIssues
@@ -448,7 +483,9 @@ export class ReviewService {
     const changed = openIssues.filter((issue) => effectiveSeverityForProfile(initial.quality_profile, issue) !== issue.effective_severity);
     const state = await this.repository.read();
     const summary = `已重新評估 ${openIssues.length} 個問題，${changed.length} 個有效嚴重度已更新。`;
-    await this.repository.commit(state.revision, (current) => ({
+    await this.repository.commit(state.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+      return {
       ...current,
       issues: current.issues.map((issue) => {
         if (issue.status !== "open") return issue;
@@ -493,7 +530,8 @@ export class ReviewService {
           },
         },
       ],
-    }));
+      };
+    });
     return { issue_ids: openIssues.map((issue) => issue.id), status: "completed", summary };
   }
 

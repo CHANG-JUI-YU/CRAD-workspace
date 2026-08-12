@@ -378,6 +378,24 @@ describe("high-level agent compatibility layer", () => {
   });
 
   describe("BUG2-07-08 review findings regressions", () => {
+    it("keeps audit actor separate from durable execution agent", async () => {
+      const repository = new MemoryProjectRepository("demo-execution-context-actors");
+      const runtime = new WorkspaceRuntime(repository);
+
+      const result = await runtime.submitTemplateProposal(
+        { kind: "character", document: { schema_version: 1, id: "actor-separation", display_name: "Actor Separation", summary: "Execution context actor separation test." } },
+        { actor: "server-session", attachments: [] },
+        { agent: "director" },
+      );
+
+      const state = await repository.read();
+      const artifact = state.artifacts.find((item) => item.id === result.completed[0]);
+      const createdAudit = state.audit.find((event) => event.event === "template.created");
+      expect(artifact?.created_by).toBe("director");
+      expect(createdAudit?.actor).toBe("server-session");
+      expect(createdAudit?.details).toMatchObject({ agent_id: "director" });
+    });
+
     it("keeps the snapshot execution agent authoritative over options.agent (finding 1)", async () => {
       const repository = new MemoryProjectRepository("demo-snapshot-authoritative");
       const runtime = new WorkspaceRuntime(repository);
