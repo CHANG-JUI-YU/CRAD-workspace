@@ -1,4 +1,4 @@
-import { computeProjectProjection, parseWardrobeMarkdown, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
+import { artifactDependencyFingerprint, computeProjectProjection, parseWardrobeMarkdown, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "./required-artifacts.js";
 import { contradictingAcceptedFacts } from "./knowledge.js";
 
@@ -503,6 +503,21 @@ function reportBlueprintBindings(state: ProjectState, artifacts: ArtifactRecord[
   }
 }
 
+function reportDependencyFingerprints(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[], plan: BuildPlan): void {
+  const planKeys = new Set(plan.entries.map((entry) => entry.key));
+  for (const artifact of artifacts) {
+    if (artifact.dependency_fingerprint === undefined || !planKeys.has(artifact.key)) continue;
+    const expected = artifactDependencyFingerprint(state, artifact);
+    if (expected === artifact.dependency_fingerprint) continue;
+    add(diagnostics, {
+      code: "ARTIFACT_DEPENDENCY_STALE",
+      message: `Artifact ${artifact.name} depends on changed Blueprint, facts, roster, or world inputs; create a new revision before publishing.`,
+      severity: "error",
+      artifact_ids: [artifact.id],
+    });
+  }
+}
+
 export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase, manifestOverride?: RequiredArtifactManifest): WorkflowGateResult {
   const diagnostics: WorkflowDiagnostic[] = [];
   const managed = managedProject(state);
@@ -544,6 +559,7 @@ export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase, 
   reportMissingReferences(state, artifacts, diagnostics, manifest, planIds);
   reportFacts(state, diagnostics);
   reportBlueprintBindings(state, artifacts, diagnostics, plan);
+  reportDependencyFingerprints(state, artifacts, diagnostics, plan);
   reportDerivedLinks(state, artifacts, diagnostics);
   reportBlockingIssues(state, content, diagnostics, manifest, planIds);
   return { ok: diagnostics.length === 0, diagnostics };

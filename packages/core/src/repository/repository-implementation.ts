@@ -47,6 +47,7 @@ import {
   assertTransactionTargetPath,
   characterFolderById,
   characterFolderName,
+  incrementalMaterializationWriteSet,
   isPublicArtifactKind,
   latestStateTimestamp,
   moveToBackup,
@@ -370,7 +371,7 @@ export class FileProjectRepository implements ProjectRepository {
         const resolved = await work(cloneState(current));
         const next = validateState(resolved.state);
         next.revision = current.revision + 1;
-        await this.writeTransactional(next, resolved.writeSet);
+        await this.writeTransactional(next, resolved.writeSet, current);
         result = { revision: next.revision, state: cloneState(next), value: resolved.value };
       });
     });
@@ -524,7 +525,7 @@ export class FileProjectRepository implements ProjectRepository {
     }
   }
 
-  private async writeTransactional(state: ProjectState, writeSet: RepositoryWriteSet = {}): Promise<void> {
+  private async writeTransactional(state: ProjectState, writeSet: RepositoryWriteSet = {}, previousState?: ProjectState): Promise<void> {
     await mkdir(this.projectDirectory, { recursive: true });
     const transactionId = `transaction-${randomUUID()}`;
     const staging = path.join(this.projectDirectory, ".workspace", `.staging-${transactionId}`);
@@ -532,9 +533,21 @@ export class FileProjectRepository implements ProjectRepository {
     const journalPath = path.join(transactionDirectory, "journal.jsonl");
     const files = new Map<string, Uint8Array | string>();
     files.set(normalizeRepositoryPath(path.relative(this.projectDirectory, this.stateFile)), `${canonicalJson(state)}\n`);
-    if (this.materializeEnabled) {
-      for (const file of await this.materializedFiles(state)) files.set(normalizeRepositoryPath(file.path), file.content);
-    }
+    const needsInitialMaterialization = previousState === undefined || !(await pathExists(this.stateFile));
+    const previousPublishPaths = previousState === undefined ? undefined : publishMaterializationPaths(previousState);
+    const currentPublishPaths = publishMaterializationPaths(state);
+    const materializedWriteSet = this.materializeEnabled
+      ? needsInitialMaterialization
+        ? { files: await this.materializedFiles(state), remove: [] as readonly string[] }
+        : await incrementalMaterializationWriteSet(previousState!, state, this.projectDirectory, {
+          readBlob: (hash) => this.blobs.get(hash),
+          publish_paths: {
+            ...(previousPublishPaths === undefined ? {} : { previous: previousPublishPaths }),
+            ...(currentPublishPaths === undefined ? {} : { current: currentPublishPaths }),
+          },
+        })
+      : { files: [], remove: [] as readonly string[] };
+    for (const file of materializedWriteSet.files ?? []) files.set(normalizeRepositoryPath(file.path), file.content);
     for (const file of writeSet.files ?? []) files.set(normalizeRepositoryPath(file.path), file.content);
 
     const entries: RepositoryTransactionJournalEntry[] = [];
@@ -559,7 +572,7 @@ export class FileProjectRepository implements ProjectRepository {
       });
       entryIndex += 1;
     }
-    for (const relativePath of [...(writeSet.remove ?? [])].map(normalizeRepositoryPath)) {
+    for (const relativePath of [...new Set([...(materializedWriteSet.remove ?? []), ...(writeSet.remove ?? [])])].map(normalizeRepositoryPath)) {
       assertTransactionTargetPath(relativePath);
       const targetPath = path.join(this.projectDirectory, relativePath);
       const backupPath = path.join(transactionDirectory, "backups", `${entryIndex}-${safeSegment(path.basename(relativePath))}`);
@@ -1039,6 +1052,19 @@ export class FileProjectRepository implements ProjectRepository {
     if (injection.mode === "crash") throw new RepositoryCrashInjection(point);
     throw new CoreError("INJECTED_FAILURE", `Injected repository failure at ${point}`, true, { point });
   }
+}
+
+function publishMaterializationPaths(state: ProjectState): { json?: string; png?: string } | undefined {
+  const latest = state.publishes.at(-1);
+  if (latest === undefined) return undefined;
+  return {
+    ...(latest.content !== undefined || latest.content_ref !== undefined
+      ? { json: latest.export_json_path ?? publishedCardExportPath(state.project_name, state.project_id, state.artifacts) }
+      : {}),
+    ...(latest.png_base64 !== undefined || latest.png_ref !== undefined
+      ? { png: latest.export_png_path ?? publishedCardPngExportPath(state.project_name, state.project_id, state.artifacts) }
+      : {}),
+  };
 }
 
 class RepositoryCrashInjection extends Error {

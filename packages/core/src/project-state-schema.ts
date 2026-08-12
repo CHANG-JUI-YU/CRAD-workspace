@@ -159,6 +159,7 @@ const artifactSchema = z.object({
   based_on: z.string().optional(),
   blueprint_precheck_id: z.string().min(1).optional(),
   blueprint_precheck_revision: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  dependency_fingerprint: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
 }).strict();
 
 const imageSchema = z.object({

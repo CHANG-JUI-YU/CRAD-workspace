@@ -13,6 +13,7 @@ export * from "./project-state.js";
 export * from "./operations.js";
 export * from "./project-projection.js";
 export * from "./project-state-schema.js";
+export * from "./artifact-fingerprint.js";
 export * from "./repository/project-repository.js";
 export { MemoryProjectRepository } from "./repository/memory-project-repository.js";
 export { FileProjectRepository } from "./repository/file-project-repository.js";

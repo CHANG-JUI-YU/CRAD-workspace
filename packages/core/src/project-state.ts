@@ -296,6 +296,8 @@ export interface ArtifactRecord {
   based_on?: string;
   blueprint_precheck_id?: string;
   blueprint_precheck_revision?: string;
+  /** Hash of the external inputs this revision was authored against. */
+  dependency_fingerprint?: string;
 }
 
 export interface ImageRecord {
@@ -496,8 +498,9 @@ export function backfillLegacyFactReviewHistory(state: ProjectState): ProjectSta
 export function validateState(state: ProjectState): ProjectState {
   const parsed = projectStateSchema.safeParse(state);
   if (!parsed.success) throw new CoreError("STATE_INVALID", parsed.error.message);
-  return backfillLegacyFactReviewHistory(parsed.data as unknown as ProjectState);
+  return backfillArtifactDependencyFingerprints(backfillLegacyFactReviewHistory(parsed.data as unknown as ProjectState));
 }
 
 // Imported at the bottom to keep the state model independent from schema construction.
 import { projectStateSchema } from "./project-state-schema.js";
+import { backfillArtifactDependencyFingerprints } from "./artifact-fingerprint.js";
