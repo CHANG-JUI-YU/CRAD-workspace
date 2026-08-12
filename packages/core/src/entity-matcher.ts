@@ -1,5 +1,5 @@
 import { computeProjectProjection } from "./project-projection.js";
-import type { ProjectState } from "./project-state.js";
+import type { FactRecord, ProjectState } from "./project-state.js";
 
 export interface BlueprintEntity {
   id: string;
@@ -18,6 +18,8 @@ export interface EntityMatcher {
   candidates(value: string): readonly EntityMatch[];
   resolve(value: string): EntityMatch | undefined;
 }
+
+export type EntityReferencingFact = Pick<FactRecord, "subject" | "entity_refs">;
 
 export function normalizeEntityReference(value: string): string {
   return value.normalize("NFKC").trim().toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
@@ -53,4 +55,50 @@ export function createEntityMatcher(state: ProjectState): EntityMatcher {
       return matches.length === 1 ? matches[0] : undefined;
     },
   };
+}
+
+/**
+ * Resolve one persisted entity reference to its stable Blueprint id.
+ *
+ * Unknown values are retained for legacy states that have no Blueprint entity
+ * index yet. Ambiguous labels/aliases are intentionally not resolved.
+ */
+export function canonicalEntityReference(matcher: EntityMatcher, value: string): string | undefined {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  const matches = matcher.candidates(trimmed);
+  if (matches.length > 1) return undefined;
+  return matches[0]?.id ?? trimmed;
+}
+
+/** Resolve a list of ids, labels and aliases to stable ids where possible. */
+export function resolveEntityReferences(matcher: EntityMatcher, values: readonly string[]): string[] {
+  return [...new Set(values.flatMap((value) => {
+    const resolved = canonicalEntityReference(matcher, value);
+    return resolved === undefined ? [] : [resolved];
+  }))];
+}
+
+/**
+ * Return all entities referred to by a fact. Both legacy `subject` values and
+ * typed `entity_refs` participate, so old and new fact records share one
+ * matching rule.
+ */
+export function factEntityReferences(fact: EntityReferencingFact, matcher: EntityMatcher): string[] {
+  return resolveEntityReferences(matcher, [
+    ...(fact.subject === undefined ? [] : [fact.subject]),
+    ...(fact.entity_refs ?? []),
+  ]);
+}
+
+export function factReferencesEntity(fact: EntityReferencingFact, matcher: EntityMatcher, entity: string): boolean {
+  const target = canonicalEntityReference(matcher, entity);
+  if (target === undefined) return false;
+  return factEntityReferences(fact, matcher).includes(target);
+}
+
+export function factReferencesAnyEntity(fact: EntityReferencingFact, matcher: EntityMatcher, entities: readonly string[]): boolean {
+  const targets = new Set(resolveEntityReferences(matcher, entities));
+  if (targets.size === 0) return false;
+  return factEntityReferences(fact, matcher).some((entity) => targets.has(entity));
 }

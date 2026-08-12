@@ -1,7 +1,8 @@
 import { canonicalJson, contentHash } from "./core-utilities.js";
+import { canonicalEntityReference, createEntityMatcher, factReferencesAnyEntity, resolveEntityReferences, type EntityMatcher } from "./entity-matcher.js";
 import type { ArtifactRecord, FactRecord, ProjectState } from "./project-state.js";
 
-export const ARTIFACT_DEPENDENCY_FINGERPRINT_VERSION = 1;
+export const ARTIFACT_DEPENDENCY_FINGERPRINT_VERSION = 2;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -14,7 +15,7 @@ function parseArtifact(artifact: ArtifactRecord): Record<string, unknown> | unde
 function stringValue(value: unknown): string | undefined { return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined; }
 
 function stringValues(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()) : [];
 }
 
 function modeCharacterId(artifact: ArtifactRecord): string | undefined {
@@ -22,9 +23,10 @@ function modeCharacterId(artifact: ArtifactRecord): string | undefined {
   return stringValue(parsed?.character_id) ?? stringValue(record(parsed?.module)?.character_id) ?? stringValue(artifact.name.split("/")[0]);
 }
 
-function artifactCharacterId(artifact: ArtifactRecord): string | undefined {
+function artifactCharacterId(artifact: ArtifactRecord, matcher: EntityMatcher): string | undefined {
   const parsed = parseArtifact(artifact);
-  return stringValue(record(parsed?.document)?.id) ?? modeCharacterId(artifact);
+  const raw = stringValue(record(parsed?.document)?.id) ?? modeCharacterId(artifact);
+  return raw === undefined ? undefined : canonicalEntityReference(matcher, raw);
 }
 
 function latestBlueprint(state: ProjectState): Record<string, unknown> | undefined {
@@ -43,7 +45,7 @@ function blueprintCharacterSlice(blueprint: Record<string, unknown> | undefined,
   return { character_id: characterId, entries: selected };
 }
 
-function factSlice(state: ProjectState, predicate: (fact: FactRecord) => boolean): unknown[] {
+function factSlice(state: ProjectState, matcher: EntityMatcher, predicate: (fact: FactRecord) => boolean): unknown[] {
   return state.facts.filter((fact) => fact.status === "accepted" && predicate(fact)).map((fact) => ({
     id: fact.id,
     fact_revision: fact.fact_revision,
@@ -58,9 +60,20 @@ function factSlice(state: ProjectState, predicate: (fact: FactRecord) => boolean
   })).sort((left, right) => left.id.localeCompare(right.id));
 }
 
-function relationshipParticipants(artifact: ArtifactRecord): string[] {
-  const document = record(parseArtifact(artifact)?.document) ?? parseArtifact(artifact);
-  return stringValues(document?.character_ids).sort();
+function artifactDocument(artifact: ArtifactRecord): Record<string, unknown> | undefined {
+  const parsed = parseArtifact(artifact);
+  return record(parsed?.document) ?? parsed;
+}
+
+function relationshipParticipants(artifact: ArtifactRecord, matcher: EntityMatcher): string[] {
+  return resolveEntityReferences(matcher, stringValues(artifactDocument(artifact)?.character_ids)).sort();
+}
+
+function greetingParticipants(artifact: ArtifactRecord, matcher: EntityMatcher): string[] {
+  const greetings = artifactDocument(artifact)?.greetings;
+  if (!Array.isArray(greetings)) return [];
+  const rawParticipants = greetings.flatMap((greeting) => stringValues(record(greeting)?.character_ids));
+  return resolveEntityReferences(matcher, rawParticipants).sort();
 }
 
 /**
@@ -69,9 +82,12 @@ function relationshipParticipants(artifact: ArtifactRecord): string[] {
  * new fingerprint for the dependencies it consumed.
  */
 export function artifactDependencyFingerprint(state: ProjectState, artifact: ArtifactRecord): string {
+  const matcher = createEntityMatcher(state);
   const blueprint = latestBlueprint(state);
-  const characterId = artifactCharacterId(artifact);
-  const participants = relationshipParticipants(artifact);
+  const characterId = artifactCharacterId(artifact, matcher);
+  const participants = artifact.kind === "greeting"
+    ? greetingParticipants(artifact, matcher)
+    : relationshipParticipants(artifact, matcher);
   const payload: Record<string, unknown> = {
     version: ARTIFACT_DEPENDENCY_FINGERPRINT_VERSION,
     kind: artifact.kind,
@@ -81,19 +97,24 @@ export function artifactDependencyFingerprint(state: ProjectState, artifact: Art
     payload.blueprint = parseArtifact(artifact);
   } else if (artifact.kind === "character" || artifact.kind === "zhuji" || artifact.kind === "palette" || artifact.kind === "wardrobe") {
     payload.blueprint = blueprintCharacterSlice(blueprint, characterId);
-    payload.facts = factSlice(state, (fact) => fact.subject === characterId || fact.entity_refs?.includes(characterId ?? "") === true || (characterId !== undefined && fact.coverage?.includes(characterId) === true));
+    payload.facts = factSlice(state, matcher, (fact) => characterId !== undefined && factReferencesAnyEntity(fact, matcher, [characterId]));
     payload.character_id = characterId;
   } else if (artifact.kind === "world_lore") {
     payload.world = parseArtifact(artifact)?.document ?? parseArtifact(artifact)?.entries;
-    payload.facts = factSlice(state, (fact) => fact.classification === "world" || fact.coverage?.includes("world_context") === true);
+    payload.facts = factSlice(state, matcher, (fact) => fact.classification === "world" || fact.coverage?.includes("world_context") === true);
   } else if (artifact.kind === "relationship") {
     payload.participants = participants;
-    payload.facts = factSlice(state, (fact) => fact.classification === "relationship" && (fact.subject === undefined || participants.includes(fact.subject) || (fact.entity_refs ?? []).some((id) => participants.includes(id))));
+    payload.facts = factSlice(state, matcher, (fact) => fact.classification === "relationship" && (
+      factReferencesAnyEntity(fact, matcher, participants)
+      || (fact.subject === undefined && (fact.entity_refs ?? []).length === 0)
+    ));
   } else if (artifact.kind === "greeting") {
-    const primary = stringValue(record(blueprint?.primary_character)?.id) ?? stringValue(blueprint?.primary_character_id);
+    const rawPrimary = stringValue(record(blueprint?.primary_character)?.id) ?? stringValue(blueprint?.primary_character_id);
+    const primary = rawPrimary === undefined ? undefined : canonicalEntityReference(matcher, rawPrimary);
     payload.primary_character_id = primary;
     payload.participants = participants;
     payload.blueprint = blueprintCharacterSlice(blueprint, primary);
+    payload.facts = factSlice(state, matcher, (fact) => factReferencesAnyEntity(fact, matcher, participants));
   } else {
     payload.blueprint_revision = contentHash(canonicalJson(blueprint ?? {}));
   }

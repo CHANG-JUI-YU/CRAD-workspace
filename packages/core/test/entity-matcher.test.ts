@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contentHash, createEntityMatcher, createProjectState, validateState, type ArtifactRecord, type FactRecord } from "../src/index.js";
+import { contentHash, createEntityMatcher, createProjectState, factEntityReferences, factReferencesAnyEntity, validateState, type ArtifactRecord, type FactRecord } from "../src/index.js";
 
 function blueprintArtifact(projectId: string): ArtifactRecord {
   const content = JSON.stringify({
@@ -59,5 +59,41 @@ describe("Blueprint entity matcher", () => {
     };
     state.facts = [legacyFact];
     expect(validateState(state).facts[0]?.entity_refs).toEqual([]);
+  });
+
+  it("resolves fact ids, labels, aliases and legacy subjects through one semantic helper", () => {
+    const state = createProjectState("fact-entity-semantics");
+    const content = JSON.stringify({
+      kind: "blueprint",
+      flow: "source_adaptation",
+      characters: [{ id: "c02", label: "Alice", aliases: ["Alicia"] }],
+    });
+    const hash = contentHash(content);
+    state.artifacts = [{
+      id: "blueprint-fact-entities",
+      key: `blueprint:${state.project_id}`,
+      kind: "blueprint",
+      name: "project-blueprint",
+      content,
+      media_type: "application/json",
+      content_hash: hash,
+      revision: hash,
+      status: "draft",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      created_by: "director",
+      operation_id: "interview",
+    }];
+    const matcher = createEntityMatcher(state);
+    const facts: FactRecord[] = [
+      { id: "fact-id", statement: "c02 is calm", subject: "c02", status: "candidate", confidence: 1, source_ids: [], evidence: [], created_at: "now", updated_at: "now", created_by: "test" },
+      { id: "fact-label", statement: "Alice is calm", subject: "Alice", status: "candidate", confidence: 1, source_ids: [], evidence: [], created_at: "now", updated_at: "now", created_by: "test" },
+      { id: "fact-alias", statement: "Alicia is calm", subject: "Alicia", status: "candidate", confidence: 1, source_ids: [], evidence: [], created_at: "now", updated_at: "now", created_by: "test" },
+      { id: "fact-ref", statement: "typed entity is calm", entity_refs: ["c02"], status: "candidate", confidence: 1, source_ids: [], evidence: [], created_at: "now", updated_at: "now", created_by: "test" },
+    ];
+    for (const fact of facts) {
+      expect(factReferencesAnyEntity(fact, matcher, ["c02"])).toBe(true);
+      expect(factEntityReferences(fact, matcher)).toEqual(["c02"]);
+    }
   });
 });
