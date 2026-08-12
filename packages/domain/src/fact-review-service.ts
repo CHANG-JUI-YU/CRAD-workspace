@@ -2,6 +2,7 @@ import {
   contentHash,
   canonicalJson,
   internalId,
+  CoreError,
   type FactClassification,
   type FactEvidenceReference,
   type FactRecord,
@@ -44,22 +45,120 @@ export interface FactReviewContextPage {
   next_cursor?: string;
 }
 
+const FACT_REVIEW_CURSOR_VERSION = 1;
+
+interface FactReviewCursorPayload {
+  v: 1;
+  run?: string;
+  set: string;
+  source?: string;
+  classification?: string;
+  after?: string;
+}
+
+function encodeFactReviewCursor(payload: FactReviewCursorPayload): string {
+  return `fr:${FACT_REVIEW_CURSOR_VERSION}:${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
+}
+
+function decodeFactReviewCursor(raw: string): FactReviewCursorPayload | undefined {
+  const parts = raw.split(":");
+  if (parts.length !== 3 || parts[0] !== "fr" || parts[1] !== `${FACT_REVIEW_CURSOR_VERSION}`) return undefined;
+  try {
+    const value: unknown = JSON.parse(Buffer.from(parts[2] ?? "", "base64url").toString("utf8"));
+    if (typeof value !== "object" || value === null) return undefined;
+    const record = value as Record<string, unknown>;
+    if (record.v !== FACT_REVIEW_CURSOR_VERSION || typeof record.set !== "string" || record.set.length === 0) return undefined;
+    if (record.run !== undefined && typeof record.run !== "string") return undefined;
+    if (record.source !== undefined && typeof record.source !== "string") return undefined;
+    if (record.classification !== undefined && typeof record.classification !== "string") return undefined;
+    if (record.after !== undefined && typeof record.after !== "string") return undefined;
+    return {
+      v: FACT_REVIEW_CURSOR_VERSION,
+      set: record.set,
+      ...(record.run === undefined ? {} : { run: record.run }),
+      ...(record.source === undefined ? {} : { source: record.source }),
+      ...(record.classification === undefined ? {} : { classification: record.classification }),
+      ...(record.after === undefined ? {} : { after: record.after }),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function hasTerminalDecision(state: ProjectState, run: FactReviewRunRecord, occurrenceId: string): boolean {
+  const decision = latestDecisionForOccurrence(state.fact_review_decisions, run.id, occurrenceId);
+  return decision?.decision === "accepted" || decision?.decision === "rejected";
+}
+
+/**
+ * Occurrence ids whose candidate content no longer matches the revision
+ * snapshot captured when the run was created. Already settled occurrences
+ * (accepted/rejected) are intentionally excluded: their resulting fact
+ * revision change must not stale the whole run.
+ */
+export function unresolvedRevisionMismatch(state: ProjectState, run: FactReviewRunRecord): string[] {
+  const mismatched: string[] = [];
+  for (const occurrenceId of run.candidate_occurrence_ids) {
+    if (hasTerminalDecision(state, run, occurrenceId)) continue;
+    if (latestDecisionForOccurrence(state.fact_review_decisions, run.id, occurrenceId) !== undefined) continue;
+    const fact = state.facts.find((item) => candidateOccurrenceForFact(item) === occurrenceId);
+    if (fact === undefined) {
+      mismatched.push(occurrenceId);
+      continue;
+    }
+    const snapshot = run.candidate_revisions?.[occurrenceId];
+    if (snapshot === undefined || snapshot !== factCandidateRevision(fact, state.sources)) mismatched.push(occurrenceId);
+  }
+  return mismatched;
+}
+
 export function buildFactReviewContext(state: ProjectState, options: FactReviewContextOptions = {}): FactReviewContextPage {
   const run = [...state.fact_review_runs].reverse().find((candidate) => candidate.status === "open" || candidate.status === "blocked");
-  const occurrenceIds = run?.candidate_occurrence_ids ?? state.facts.filter((fact) => fact.status === "candidate").map(candidateOccurrenceForFact);
-  const candidates = occurrenceIds.flatMap((occurrenceId): FactReviewCandidateView[] => {
+  if (run !== undefined && unresolvedRevisionMismatch(state, run).length > 0) {
+    throw new CoreError("FACT_REVIEW_RUN_STALE", `Review run ${run.id} no longer matches the current fact candidates; start a new review run.`, true);
+  }
+  const occurrenceBase = run?.candidate_occurrence_ids ?? state.facts.filter((fact) => fact.status === "candidate").map(candidateOccurrenceForFact).sort();
+  const cursor = options.cursor === undefined ? undefined : decodeFactReviewCursor(options.cursor);
+  if (options.cursor !== undefined && cursor === undefined) {
+    throw new CoreError("FACT_REVIEW_CURSOR_INVALID", "The review cursor is not a valid opaque cursor; discard it and start from the first page.", true);
+  }
+  if (cursor !== undefined) {
+    if (cursor.run !== run?.id) {
+      throw new CoreError("FACT_REVIEW_CURSOR_STALE", "The review cursor belongs to a different or superseded review run; discard it and start from the first page.", true);
+    }
+    if (cursor.set !== (run?.candidate_set_revision ?? "none")) {
+      throw new CoreError("FACT_REVIEW_CURSOR_STALE", "The review cursor was issued against a different candidate set; discard it and start from the first page.", true);
+    }
+    if (cursor.source !== options.source_id || cursor.classification !== options.classification) {
+      throw new CoreError("FACT_REVIEW_CURSOR_INVALID", "The review cursor does not match the requested filters; discard it and start from the first page.", true);
+    }
+  }
+  let startIndex = 0;
+  if (cursor?.after !== undefined) {
+    const afterIndex = occurrenceBase.indexOf(cursor.after);
+    if (afterIndex < 0) {
+      throw new CoreError("FACT_REVIEW_CURSOR_STALE", "The review cursor points past the current candidate set; discard it and start from the first page.", true);
+    }
+    startIndex = afterIndex + 1;
+  }
+  const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
+  const page: FactReviewCandidateView[] = [];
+  let lastScanned: string | undefined = cursor?.after;
+  for (let index = startIndex; index < occurrenceBase.length && page.length < limit; index += 1) {
+    const occurrenceId = occurrenceBase[index]!;
+    lastScanned = occurrenceId;
     const fact = state.facts.find((item) => candidateOccurrenceForFact(item) === occurrenceId);
-    if (fact === undefined) return [];
-    if (options.source_id !== undefined && !fact.source_ids.includes(options.source_id)) return [];
-    if (options.classification !== undefined && fact.classification !== options.classification) return [];
+    if (fact === undefined) continue;
+    if (options.source_id !== undefined && !fact.source_ids.includes(options.source_id)) continue;
+    if (options.classification !== undefined && fact.classification !== options.classification) continue;
     const lastDecision = run === undefined ? undefined : latestDecisionForOccurrence(state.fact_review_decisions, run.id, occurrenceId);
-    if (lastDecision?.decision === "accepted" || lastDecision?.decision === "rejected") return [];
+    if (lastDecision?.decision === "accepted" || lastDecision?.decision === "rejected") continue;
     const evidenceRefs = (fact.evidence_refs ?? []).map((reference) => {
       if (reference.chunk_id !== undefined) return reference;
       const chunk = state.knowledge_chunks.find((candidate) => candidate.source_id === reference.source_id && candidate.text.includes(reference.quote));
       return chunk === undefined ? reference : { ...reference, chunk_id: chunk.id, chunk_hash: chunk.hash };
     });
-    return [{
+    page.push({
       candidate_occurrence_id: occurrenceId,
       fact_id: fact.id,
       statement: fact.statement,
@@ -74,17 +173,24 @@ export function buildFactReviewContext(state: ProjectState, options: FactReviewC
       ...(evidenceRefs.length === 0 ? {} : { evidence_refs: evidenceRefs }),
       candidate_revision: factCandidateRevision(fact, state.sources),
       ...(lastDecision === undefined ? {} : { last_decision: lastDecision.decision, last_reviewer_identity: lastDecision.reviewer_identity }),
-    }];
-  });
-  const cursorIndex = options.cursor === undefined ? 0 : Number.parseInt(options.cursor.replace(/^index:/u, ""), 10);
-  const effectiveCursor = Number.isFinite(cursorIndex) && cursorIndex >= 0 ? cursorIndex : 0;
-  const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
-  const page = candidates.slice(effectiveCursor, effectiveCursor + limit);
-  const nextCursor = effectiveCursor + page.length < candidates.length ? `index:${effectiveCursor + page.length}` : undefined;
+    });
+  }
+  const hasMore = lastScanned !== undefined && occurrenceBase.indexOf(lastScanned) + 1 < occurrenceBase.length;
   const base: FactReviewContextPage = run === undefined
     ? { candidates: page }
     : { run, projection_revision: reviewProjectionRevision(state, run.id), candidates: page };
-  return nextCursor === undefined ? base : { ...base, next_cursor: nextCursor };
+  if (!hasMore) return base;
+  return {
+    ...base,
+    next_cursor: encodeFactReviewCursor({
+      v: FACT_REVIEW_CURSOR_VERSION,
+      ...(run === undefined ? {} : { run: run.id }),
+      set: run?.candidate_set_revision ?? "none",
+      ...(options.source_id === undefined ? {} : { source: options.source_id }),
+      ...(options.classification === undefined ? {} : { classification: options.classification }),
+      ...(lastScanned === undefined ? {} : { after: lastScanned }),
+    }),
+  };
 }
 
 export function reviewProjectionRevision(state: ProjectState, runId: string): string {
@@ -118,6 +224,7 @@ export function prepareFactReviewRun(state: ProjectState, actor: string, curatio
       if (settledDecisions.length === 0) return false;
     }
     if (!candidateOccurrenceIds.every((occurrenceId) => run.candidate_occurrence_ids.includes(occurrenceId))) return false;
+    if (unresolvedRevisionMismatch(state, run).length > 0) return false;
     return run.source_revisions.every((sourceRevision) => state.sources.some((source) => source.id === sourceRevision.source_id && source.revision === sourceRevision.revision));
   });
   if (openRun !== undefined) return { run: openRun, supersede_run_ids: [], ...(inferredCurationRunId === undefined ? {} : { inferred_curation_run_id: inferredCurationRunId }) };
@@ -136,6 +243,7 @@ export function prepareFactReviewRun(state: ProjectState, actor: string, curatio
     candidate_set_revision: candidateSetRevision,
     candidate_occurrence_ids: candidateOccurrenceIds,
     source_revisions: sourceRevisions,
+    candidate_revisions: Object.fromEntries(pending.map((fact) => [candidateOccurrenceForFact(fact), factCandidateRevision(fact, state.sources)] as const)),
     policy_revision: FACT_REVIEW_POLICY_REVISION,
     status: "open",
     created_by: actor,

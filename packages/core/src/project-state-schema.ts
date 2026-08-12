@@ -107,6 +107,7 @@ const factReviewRunSchema = z.object({
   candidate_occurrence_ids: z.array(z.string().min(1)),
   source_revisions: z.array(z.object({ source_id: z.string().min(1), revision: z.string().min(1) }).strict()),
   policy_revision: z.string().min(1),
+  candidate_revisions: z.record(z.string(), z.string().min(1)).optional(),
   status: z.enum(["open", "blocked", "completed", "superseded"]),
   created_by: z.string().min(1),
   created_at: z.string().datetime({ offset: true }),

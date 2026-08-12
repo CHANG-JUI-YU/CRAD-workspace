@@ -80,6 +80,7 @@ export function factCandidateRevision(fact: FactRecord, sources: readonly Source
     source_ids: fact.source_ids,
     source_revisions: sources.filter((source) => fact.source_ids.includes(source.id)).map((source) => ({ id: source.id, revision: source.revision })),
     evidence: fact.evidence,
+    evidence_refs: fact.evidence_refs,
     evidence_revision: fact.evidence_revision,
   }));
 }

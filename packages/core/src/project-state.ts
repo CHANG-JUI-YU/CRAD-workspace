@@ -253,6 +253,8 @@ export interface FactReviewRunRecord {
   candidate_occurrence_ids: string[];
   source_revisions: FactReviewSourceRevision[];
   policy_revision: string;
+  /** Per-occurrence candidate revision snapshot captured when the run was created. */
+  candidate_revisions?: Record<string, string>;
   status: FactReviewRunStatus;
   created_by: string;
   created_at: string;

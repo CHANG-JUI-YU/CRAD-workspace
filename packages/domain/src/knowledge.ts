@@ -48,7 +48,7 @@ import {
   mergeFactCandidates,
 } from "./fact-candidate-store.js";
 import { buildCurationCandidateBatch, curationRunIdForOperation } from "./fact-curation-service.js";
-import { buildFactReviewContext, prepareFactReviewRun, reviewProjectionRevision, type FactReviewContextOptions } from "./fact-review-service.js";
+import { buildFactReviewContext, prepareFactReviewRun, reviewProjectionRevision, unresolvedRevisionMismatch, type FactReviewContextOptions } from "./fact-review-service.js";
 import { applyLegacyFactReview } from "./fact-review-legacy-adapter.js";
 
 export interface KnowledgeExecutionResult {
@@ -222,21 +222,6 @@ function candidateOccurrenceForFact(fact: FactRecord): string {
 
 function sourceRevisionFor(source: SourceRecord): FactEvidenceReference {
   return { source_id: source.id, source_revision_id: source.revision, quote: source.title };
-}
-
-function factCandidateRevision(fact: FactRecord, sources: readonly SourceRecord[]): string {
-  return contentHash(canonicalJson({
-    candidate_occurrence_id: candidateOccurrenceForFact(fact),
-    statement: fact.statement,
-    subject: fact.subject,
-    predicate: fact.predicate,
-    value: fact.value,
-    classification: fact.classification,
-    coverage: fact.coverage,
-    source_ids: fact.source_ids,
-    source_revisions: sources.filter((source) => fact.source_ids.includes(source.id)).map((source) => ({ id: source.id, revision: source.revision })),
-    evidence: fact.evidence,
-  }));
 }
 
 export function reviewRunProjectionRevision(state: { facts: readonly FactRecord[]; fact_review_decisions: readonly FactReviewDecisionRecord[]; fact_review_runs?: readonly FactReviewRunRecord[] }, runId: string): string {
@@ -605,13 +590,14 @@ export class KnowledgeService {
         if (settledDecisions.length === 0) return false;
       }
       if (!candidateOccurrenceIds.every((occurrenceId) => run.candidate_occurrence_ids.includes(occurrenceId))) return false;
+      if (unresolvedRevisionMismatch(initial, run).length > 0) return false;
       return run.source_revisions.every((sourceRevision) => initial.sources.some((source) => source.id === sourceRevision.source_id && source.revision === sourceRevision.revision));
     });
     if (openRun !== undefined) return openRun;
     if (pending.length === 0) throw new CoreError("FACT_REVIEW_NO_CANDIDATES", "No fact candidates are available for review.", true);
     const candidateSetRevision = contentHash(canonicalJson({
       curation_run_id: inferredCurationRunId,
-      candidates: pending.map((fact) => ({ id: candidateOccurrenceForFact(fact), revision: factCandidateRevision(fact, initial.sources) })).sort((left, right) => left.id.localeCompare(right.id)),
+      candidates: pending.map((fact) => ({ id: candidateOccurrenceForFact(fact), revision: pipelineFactCandidateRevision(fact, initial.sources) })).sort((left, right) => left.id.localeCompare(right.id)),
       source_revisions: sourceRevisions,
     }));
     const existing = initial.fact_review_runs.find((run) =>
@@ -626,6 +612,7 @@ export class KnowledgeService {
       candidate_set_revision: candidateSetRevision,
       candidate_occurrence_ids: candidateOccurrenceIds,
       source_revisions: sourceRevisions,
+      candidate_revisions: Object.fromEntries(pending.map((fact) => [candidateOccurrenceForFact(fact), pipelineFactCandidateRevision(fact, initial.sources)] as const)),
       policy_revision: FACT_REVIEW_POLICY_REVISION,
       status: "open",
       created_by: actor,
@@ -695,7 +682,7 @@ export class KnowledgeService {
         source_ids: fact.source_ids,
         evidence: fact.evidence,
         ...(evidenceRefs.length === 0 ? {} : { evidence_refs: evidenceRefs }),
-        candidate_revision: factCandidateRevision(fact, state.sources),
+        candidate_revision: pipelineFactCandidateRevision(fact, state.sources),
         ...(lastDecision === undefined ? {} : { last_decision: lastDecision.decision, last_reviewer_identity: lastDecision.reviewer_identity }),
       }];
     });
@@ -754,12 +741,16 @@ export class KnowledgeService {
         throw new CoreError("FACT_CANDIDATE_NOT_ACTIVE", `Candidate ${occurrenceId ?? decision.claim} is not active in review run ${run.id}.`, true);
       }
       const targetOccurrenceId = candidateOccurrenceForFact(target);
-      const currentCandidateRevision = factCandidateRevision(target, initial.sources);
+      const currentCandidateRevision = pipelineFactCandidateRevision(target, initial.sources);
       if (targetIds.includes(target.id)) throw new CoreError("FACT_REVIEW_TARGET_DUPLICATE", `Fact ${target.id} appears more than once in this review.`, true);
       const previousDecision = latestDecisionForOccurrence(initial.fact_review_decisions, run.id, targetOccurrenceId);
       if (previousDecision?.decision === "accepted" || previousDecision?.decision === "rejected") {
         skippedCount += 1;
         continue;
+      }
+      const snapshotRevision = run.candidate_revisions?.[targetOccurrenceId];
+      if (previousDecision === undefined && (snapshotRevision === undefined || snapshotRevision !== currentCandidateRevision)) {
+        throw new CoreError("FACT_REVIEW_CANDIDATE_STALE", `Candidate ${targetOccurrenceId} changed since review run ${run.id} was created; reload the candidate and retry.`, true);
       }
       if (previousDecision?.decision === "conflict" && reviewerIdentity !== "director") {
         throw new CoreError("FACT_REVIEW_CONFLICT_DIRECTOR_REQUIRED", `Candidate ${targetOccurrenceId} is in conflict and requires Director resolution.`, true);
@@ -838,7 +829,7 @@ export class KnowledgeService {
               ...fact,
               status: update.record.decision === "accepted" ? "accepted" : update.record.decision === "rejected" ? "rejected" : update.record.decision === "conflict" ? "conflict" : "candidate",
               evidence: [...new Set([...fact.evidence, ...addedEvidence])],
-              evidence_refs: [...(fact.evidence_refs ?? []), ...update.evidence],
+              ...(update.evidence.length > 0 ? { evidence_refs: [...(fact.evidence_refs ?? []), ...update.evidence] } : {}),
               ...(update.coverage.length > 0 ? { coverage: update.coverage } : {}),
               fact_revision: (fact.fact_revision ?? 0) + 1,
               candidate_occurrence_id: candidateOccurrenceForFact(fact),
@@ -846,7 +837,9 @@ export class KnowledgeService {
               decision_id: update.record.id,
               updated_at: now(),
             };
-            const withEvidenceRevision: FactRecord = { ...nextFact, evidence_revision: evidenceRevision(nextFact, current.sources) };
+            const withEvidenceRevision: FactRecord = addedEvidence.length > 0 || update.evidence.length > 0
+              ? { ...nextFact, evidence_revision: evidenceRevision(nextFact, current.sources) }
+              : nextFact;
             if (update.record.decision === "accepted") return { ...withEvidenceRevision, accepted_fact_revision: acceptedFactRevision(withEvidenceRevision) };
             const { accepted_fact_revision: _acceptedRevision, ...withoutAcceptedRevision } = withEvidenceRevision;
             return withoutAcceptedRevision;

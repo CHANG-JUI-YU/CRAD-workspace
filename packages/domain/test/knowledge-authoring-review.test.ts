@@ -805,7 +805,7 @@ describe("knowledge, authoring and review services", () => {
       const service = new KnowledgeService(repository);
       const page1 = await service.factReviewContext({ limit: 2 });
       expect(page1.candidates).toHaveLength(2);
-      expect(page1.next_cursor).toBe("index:2");
+      expect(page1.next_cursor).toBeDefined();
       const page2 = await service.factReviewContext({ cursor: page1.next_cursor });
       expect(page2.candidates).toHaveLength(1);
       expect(page2.next_cursor).toBeUndefined();
