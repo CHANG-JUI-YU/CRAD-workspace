@@ -78,7 +78,10 @@ const factSchema = z.object({
     locator: z.string().min(1).optional(),
   }).strict()).default([]),
   fact_revision: z.number().int().positive().optional(),
+  evidence_revision: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  accepted_fact_revision: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   candidate_occurrence_id: z.string().min(1).optional(),
+  curation_run_id: z.string().min(1).optional(),
   review_run_id: z.string().min(1).optional(),
   decision_id: z.string().min(1).optional(),
   created_at: z.string().datetime({ offset: true }),
@@ -108,6 +111,7 @@ const factReviewRunSchema = z.object({
   created_by: z.string().min(1),
   created_at: z.string().datetime({ offset: true }),
   completed_at: z.string().datetime({ offset: true }).optional(),
+  successor_run_id: z.string().min(1).optional(),
 }).strict();
 
 const factReviewDecisionRecordSchema = z.object({

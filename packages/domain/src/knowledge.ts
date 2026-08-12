@@ -18,6 +18,38 @@ import {
   type SourceRecord,
 } from "@st-workspace/core";
 import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
+import {
+  KNOWLEDGE_EXTRACTOR_REVISION as PIPELINE_EXTRACTOR_REVISION,
+  chunkSource,
+  sentenceCandidates as pipelineSentenceCandidates,
+  splitIntoChunks as pipelineSplitIntoChunks,
+} from "./source-chunking.js";
+import {
+  FACT_REVIEW_POLICY_REVISION as PIPELINE_FACT_REVIEW_POLICY_REVISION,
+  GENERIC_PREDICATES as PIPELINE_GENERIC_PREDICATES,
+  acceptedFactRevision,
+  assertStrictFactQuality as assertPipelineFactQuality,
+  contradictingAcceptedFacts as pipelineContradictingAcceptedFacts,
+  evidenceRevision,
+  evidenceText as pipelineEvidenceText,
+  factCandidateRevision as pipelineFactCandidateRevision,
+  strictEvidenceReferences as pipelineStrictEvidenceReferences,
+} from "./fact-policy.js";
+import {
+  candidateOccurrenceForFact as pipelineCandidateOccurrenceForFact,
+  factKey as pipelineFactKey,
+  latestDecisionForOccurrence as pipelineLatestDecisionForOccurrence,
+  mergeFactEvidence as pipelineMergeFactEvidence,
+  reviewRunProjectionRevision as pipelineReviewRunProjectionRevision,
+} from "./fact-projection.js";
+import {
+  claimToFact as pipelineClaimToFact,
+  factFromSentence as pipelineFactFromSentence,
+  mergeFactCandidates,
+} from "./fact-candidate-store.js";
+import { buildCurationCandidateBatch, curationRunIdForOperation } from "./fact-curation-service.js";
+import { buildFactReviewContext, prepareFactReviewRun, reviewProjectionRevision, type FactReviewContextOptions } from "./fact-review-service.js";
+import { applyLegacyFactReview } from "./fact-review-legacy-adapter.js";
 
 export interface KnowledgeExecutionResult {
   chunks: string[];
@@ -26,8 +58,8 @@ export interface KnowledgeExecutionResult {
   summary: string;
 }
 
-/** Version tag stamped on every chunk produced by the built-in extractor. */
-export const KNOWLEDGE_EXTRACTOR_REVISION = "extractor-v1";
+/** Compatibility export; extraction implementation lives in source-chunking.ts. */
+export const KNOWLEDGE_EXTRACTOR_REVISION = PIPELINE_EXTRACTOR_REVISION;
 
 export interface FactReviewExecutionResult {
   fact_ids: string[];
@@ -41,7 +73,7 @@ export interface FactReviewRunExecutionResult {
   summary: string;
 }
 
-const FACT_REVIEW_POLICY_REVISION = contentHash("fact-review-strict-v1");
+const FACT_REVIEW_POLICY_REVISION = PIPELINE_FACT_REVIEW_POLICY_REVISION;
 
 function now(): string {
   return new Date().toISOString();
@@ -364,25 +396,23 @@ export class KnowledgeService {
             : item),
         };
       }
-      const chunks: KnowledgeChunk[] = [];
+      const chunks: KnowledgeChunk[] = currentSources.flatMap((source) => chunkSource(source));
       const existingFactsByKey = new Map(current.facts.map((fact) => [factKey(fact), fact]));
       const newFactsByKey = new Map<string, FactRecord>();
       const mergedFacts = new Map<string, FactRecord>();
       let mergedCount = 0;
       for (const source of currentSources) {
-        splitIntoChunks(source.canonical_text).forEach((text, ordinal) => {
-          chunks.push({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), extractor_revision: KNOWLEDGE_EXTRACTOR_REVISION, created_at: now() });
-        });
-        for (const statement of sentenceCandidates(source.canonical_text)) {
-          const candidate = factFromSentence(source, statement, actor);
+        for (const [sentenceIndex, statement] of sentenceCandidates(source.canonical_text).entries()) {
+          const candidate = pipelineFactFromSentence(source, statement, actor, sentenceIndex, operationId);
           const key = factKey(candidate);
           const existing = existingFactsByKey.get(key);
           if (existing !== undefined) {
             const currentTarget = mergedFacts.get(existing.id) ?? existing;
-            const merged = mergeFactEvidence(currentTarget, candidate);
+            const merged = pipelineMergeFactEvidence(currentTarget, candidate, current.sources);
             const hasNewEvidence = merged.source_ids.length > currentTarget.source_ids.length
               || merged.evidence.length > currentTarget.evidence.length
-              || (merged.evidence_refs?.length ?? 0) > (currentTarget.evidence_refs?.length ?? 0);
+              || (merged.evidence_refs?.length ?? 0) > (currentTarget.evidence_refs?.length ?? 0)
+              || merged.evidence_revision !== currentTarget.evidence_revision;
             if (hasNewEvidence) {
               const wasAccepted = existing.status === "accepted";
               mergedFacts.set(existing.id, {
@@ -397,7 +427,7 @@ export class KnowledgeService {
           }
           const existingInBatch = newFactsByKey.get(key);
           if (existingInBatch !== undefined) {
-            const merged = mergeFactEvidence(existingInBatch, candidate);
+            const merged = pipelineMergeFactEvidence(existingInBatch, candidate, current.sources);
             newFactsByKey.set(key, { ...merged, updated_at: now() });
             continue;
           }
@@ -460,7 +490,10 @@ export class KnowledgeService {
     let committedChunks: string[] = [];
     let committedFacts: string[] = [];
     await this.repository.commit(initial.revision, (current) => {
-      const chunks: KnowledgeChunk[] = [];
+      const chunks: KnowledgeChunk[] = sourceIds.flatMap((sourceId) => {
+        const source = current.sources.find((candidate) => candidate.id === sourceId);
+        return source === undefined ? [] : chunkSource(source, extractorRevision);
+      });
       const existingFactsByKey = new Map(current.facts.map((fact) => [factKey(fact), fact]));
       const newFactsByKey = new Map<string, FactRecord>();
       const mergedFacts = new Map<string, FactRecord>();
@@ -468,19 +501,17 @@ export class KnowledgeService {
       for (const sourceId of sourceIds) {
         const source = current.sources.find((candidate) => candidate.id === sourceId);
         if (source === undefined) continue;
-        splitIntoChunks(source.canonical_text).forEach((text, ordinal) => {
-          chunks.push({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), extractor_revision: extractorRevision, created_at: now() });
-        });
-        for (const statement of sentenceCandidates(source.canonical_text)) {
-          const candidate = factFromSentence(source, statement, actor);
+        for (const [sentenceIndex, statement] of sentenceCandidates(source.canonical_text).entries()) {
+          const candidate = pipelineFactFromSentence(source, statement, actor, sentenceIndex, operationId);
           const key = factKey(candidate);
           const existing = existingFactsByKey.get(key);
           if (existing !== undefined) {
             const currentTarget = mergedFacts.get(existing.id) ?? existing;
-            const merged = mergeFactEvidence(currentTarget, candidate);
+            const merged = pipelineMergeFactEvidence(currentTarget, candidate, current.sources);
             const hasNewEvidence = merged.source_ids.length > currentTarget.source_ids.length
               || merged.evidence.length > currentTarget.evidence.length
-              || (merged.evidence_refs?.length ?? 0) > (currentTarget.evidence_refs?.length ?? 0);
+              || (merged.evidence_refs?.length ?? 0) > (currentTarget.evidence_refs?.length ?? 0)
+              || merged.evidence_revision !== currentTarget.evidence_revision;
             if (hasNewEvidence) {
               mergedFacts.set(existing.id, {
                 ...merged,
@@ -494,7 +525,7 @@ export class KnowledgeService {
           }
           const existingInBatch = newFactsByKey.get(key);
           if (existingInBatch !== undefined) {
-            const merged = mergeFactEvidence(existingInBatch, candidate);
+            const merged = pipelineMergeFactEvidence(existingInBatch, candidate, current.sources);
             newFactsByKey.set(key, { ...merged, updated_at: now() });
             continue;
           }
@@ -543,57 +574,8 @@ export class KnowledgeService {
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
-    const knownChunkSourceIds = new Set(initial.knowledge_chunks.map((chunk) => chunk.source_id));
-    const curationSources = initial.sources.filter((source) => claims.some((claim) => claim.evidence.some((evidence) => sourceMatches(source, evidence.source))));
-    const chunks: KnowledgeChunk[] = curationSources.flatMap((source) => {
-      if (knownChunkSourceIds.has(source.id)) return [];
-      return splitIntoChunks(source.canonical_text).map((text, ordinal) => ({ id: internalId("chunk"), source_id: source.id, ordinal, text, hash: contentHash(text), extractor_revision: KNOWLEDGE_EXTRACTOR_REVISION, created_at: now() }));
-    });
-    const availableChunks = [...initial.knowledge_chunks, ...chunks];
-    const knownFactsByKey = new Map(initial.facts.map((fact) => [factKey(fact), fact]));
-    const newFactsByKey = new Map<string, FactRecord>();
-    const mergedFacts = new Map<string, FactRecord>();
-    let mergedCount = 0;
-    for (const claim of claims) {
-      const fact = claimToFact(claim, initial.sources, actor);
-      const key = factKey(fact);
-      const evidenceRefs = claim.evidence.flatMap((evidence) => {
-        if (evidence.quote === undefined) return [];
-        const source = sourceForReference(initial.sources, evidence.source);
-        if (source === undefined) return [];
-        const chunk = availableChunks.find((candidate) => candidate.source_id === source.id && candidate.text.includes(evidence.quote!));
-        if (chunk === undefined) return [];
-        return [{ source_id: source.id, source_revision_id: source.revision, chunk_id: chunk.id, chunk_hash: chunk.hash, quote: evidence.quote, ...(evidence.locator === undefined ? {} : { locator: evidence.locator }) }];
-      });
-      const factWithRefs = evidenceRefs.length === 0 ? fact : { ...fact, evidence_refs: evidenceRefs };
-      const existing = knownFactsByKey.get(key);
-      if (existing !== undefined) {
-        const currentTarget = mergedFacts.get(existing.id) ?? existing;
-        const merged = mergeFactEvidence(currentTarget, factWithRefs);
-        const hasNewEvidence = merged.source_ids.length > currentTarget.source_ids.length
-          || merged.evidence.length > currentTarget.evidence.length
-          || (merged.evidence_refs?.length ?? 0) > (currentTarget.evidence_refs?.length ?? 0);
-        if (hasNewEvidence) {
-          const wasAccepted = existing.status === "accepted";
-          mergedFacts.set(existing.id, {
-            ...merged,
-            fact_revision: (currentTarget.fact_revision ?? 1) + 1,
-            updated_at: now(),
-            ...(wasAccepted ? { status: "candidate" as const } : {}),
-          });
-          mergedCount += 1;
-        }
-        continue;
-      }
-      const existingInBatch = newFactsByKey.get(key);
-      if (existingInBatch !== undefined) {
-        const merged = mergeFactEvidence(existingInBatch, factWithRefs);
-        newFactsByKey.set(key, { ...merged, updated_at: now() });
-        continue;
-      }
-      newFactsByKey.set(key, factWithRefs);
-    }
-    const facts = [...newFactsByKey.values()];
+    const curationBatch = buildCurationCandidateBatch(initial, claims, actor, curationRunIdForOperation(operationId));
+    const { chunks, facts, mergedFacts, mergedCount } = curationBatch;
     const summary = `Applied ${facts.length} structured fact candidates from curation${mergedCount > 0 ? `; merged ${mergedCount} corroborating evidence into existing facts.` : "."}`;
     await this.repository.commit(initial.revision, (current) => {
       assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
@@ -665,11 +647,17 @@ export class KnowledgeService {
       created_by: actor,
       created_at: now(),
     };
+    const successorOf = initial.fact_review_runs
+      .filter((candidate) => (candidate.status === "open" || candidate.status === "blocked") && (inferredCurationRunId === undefined || candidate.curation_run_id === inferredCurationRunId))
+      .map((candidate) => candidate.id);
     await this.repository.commit(initial.revision, (current) => {
       assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
       return {
       ...current,
-      fact_review_runs: [...current.fact_review_runs, run],
+      fact_review_runs: [
+        ...current.fact_review_runs.map((candidate) => successorOf.includes(candidate.id) ? { ...candidate, status: "superseded" as const, successor_run_id: run.id } : candidate),
+        run,
+      ],
       audit: [...current.audit, {
         id: internalId("audit"),
         operation_id: operationId,
@@ -684,12 +672,14 @@ export class KnowledgeService {
     return run;
   }
 
-  async factReviewContext(options?: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification }): Promise<{
+  async factReviewContext(options: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification } = {}): Promise<{
     run?: FactReviewRunRecord;
     projection_revision?: string;
     candidates: Array<{ candidate_occurrence_id: string; fact_id: string; statement: string; subject?: string; predicate?: string; value?: string; classification?: FactClassification; coverage?: string[]; status: FactRecord["status"]; source_ids: string[]; evidence: string[]; evidence_refs?: FactEvidenceReference[]; candidate_revision: string; last_decision?: FactReviewDecisionRecord["decision"]; last_reviewer_identity?: string }>;
     next_cursor?: string;
   }> {
+    return buildFactReviewContext(await this.repository.read(), options ?? {} satisfies FactReviewContextOptions);
+    /* Legacy implementation retained in this comment only for migration review.
     const state = await this.repository.read();
     const run = [...state.fact_review_runs].reverse().find((candidate) => candidate.status === "open" || candidate.status === "blocked");
     const occurrenceIds = run?.candidate_occurrence_ids ?? state.facts.filter((fact) => fact.status === "candidate").map(candidateOccurrenceForFact);
@@ -730,8 +720,8 @@ export class KnowledgeService {
     const limit = Math.min(options?.limit ?? 50, 200);
     const page = candidates.slice(effectiveCursor, effectiveCursor + limit);
     const nextCursor = effectiveCursor + page.length < candidates.length ? `index:${effectiveCursor + page.length}` : undefined;
-    const base = run === undefined ? { candidates: page } : { run, projection_revision: reviewRunProjectionRevision(state, run.id), candidates: page };
-    return nextCursor === undefined ? base : { ...base, next_cursor: nextCursor };
+    const base = run === undefined ? { candidates: page } : { run, projection_revision: reviewProjectionRevision(state, run.id), candidates: page };
+    return nextCursor === undefined ? base : { ...base, next_cursor: nextCursor }; */
   }
 
   async applyReviewBatch(
@@ -758,7 +748,7 @@ export class KnowledgeService {
       return this.applyReviewBatch(operationId, decisions, actorInput, reviewerIdentity, run.id, expectedProjectionRevision);
     }
     if (run.status === "completed" || run.status === "superseded") throw new CoreError("FACT_REVIEW_RUN_CLOSED", `Fact review run ${run.id} is no longer open.`, true);
-    const actualProjectionRevision = reviewRunProjectionRevision(initial, run.id);
+    const actualProjectionRevision = reviewProjectionRevision(initial, run.id);
     if (expectedProjectionRevision !== undefined && expectedProjectionRevision !== actualProjectionRevision) {
       throw new CoreError("FACT_PROJECTION_STALE", `Fact review projection is stale; expected ${expectedProjectionRevision}, found ${actualProjectionRevision}.`, true);
     }
@@ -860,7 +850,7 @@ export class KnowledgeService {
             const update = updates.get(fact.id);
             if (update === undefined) return fact;
             const addedEvidence = update.decision.evidence.map(evidenceText);
-            return {
+            const nextFact: FactRecord = {
               ...fact,
               status: update.record.decision === "accepted" ? "accepted" : update.record.decision === "rejected" ? "rejected" : update.record.decision === "conflict" ? "conflict" : "candidate",
               evidence: [...new Set([...fact.evidence, ...addedEvidence])],
@@ -872,6 +862,10 @@ export class KnowledgeService {
               decision_id: update.record.id,
               updated_at: now(),
             };
+            const withEvidenceRevision: FactRecord = { ...nextFact, evidence_revision: evidenceRevision(nextFact, current.sources) };
+            if (update.record.decision === "accepted") return { ...withEvidenceRevision, accepted_fact_revision: acceptedFactRevision(withEvidenceRevision) };
+            const { accepted_fact_revision: _acceptedRevision, ...withoutAcceptedRevision } = withEvidenceRevision;
+            return withoutAcceptedRevision;
           }),
           fact_review_runs: current.fact_review_runs.map((item) => item.id === run!.id ? updatedRun : item),
           fact_review_decisions: decisionsForRun,
@@ -910,6 +904,9 @@ export class KnowledgeService {
   }
 
   async applyReview(operationId: string, decisions: FactDecision[], actor: string, reviewPass?: 1 | 2 | 3): Promise<FactReviewExecutionResult> {
+    return applyLegacyFactReview(this.repository, operationId, decisions, actor, reviewPass);
+    /* Legacy implementation retained only as a migration reference; all new
+       review traffic uses FactReviewRun/FactReviewDecision above.
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
@@ -977,6 +974,6 @@ export class KnowledgeService {
       fact_review_passes: [...current.fact_review_passes, passRecord],
       fact_review_decisions: [...current.fact_review_decisions, ...legacyDecisionRecords],
     }));
-    return { fact_ids: targetIds, status: "completed", summary };
+    return { fact_ids: targetIds, status: "completed", summary }; */
   }
 }

@@ -206,7 +206,12 @@ export interface FactRecord {
   evidence: string[];
   evidence_refs?: FactEvidenceReference[];
   fact_revision?: number;
+  /** Stable hash of the source/chunk evidence currently attached to this fact. */
+  evidence_revision?: string;
+  /** Stable hash of the last accepted fact projection, if this fact was accepted. */
+  accepted_fact_revision?: string;
   candidate_occurrence_id?: string;
+  curation_run_id?: string;
   review_run_id?: string;
   decision_id?: string;
   created_at: string;
@@ -252,6 +257,7 @@ export interface FactReviewRunRecord {
   created_by: string;
   created_at: string;
   completed_at?: string;
+  successor_run_id?: string;
 }
 
 export type FactReviewDecisionStatus = "accepted" | "rejected" | "needs_evidence" | "conflict";
