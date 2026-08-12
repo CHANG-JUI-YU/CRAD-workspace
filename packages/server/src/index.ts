@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { TextDecoder } from "node:util";
 import { HttpSourceFetcher } from "@st-workspace/adapters";
-import { CoreError, FileAttachmentStore, FileProjectRepository, internalId, templateProposalJsonSchema, type AdaptationDecision, type IssueSeverity, type RequestResult, type SourceAttachment, zhujiProposalJsonSchema } from "@st-workspace/core";
+import { CoreError, FileAttachmentStore, FileProjectRepository, internalId, templateProposalJsonSchema, type AdaptationDecision, type IssueSeverity, type RequestResult, type SourceAttachment, z, zhujiProposalJsonSchema } from "@st-workspace/core";
+import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, decodeAttachments, factReviewBatchInputSchema, imageInputSchema, imageRemoveInputSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
 import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
 import { dashboard } from "./dashboard.js";
 import { structuredError } from "./errors.js";
@@ -226,8 +227,6 @@ class RequestTooLargeError extends Error {
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 
-const base64Pattern = /^[A-Za-z0-9+/]*={0,2}$/u;
-
 async function body(request: IncomingMessage): Promise<unknown> {
   const declaredLength = Number(request.headers["content-length"]);
   if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) throw new RequestTooLargeError();
@@ -257,180 +256,20 @@ async function body(request: IncomingMessage): Promise<unknown> {
   }
 }
 
-function attachmentsFrom(value: unknown): SourceAttachment[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item): SourceAttachment[] => {
-    if (item === null || typeof item !== "object") return [];
-    const candidate = item as { name?: unknown; content_base64?: unknown; media_type?: unknown };
-    if (typeof candidate.name !== "string" || typeof candidate.content_base64 !== "string") return [];
-    if (!base64Pattern.test(candidate.content_base64)) return [];
-    const decoded = Buffer.from(candidate.content_base64, "base64");
-    if (decoded.byteLength === 0) return [];
-    return [{ name: candidate.name, content: new Uint8Array(decoded), ...(typeof candidate.media_type === "string" ? { media_type: candidate.media_type } : {}) }];
-  });
-}
-
-function requestValue(value: unknown): string | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  const request = (value as { request?: unknown }).request;
-  return typeof request === "string" && request.trim().length > 0 ? request : undefined;
-}
-
-function agentValue(value: unknown): string | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  const agent = (value as { agent?: unknown }).agent;
-  return typeof agent === "string" && agent.trim().length > 0 ? agent : undefined;
-}
-
-function operationIdValue(value: unknown): string | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  const operationId = (value as { operation_id?: unknown }).operation_id;
-  return typeof operationId === "string" && operationId.trim().length > 0 ? operationId : undefined;
-}
-
-function qualityLevelValue(value: unknown): "none" | "light" | "normal" | "strict" | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  const level = (value as { level?: unknown }).level;
-  return level === "none" || level === "light" || level === "normal" || level === "strict" ? level : undefined;
-}
-
-function characterIdValue(value: unknown): string | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  const characterId = (value as { character_id?: unknown }).character_id;
-  return typeof characterId === "string" && characterId.trim().length > 0 ? characterId : undefined;
-}
-
-const templateKinds = new Set(["character", "zhuji", "palette", "wardrobe", "greetings", "relationships", "world", "conversion", "import_analysis", "review", "source_research", "fact_curation", "fact_review", "plugin", "director_routing"]);
-
-function templateKindValue(value: unknown): string | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  const kind = (value as { kind?: unknown }).kind;
-  return typeof kind === "string" && templateKinds.has(kind) ? kind : undefined;
-}
-
-function answerValue(value: unknown): string | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  const answer = (value as { answer?: unknown }).answer;
-  return typeof answer === "string" ? answer : undefined;
-}
-
-function projectValue(value: unknown): string | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  const project = (value as { project?: unknown }).project;
-  return typeof project === "string" && project.trim().length > 0 ? project : undefined;
-}
-
-function sourceSelectionValue(value: unknown): Array<{ candidate_id: string; decision: "approve" | "reject" }> | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  const decisions = (value as { decisions?: unknown }).decisions;
-  if (!Array.isArray(decisions) || decisions.length === 0) return undefined;
-  const parsed = decisions.flatMap((item): Array<{ candidate_id: string; decision: "approve" | "reject" }> => {
-    if (item === null || typeof item !== "object") return [];
-    const candidate = item as { candidate_id?: unknown; decision?: unknown };
-    if (typeof candidate.candidate_id !== "string" || (candidate.decision !== "approve" && candidate.decision !== "reject")) return [];
-    return [{ candidate_id: candidate.candidate_id, decision: candidate.decision }];
-  });
-  return parsed.length === decisions.length ? parsed : undefined;
-}
-
-function issueUpdateValue(value: unknown): { issue_id: string; action: "resolve" | "ignore" | "override"; reason: string; severity?: "critical" | "error" | "warning" | "info"; agent?: string } | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  const input = value as { issue_id?: unknown; action?: unknown; reason?: unknown; severity?: unknown; agent?: unknown };
-  if (typeof input.issue_id !== "string" || typeof input.reason !== "string") return undefined;
-  if (input.action !== "resolve" && input.action !== "ignore" && input.action !== "override") return undefined;
-  if (input.severity !== undefined && input.severity !== "critical" && input.severity !== "error" && input.severity !== "warning" && input.severity !== "info") return undefined;
-  if (input.agent !== undefined && typeof input.agent !== "string") return undefined;
-  return {
-    issue_id: input.issue_id,
-    action: input.action,
-    reason: input.reason,
-    ...(input.severity === undefined ? {} : { severity: input.severity }),
-    ...(input.agent === undefined ? {} : { agent: input.agent }),
-  };
-}
-
-function factDecisionsValue(value: unknown): Array<{ fact_id?: string; candidate_occurrence_id?: string; claim: string; decision: "accept" | "reject" | "conflict" | "needs_evidence"; reason: string; evidence: { source: string; quote?: string; locator?: string }[]; evidence_refs: { source_id: string; source_revision_id: string; quote: string; locator?: string; character_range?: { start: number; end: number } }[]; coverage: string[] }> | undefined {
-  if (!Array.isArray(value) || value.length === 0) return undefined;
-  const decisions: Array<{ fact_id?: string; candidate_occurrence_id?: string; claim: string; decision: "accept" | "reject" | "conflict" | "needs_evidence"; reason: string; evidence: { source: string; quote?: string; locator?: string }[]; evidence_refs: { source_id: string; source_revision_id: string; quote: string; locator?: string; character_range?: { start: number; end: number } }[]; coverage: string[] }> = [];
-  for (const item of value) {
-    if (item === null || typeof item !== "object") return undefined;
-    const input = item as { fact_id?: unknown; candidate_occurrence_id?: unknown; claim?: unknown; decision?: unknown; reason?: unknown; evidence?: unknown; evidence_refs?: unknown; coverage?: unknown };
-    if (typeof input.claim !== "string" || typeof input.reason !== "string") return undefined;
-    if (input.decision !== "accept" && input.decision !== "reject" && input.decision !== "conflict" && input.decision !== "needs_evidence") return undefined;
-    if (input.fact_id !== undefined && typeof input.fact_id !== "string") return undefined;
-    if (input.candidate_occurrence_id !== undefined && typeof input.candidate_occurrence_id !== "string") return undefined;
-    if (input.fact_id === undefined && input.candidate_occurrence_id === undefined) return undefined;
-
-    const evidence: Array<{ source: string; quote?: string; locator?: string }> = [];
-    if (Array.isArray(input.evidence)) {
-      for (const e of input.evidence) {
-        if (e && typeof e === "object" && typeof (e as Record<string, unknown>).source === "string") {
-          const evObj = e as Record<string, unknown>;
-          evidence.push({
-            source: evObj.source as string,
-            ...(typeof evObj.quote === "string" ? { quote: evObj.quote } : {}),
-            ...(typeof evObj.locator === "string" ? { locator: evObj.locator } : {}),
-          });
-        }
-      }
-    }
-
-    const evidenceRefs: Array<{ source_id: string; source_revision_id: string; quote: string; locator?: string; character_range?: { start: number; end: number } }> = [];
-    if (Array.isArray(input.evidence_refs)) {
-      for (const er of input.evidence_refs) {
-        if (er && typeof er === "object" && typeof (er as Record<string, unknown>).source_id === "string" && typeof (er as Record<string, unknown>).source_revision_id === "string" && typeof (er as Record<string, unknown>).quote === "string") {
-          const erObj = er as Record<string, unknown>;
-          evidenceRefs.push({
-            source_id: erObj.source_id as string,
-            source_revision_id: erObj.source_revision_id as string,
-            quote: erObj.quote as string,
-            ...(typeof erObj.locator === "string" ? { locator: erObj.locator } : {}),
-          });
-        }
-      }
-    }
-
-    const coverage: string[] = [];
-    if (Array.isArray(input.coverage)) {
-      for (const c of input.coverage) {
-        if (typeof c === "string") coverage.push(c);
-      }
-    }
-
-    decisions.push({
-      claim: input.claim,
-      decision: input.decision,
-      reason: input.reason,
-      evidence,
-      evidence_refs: evidenceRefs,
-      coverage,
-      ...(input.fact_id === undefined ? {} : { fact_id: input.fact_id }),
-      ...(input.candidate_occurrence_id === undefined ? {} : { candidate_occurrence_id: input.candidate_occurrence_id }),
-    });
+function parseRequest<TSchema extends z.ZodTypeAny>(schema: TSchema, input: unknown, code: string): z.infer<TSchema> {
+  const parsed = schema.safeParse(input);
+  if (!parsed.success) {
+    throw new CoreError(code, `Invalid ${(schema as z.ZodTypeAny & { description?: string }).description ?? "input"}: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`, true);
   }
-  return decisions;
+  return parsed.data;
 }
 
-function adaptationDecisionValue(value: unknown): Omit<AdaptationDecision, "id" | "created_at" | "created_by"> | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  const input = value as { topic?: unknown; choice?: unknown; blueprint_refs?: unknown; fact_refs?: unknown; rationale?: unknown };
-  if (typeof input.topic !== "string" || typeof input.rationale !== "string" || !["keep_blueprint", "adopt_fact", "blend", "defer"].includes(String(input.choice))) return undefined;
-  const strings = (items: unknown): string[] | undefined => {
-    if (items === undefined) return undefined;
-    if (!Array.isArray(items) || items.some((item) => typeof item !== "string")) return undefined;
-    return items as string[];
-  };
-  const blueprintRefs = strings(input.blueprint_refs);
-  const factRefs = strings(input.fact_refs);
-  if (input.blueprint_refs !== undefined && blueprintRefs === undefined) return undefined;
-  if (input.fact_refs !== undefined && factRefs === undefined) return undefined;
-  return {
-    topic: input.topic,
-    choice: input.choice as AdaptationDecision["choice"],
-    ...(blueprintRefs === undefined ? {} : { blueprint_refs: blueprintRefs }),
-    ...(factRefs === undefined ? {} : { fact_refs: factRefs }),
-    rationale: input.rationale,
-  };
+function compact<T extends Record<string, unknown>>(value: T): T {
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (item !== undefined) result[key] = item;
+  }
+  return result as T;
 }
 
 function visibleAgents(agentAdapter: AgentAdapter): { default_agent: string; agents: ReturnType<AgentAdapter["list"]> } {
@@ -528,7 +367,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       }
       if (request.method === "GET" && url.pathname === "/workspace/template/context") {
         const kind = url.searchParams.get("kind");
-        if (kind === null || !templateKinds.has(kind)) {
+        if (kind === null || !templateKindSchema.safeParse({ kind }).success) {
           json(response, 400, structuredError(new CoreError("TEMPLATE_KIND_REQUIRED", "TEMPLATE_KIND_REQUIRED", true)));
           return;
         }
@@ -580,26 +419,18 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       }
       if (request.method === "POST" && url.pathname === "/workspace/request") {
         const parsed = await body(request);
-        const requestText = requestValue(parsed);
-        if (requestText === undefined) {
-          json(response, 400, structuredError(new CoreError("REQUEST_REQUIRED", "The request field is required", true)));
-          return;
-        }
-        const input = parsed as { attachments?: unknown };
-        const requestedAgent = agentValue(parsed);
+        const input = parseRequest(requestSchema, parsed, "REQUEST_REQUIRED");
+        const requestText = input.request;
+        const requestedAgent = input.agent;
         const result = options.projectManager === undefined
-          ? await (await getAgentAdapter()).request({ request: requestText, context: { actor, attachments: attachmentsFrom(input.attachments) }, ...(requestedAgent === undefined ? {} : { agent: requestedAgent }) })
-          : await options.projectManager.request(requestText, { actor, attachments: attachmentsFrom(input.attachments) }, requestedAgent === undefined ? {} : { agent: requestedAgent });
+          ? await (await getAgentAdapter()).request({ request: requestText, context: { actor, attachments: decodeAttachments(input.attachments) }, ...(requestedAgent === undefined ? {} : { agent: requestedAgent }) })
+          : await options.projectManager.request(requestText, { actor, attachments: decodeAttachments(input.attachments) }, requestedAgent === undefined ? {} : { agent: requestedAgent });
         json(response, 200, result);
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/interview/answer") {
         const parsed = await body(request);
-        const answer = answerValue(parsed);
-        if (answer === undefined) {
-          json(response, 400, structuredError(new CoreError("ANSWER_REQUIRED", "ANSWER_REQUIRED", true)));
-          return;
-        }
+        const { answer } = parseRequest(answerSchema, parsed, "ANSWER_REQUIRED");
         const result = options.projectManager === undefined
           ? await (await getRuntime()).answerInterview(answer, { actor, attachments: [] })
           : await options.projectManager.answerInterview(answer, { actor, attachments: [] });
@@ -608,29 +439,21 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       }
       if (request.method === "POST" && url.pathname === "/workspace/source/select") {
         const parsed = await body(request);
-        const decisions = sourceSelectionValue(parsed);
-        if (decisions === undefined) {
-          json(response, 400, structuredError(new CoreError("SOURCE_SELECTION_REQUIRED", "SOURCE_SELECTION_REQUIRED", true)));
-          return;
-        }
+        const { decisions } = parseRequest(sourceSelectionInputSchema, parsed, "SOURCE_SELECTION_REQUIRED");
         json(response, 200, await (await getRuntime()).selectSourceCandidates(decisions, { actor, attachments: [] }));
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/adaptation/decision") {
         const parsed = await body(request);
-        const decision = adaptationDecisionValue(parsed);
-        if (decision === undefined) {
-          json(response, 400, structuredError(new CoreError("ADAPTATION_DECISION_REQUIRED", "ADAPTATION_DECISION_REQUIRED", true)));
-          return;
-        }
-        json(response, 200, await (await getRuntime()).createAdaptationDecision(decision, { actor, attachments: [] }));
+        const decision = parseRequest(adaptationDecisionInputSchema, parsed, "ADAPTATION_DECISION_REQUIRED");
+        json(response, 200, await (await getRuntime()).createAdaptationDecision(compact(decision) as Omit<AdaptationDecision, "id" | "created_at" | "created_by">, { actor, attachments: [] }));
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/project/select") {
         const parsed = await body(request);
-        const project = projectValue(parsed);
-        if (project === undefined || options.projectManager === undefined) {
-          json(response, 400, structuredError(new CoreError(project === undefined ? "PROJECT_REQUIRED" : "PROJECT_MANAGER_REQUIRED", project === undefined ? "PROJECT_REQUIRED" : "PROJECT_MANAGER_REQUIRED", true)));
+        const { project } = parseRequest(projectSchema, parsed, "PROJECT_REQUIRED");
+        if (options.projectManager === undefined) {
+          json(response, 400, structuredError(new CoreError("PROJECT_MANAGER_REQUIRED", "PROJECT_MANAGER_REQUIRED", true)));
           return;
         }
         json(response, 200, await options.projectManager.select(project));
@@ -650,53 +473,34 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       }
       if (request.method === "POST" && url.pathname === "/workspace/images") {
         const parsed = await body(request);
-        const input = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-        const attachments = attachmentsFrom(input.attachments);
+        const input = parseRequest(imageInputSchema, parsed, "IMAGE_INPUT_REQUIRED");
+        const attachments = decodeAttachments(input.attachments);
         const options: { character_id?: string; aspect_ratio?: string; source?: string; license?: string } = {};
-        if (typeof input.character_id === "string") options.character_id = input.character_id;
-        if (typeof input.aspect_ratio === "string") options.aspect_ratio = input.aspect_ratio;
-        if (typeof input.source === "string") options.source = input.source;
-        if (typeof input.license === "string") options.license = input.license;
+        if (input.character_id !== undefined) options.character_id = input.character_id;
+        if (input.aspect_ratio !== undefined) options.aspect_ratio = input.aspect_ratio;
+        if (input.source !== undefined) options.source = input.source;
+        if (input.license !== undefined) options.license = input.license;
         json(response, 200, await (await getRuntime()).setProjectImage({ actor, attachments }, options));
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/images/remove") {
         const parsed = await body(request);
-        const input = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-        const imageId = typeof input.image_id === "string" && input.image_id.trim().length > 0 ? input.image_id : undefined;
-        if (imageId === undefined) {
-          json(response, 400, structuredError(new CoreError("IMAGE_ID_REQUIRED", "IMAGE_ID_REQUIRED", true)));
-          return;
-        }
-        const removed = await (await getRuntime()).removeProjectImage(imageId, actor);
-        json(response, 200, { status: removed ? "removed" : "not_found", image_id: imageId });
+        const { image_id } = parseRequest(imageRemoveInputSchema, parsed, "IMAGE_ID_REQUIRED");
+        const removed = await (await getRuntime()).removeProjectImage(image_id, actor);
+        json(response, 200, { status: removed ? "removed" : "not_found", image_id });
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/issue") {
         const parsed = await body(request);
-        const input = issueUpdateValue(parsed);
-        if (input === undefined) {
-          json(response, 400, structuredError(new CoreError("ISSUE_UPDATE_REQUIRED", "ISSUE_UPDATE_REQUIRED", true)));
-          return;
-        }
+        const input = parseRequest(issueUpdateInputSchema, parsed, "ISSUE_UPDATE_REQUIRED");
         const { agent, ...issue } = input;
-        json(response, 200, await (await getRuntime()).updateIssue(issue, { actor, attachments: [] }, agent === undefined ? {} : { agent }));
+        json(response, 200, await (await getRuntime()).updateIssue(compact(issue) as IssueUpdateInput, { actor, attachments: [] }, agent === undefined ? {} : { agent }));
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/quality/profile") {
         const parsed = await body(request);
-        const level = qualityLevelValue(parsed);
-        if (level === undefined) {
-          json(response, 400, structuredError(new CoreError("QUALITY_LEVEL_REQUIRED", "QUALITY_LEVEL_REQUIRED", true)));
-          return;
-        }
-        const overrides: Record<string, IssueSeverity> = {};
-        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && "overrides" in parsed && parsed.overrides !== null && typeof parsed.overrides === "object" && !Array.isArray(parsed.overrides)) {
-          for (const [key, value] of Object.entries(parsed.overrides as Record<string, unknown>)) {
-            if (value === "critical" || value === "error" || value === "warning" || value === "info") overrides[key] = value;
-          }
-        }
-        json(response, 200, await (await getRuntime()).configureQualityProfile(level, { actor, attachments: [] }, overrides));
+        const input = parseRequest(qualityProfileInputSchema, parsed, "QUALITY_LEVEL_REQUIRED");
+        json(response, 200, await (await getRuntime()).configureQualityProfile(input.level, { actor, attachments: [] }, input.overrides ?? {}));
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/fact/review/run") {
@@ -706,65 +510,34 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       }
       if (request.method === "POST" && url.pathname === "/workspace/knowledge/reextract") {
         const parsed = await body(request);
-        const input = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as { source_ids?: unknown; extractor_revision?: unknown } : undefined;
-        const sourceIds = input !== undefined && Array.isArray(input.source_ids)
-          ? input.source_ids.filter((item): item is string => typeof item === "string")
-          : undefined;
-        if (sourceIds === undefined || sourceIds.length === 0) {
-          json(response, 400, structuredError(new CoreError("SOURCE_IDS_REQUIRED", "SOURCE_IDS_REQUIRED", true)));
-          return;
-        }
-        const extractorRevision = input !== undefined && typeof input.extractor_revision === "string" && input.extractor_revision.length > 0 ? input.extractor_revision : undefined;
+        const input = parseRequest(reextractInputSchema, parsed, "SOURCE_IDS_REQUIRED");
         const runtime = await getRuntime();
-        json(response, 200, await runtime.reextract(internalId("operation"), sourceIds, actor, extractorRevision));
+        json(response, 200, await runtime.reextract(internalId("operation"), input.source_ids, actor, input.extractor_revision));
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/fact/review/batch") {
         const parsed = await body(request);
-        const decisions = factDecisionsValue(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && "decisions" in parsed ? parsed.decisions : undefined);
-        if (decisions === undefined) {
-          json(response, 400, structuredError(new CoreError("FACT_DECISIONS_REQUIRED", "FACT_DECISIONS_REQUIRED", true)));
-          return;
-        }
-        const input = parsed as { reviewer_identity?: unknown; run_id?: unknown; expected_projection_revision?: unknown };
-        const reviewerIdentity = typeof input.reviewer_identity === "string" && input.reviewer_identity.length > 0 ? input.reviewer_identity : undefined;
-        const runId = typeof input.run_id === "string" && input.run_id.length > 0 ? input.run_id : undefined;
-        const expectedProjectionRevision = typeof input.expected_projection_revision === "string" && input.expected_projection_revision.length > 0 ? input.expected_projection_revision : undefined;
-        json(response, 200, await (await getRuntime()).applyFactReviewBatch(decisions, actor, reviewerIdentity, runId, expectedProjectionRevision));
+        const input = parseRequest(factReviewBatchInputSchema, parsed, "FACT_DECISIONS_REQUIRED");
+        json(response, 200, await (await getRuntime()).applyFactReviewBatch(input.decisions, actor, input.reviewer_identity, input.run_id, input.expected_projection_revision));
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/fact/review/conflict") {
         const parsed = await body(request);
-        const decisions = factDecisionsValue(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && "decisions" in parsed ? parsed.decisions : undefined);
-        if (decisions === undefined) {
-          json(response, 400, structuredError(new CoreError("FACT_DECISIONS_REQUIRED", "FACT_DECISIONS_REQUIRED", true)));
-          return;
-        }
-        const input = parsed as { run_id?: unknown; expected_projection_revision?: unknown };
-        const runId = typeof input.run_id === "string" && input.run_id.length > 0 ? input.run_id : undefined;
-        const expectedProjectionRevision = typeof input.expected_projection_revision === "string" && input.expected_projection_revision.length > 0 ? input.expected_projection_revision : undefined;
-        json(response, 200, await (await getRuntime()).resolveFactConflict(decisions, actor, runId, expectedProjectionRevision));
+        const input = parseRequest(factReviewBatchInputSchema, parsed, "FACT_DECISIONS_REQUIRED");
+        json(response, 200, await (await getRuntime()).resolveFactConflict(input.decisions, actor, input.run_id, input.expected_projection_revision));
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/operation/recover") {
         const parsed = await body(request);
-        const operationId = operationIdValue(parsed);
-        if (operationId === undefined) {
-          json(response, 400, structuredError(new CoreError("OPERATION_ID_REQUIRED", "OPERATION_ID_REQUIRED", true)));
-          return;
-        }
-        json(response, 200, await (await getRuntime()).recoverOperation(operationId, { actor, attachments: [] }));
+        const { operation_id } = parseRequest(operationIdSchema, parsed, "OPERATION_ID_REQUIRED");
+        json(response, 200, await (await getRuntime()).recoverOperation(operation_id, { actor, attachments: [] }));
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/operation/fail") {
         const parsed = await body(request);
-        const operationId = operationIdValue(parsed);
-        if (operationId === undefined) {
-          json(response, 400, structuredError(new CoreError("OPERATION_ID_REQUIRED", "OPERATION_ID_REQUIRED", true)));
-          return;
-        }
+        const { operation_id } = parseRequest(operationIdSchema, parsed, "OPERATION_ID_REQUIRED");
         try {
-          json(response, 200, await (await getRuntime()).cancelOperation(operationId, actor));
+          json(response, 200, await (await getRuntime()).cancelOperation(operation_id, actor));
         } catch (error) {
           if (error instanceof CoreError) {
             json(response, 400, structuredError(error));
@@ -797,8 +570,8 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
             return;
           }
           if (params?.name === "workspace_zhuji_context") {
-            const argumentsValue = params.arguments;
-            const context = await (await getRuntime()).zhujiContext(characterIdValue(argumentsValue));
+            const input = params.arguments === undefined || typeof params.arguments !== "object" ? undefined : parseRequest(characterIdSchema, params.arguments, "CHARACTER_ID_REQUIRED");
+            const context = await (await getRuntime()).zhujiContext(input?.character_id);
             json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(context) }] } });
             return;
           }
@@ -808,8 +581,10 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
             return;
           }
           if (params?.name === "workspace_template_context") {
-            const kind = templateKindValue(params.arguments);
-            if (kind === undefined) {
+            let kind: string | undefined;
+            try {
+              kind = parseRequest(templateKindSchema, params.arguments, "TEMPLATE_KIND_REQUIRED").kind;
+            } catch {
               json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "kind is required" } });
               return;
             }
@@ -823,13 +598,15 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
             return;
           }
           if (params?.name === "workspace_issue_update") {
-            const input = issueUpdateValue(params.arguments);
-            if (input === undefined) {
+            let input: z.infer<typeof issueUpdateInputSchema>;
+            try {
+              input = parseRequest(issueUpdateInputSchema, params.arguments, "ISSUE_UPDATE_REQUIRED");
+            } catch {
               json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "issue_id, action and reason are required" } });
               return;
             }
             const { agent, ...issue } = input;
-            const result = await (await getRuntime()).updateIssue(issue, { actor, attachments: [] }, agent === undefined ? {} : { agent });
+            const result = await (await getRuntime()).updateIssue(compact(issue) as IssueUpdateInput, { actor, attachments: [] }, agent === undefined ? {} : { agent });
             json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
             return;
           }
@@ -844,8 +621,10 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
             return;
           }
           if (params?.name === "workspace_source_select") {
-            const decisions = sourceSelectionValue(params.arguments);
-            if (decisions === undefined) {
+            let decisions: z.infer<typeof sourceSelectionInputSchema>["decisions"];
+            try {
+              decisions = parseRequest(sourceSelectionInputSchema, params.arguments, "SOURCE_SELECTION_REQUIRED").decisions;
+            } catch {
               json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "decisions are required" } });
               return;
             }
@@ -854,12 +633,14 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
             return;
           }
           if (params?.name === "workspace_adaptation_decision") {
-            const decision = adaptationDecisionValue(params.arguments);
-            if (decision === undefined) {
+            let decision: z.infer<typeof adaptationDecisionInputSchema>;
+            try {
+              decision = parseRequest(adaptationDecisionInputSchema, params.arguments, "ADAPTATION_DECISION_REQUIRED");
+            } catch {
               json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "topic, choice and rationale are required" } });
               return;
             }
-            const result = await (await getRuntime()).createAdaptationDecision(decision, { actor, attachments: [] });
+            const result = await (await getRuntime()).createAdaptationDecision(compact(decision) as Omit<AdaptationDecision, "id" | "created_at" | "created_by">, { actor, attachments: [] });
             json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
             return;
           }
@@ -880,8 +661,10 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
             return;
           }
           if (params?.name === "workspace_interview_answer") {
-            const answer = answerValue(params.arguments);
-            if (answer === undefined) {
+            let answer: string;
+            try {
+              answer = parseRequest(answerSchema, params.arguments, "ANSWER_REQUIRED").answer;
+            } catch {
               json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "answer is required" } });
               return;
             }
@@ -910,7 +693,12 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
             return;
           }
           if (params?.name === "workspace_project_select") {
-            const project = projectValue(params.arguments);
+            let project: string | undefined;
+            try {
+              project = parseRequest(projectSchema, params.arguments, "PROJECT_REQUIRED").project;
+            } catch {
+              project = undefined;
+            }
             if (project === undefined || options.projectManager === undefined) {
               json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: project === undefined ? "project is required" : "project manager is required" } });
               return;
@@ -920,15 +708,16 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
             return;
           }
           if (params?.name === "workspace_request") {
-            const requestText = requestValue(params.arguments);
-            if (requestText === undefined) {
+            let input: z.infer<typeof requestSchema>;
+            try {
+              input = parseRequest(requestSchema, params.arguments, "REQUEST_REQUIRED");
+            } catch {
               json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "request is required" } });
               return;
             }
-            const requestedAgent = agentValue(params.arguments);
             const result: RequestResult = options.projectManager === undefined
-              ? await (await getAgentAdapter()).request({ request: requestText, context: { actor, attachments: attachmentsFrom(params.arguments) }, ...(requestedAgent === undefined ? {} : { agent: requestedAgent }) })
-              : await options.projectManager.request(requestText, { actor, attachments: attachmentsFrom(params.arguments) }, requestedAgent === undefined ? {} : { agent: requestedAgent });
+              ? await (await getAgentAdapter()).request({ request: input.request, context: { actor, attachments: decodeAttachments(input.attachments) }, ...(input.agent === undefined ? {} : { agent: input.agent }) })
+              : await options.projectManager.request(input.request, { actor, attachments: decodeAttachments(input.attachments) }, input.agent === undefined ? {} : { agent: input.agent });
             json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
             return;
           }

@@ -138,6 +138,9 @@ importers:
       '@st-workspace/core':
         specifier: workspace:*
         version: link:../core
+      '@st-workspace/domain':
+        specifier: workspace:*
+        version: link:../domain
       '@st-workspace/runtime':
         specifier: workspace:*
         version: link:../runtime

@@ -33,6 +33,8 @@ export {
   type RequiredArtifactManifest,
 } from "./required-artifacts.js";
 
+export * from "./inputs.js";
+
 export interface FetchResult {
   content: Uint8Array;
   media_type?: string;
