@@ -1,4 +1,4 @@
-import { computeProjectProjection, contentHash, type ArtifactRecord, type ProjectState } from "@st-workspace/core";
+import { artifactBinding, computeProjectProjection, contentHash, type ArtifactRecord, type ProjectState } from "@st-workspace/core";
 
 /**
  * Shared descriptor of required module keys per card mode. This is the single
@@ -168,10 +168,8 @@ function latestCharacterFor(artifacts: readonly ArtifactRecord[], characterId: s
   for (const artifact of candidates) {
     const document = characterDocument(artifact);
     let score = 0;
-    if (document?.id === characterId) score += 2;
+    if (artifactBinding(artifact).characterIds.includes(characterId)) score += 2;
     if (document?.display_name === label) score += 1;
-    if (artifact.name === characterId) score += 1;
-    if (artifact.key === `character:${characterId}`) score += 1;
     if (bestScore === 0 ? score > 0 : score >= bestScore) {
       bestScore = score;
       best = { artifact, document: document ?? {} };

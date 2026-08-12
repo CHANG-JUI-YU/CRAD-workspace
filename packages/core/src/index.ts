@@ -17,6 +17,7 @@ export * from "./project-projection.js";
 export * from "./relationship-graph.js";
 export * from "./project-state-schema.js";
 export * from "./artifact-fingerprint.js";
+export * from "./artifact-binding.js";
 export * from "./repository/project-repository.js";
 export { MemoryProjectRepository } from "./repository/memory-project-repository.js";
 export { FileProjectRepository } from "./repository/file-project-repository.js";

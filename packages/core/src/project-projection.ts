@@ -4,6 +4,7 @@ import type {
   FactRecord,
   ProjectState,
 } from "./project-state.js";
+import { artifactBinding } from "./artifact-binding.js";
 
 export interface ProjectIntentCharacter {
   id: string;
@@ -96,22 +97,10 @@ function planRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 function getArtifactCharacterId(artifact: ArtifactRecord, rosterIds?: ReadonlySet<string>): string | undefined {
-  if (!["character", "wardrobe", "greeting", "zhuji", "palette"].includes(artifact.kind)) return undefined;
-  const parts = artifact.key.split(":");
-  if (parts.length >= 2 && parts[1]?.trim()) {
-    const rawKey = parts[1].trim();
-    if (rosterIds !== undefined) {
-      const matched = [...rosterIds].find((characterId) => rawKey === characterId || rawKey.startsWith(`${characterId}/`) || rawKey.startsWith(`${characterId}-`));
-      if (matched !== undefined) return matched;
-    }
-    const rawCid = rawKey.split("/")[0];
-    if (rawCid !== undefined && rawCid.trim().length > 0) return rawCid.trim();
-  }
-  const parsed = parseArtifactValue(artifact) as Record<string, unknown>;
-  const doc = planRecord(parsed.document);
-  if (typeof doc?.id === "string" && doc.id.trim().length > 0) return doc.id.trim();
-  if (typeof parsed.character_id === "string" && parsed.character_id.trim().length > 0) return parsed.character_id.trim();
-  return undefined;
+  const binding = artifactBinding(artifact);
+  if (binding.global || binding.characterIds.length === 0) return undefined;
+  if (rosterIds !== undefined) return binding.characterIds.find((characterId) => rosterIds.has(characterId)) ?? binding.characterIds[0];
+  return binding.characterIds[0];
 }
 
 function textValue(value: unknown): string | undefined {
