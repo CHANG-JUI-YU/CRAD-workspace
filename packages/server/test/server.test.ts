@@ -49,7 +49,7 @@ describe("runtime-facing server contract", () => {
       expect((await fetch(`${base}/workspace/status`)).status).toBe(200);
       const health = await fetch(`${base}/workspace/health`);
       expect(health.status).toBe(200);
-      expect(await health.json()).toMatchObject({ status: "ready", worker: { running: true } });
+      expect(await health.json()).toMatchObject({ service: "st-workspace-v3", status: "ready", worker: { running: true } });
       const agentsResponse = await fetch(`${base}/workspace/agents`);
       expect(JSON.stringify(await agentsResponse.json())).toContain("director");
       const zhujiContextResponse = await fetch(`${base}/workspace/zhuji/context?character_id=demo`);
@@ -107,6 +107,18 @@ describe("runtime-facing server contract", () => {
     const server = await startWorkspaceServer({ port: 0, projectRoot: os.tmpdir(), projectId: `server-${Date.now()}` });
     expect(server.listening).toBe(true);
     await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+  });
+
+  it("rejects instead of hanging when the requested port is already occupied", async () => {
+    const occupied = createWorkspaceServer({ runtime: new WorkspaceRuntime(new MemoryProjectRepository("occupied")), actor: "test", autoStartWorker: false });
+    await new Promise<void>((resolve) => occupied.listen(0, "127.0.0.1", resolve));
+    const address = occupied.address();
+    if (address === null || typeof address === "string") throw new Error("server did not bind");
+    try {
+      await expect(startWorkspaceServer({ port: address.port, projectRoot: os.tmpdir(), projectId: `blocked-${Date.now()}` })).rejects.toMatchObject({ code: "EADDRINUSE" });
+    } finally {
+      await new Promise<void>((resolve, reject) => occupied.close((error) => error === undefined ? resolve() : reject(error)));
+    }
   });
 
   it("accepts defaults from environment when no server options are supplied", async () => {

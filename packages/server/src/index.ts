@@ -95,7 +95,20 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
     ? { projectManager: manager, actor: options.actor ?? "server", ...(options.authToken === undefined ? {} : { authToken: options.authToken }) }
     : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server", ...(options.authToken === undefined ? {} : { authToken: options.authToken }) };
   const server = createWorkspaceServer(serverOptions);
-  await new Promise<void>((resolve) => server.listen(options.port ?? Number(process.env.ST_WORKSPACE_PORT ?? 8787), host, resolve));
+  await new Promise<void>((resolve, reject) => {
+    const listening = (): void => {
+      server.off("error", failed);
+      resolve();
+    };
+    const failed = (error: Error): void => {
+      server.off("listening", listening);
+      server.workspaceWorker.stop();
+      reject(error);
+    };
+    server.once("error", failed);
+    server.once("listening", listening);
+    server.listen(options.port ?? Number(process.env.ST_WORKSPACE_PORT ?? 8787), host);
+  });
   return server;
 }
 

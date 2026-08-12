@@ -156,7 +156,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         return true;
       }
       if (request.method === "GET" && url.pathname === "/workspace/health") {
-        json(response, 200, { status: "ready", worker: deps.worker.status() });
+        json(response, 200, { service: "st-workspace-v3", status: "ready", worker: deps.worker.status() });
         return true;
       }
       if (request.method === "GET" && url.pathname === "/workspace/agents") {

@@ -3,10 +3,10 @@
   "default_agent": "director",
   "mcp": {
     "st-workspace": {
-      "type": "local",
-      "command": ["node", "--import", "tsx/esm", "tools/opencode-mcp.ts"],
-      "cwd": ".",
+      "type": "remote",
+      "url": "http://127.0.0.1:8787/mcp",
       "enabled": true,
+      "oauth": false,
       "timeout": 120000
     }
   },

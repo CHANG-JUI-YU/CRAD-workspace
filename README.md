@@ -277,7 +277,14 @@ host；綁定非本機 host 時必須提供 `--auth-token`，否則拒絕啟動�
 
 ## Dashboard 使用
 
-啟動 HTTP server 後開啟 `http://127.0.0.1:8787/`，即可使用本機 Dashboard 工作台。
+Windows 可直接雙擊工作區根目錄的 `ST-Workspace-Dashboard.cmd`。啟動器會在
+`127.0.0.1:8787` 啟動唯一的本機 HTTP/MCP server，健康檢查通過後自動開啟
+`http://127.0.0.1:8787/`。請保持 CMD 視窗開啟；按 `Ctrl+C` 會停止 server。
+
+OpenCode 的 `st-workspace` MCP 會連到同一個 `http://127.0.0.1:8787/mcp`，不再
+自行建立第二個 runtime。因此使用 OpenCode 前應先啟動 Dashboard；若尚未啟動，
+OpenCode 會顯示 MCP 無法連線。若 8787 已有 ST Workspace server，啟動器會沿用；
+若被其他程式占用則顯示錯誤，不會偷偷改用另一個 port。
 未選專案時顯示首頁三入口（建立新專案／開啟既有專案／舊卡審核）。面板包括：
 
 - 訪談：逐題回答，continue／world／expansion 流程先選目標專案（含 revision 與
