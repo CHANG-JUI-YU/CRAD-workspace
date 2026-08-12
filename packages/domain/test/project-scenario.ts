@@ -30,7 +30,7 @@ export interface ProjectScenarioOptions {
   projectName?: string;
   projectId?: string;
   roster?: ScenarioRosterEntry[];
-  primaryCharacterId?: string;
+  primaryCharacterId?: string | null;
   sourceAdaptation?: boolean;
   acceptedFacts?: ScenarioFact[];
   candidateFacts?: ScenarioFact[];
@@ -232,7 +232,8 @@ export async function projectScenario(options: ProjectScenarioOptions = {}): Pro
   const projectId = options.projectId ?? "scenario-project";
   const repository = new MemoryProjectRepository(projectId);
   const roster = options.roster ?? defaultRoster();
-  const primaryCharacterId = options.primaryCharacterId ?? roster[0]?.id ?? "c01";
+  const primaryCharacterId = options.primaryCharacterId === null ? undefined : options.primaryCharacterId ?? roster[0]?.id ?? "c01";
+  const checkSubjectId = primaryCharacterId ?? roster[0]?.id ?? "c01";
   const projectName = options.projectName ?? "情境專案";
   const timestamp = now();
   const actor = "writer";
@@ -262,7 +263,7 @@ export async function projectScenario(options: ProjectScenarioOptions = {}): Pro
     candidate_blueprint: blueprintCandidate,
     candidate_blueprint_revision: hash(JSON.stringify(blueprintCandidate)),
     checks: [
-      { subject_id: primaryCharacterId, dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" },
+      { subject_id: checkSubjectId, dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" },
     ],
     status: "recorded",
     created_at: timestamp,

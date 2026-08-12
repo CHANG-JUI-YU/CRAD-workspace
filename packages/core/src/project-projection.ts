@@ -28,11 +28,23 @@ export interface BuildPlanEntry {
   revision: string;
 }
 
+export interface PublishPlanDiagnostic {
+  code: string;
+  severity: "error" | "warning";
+  message: string;
+}
+
 export interface PublishPlan {
   mode_selection?: CardModeSelection;
+  export_roster: readonly ProjectBlueprintCharacter[];
+  primary_character_id?: string;
+  primary_character_id_explicit: boolean;
   world_enabled: boolean;
   relationships_enabled: boolean;
+  world_artifact_ids: readonly string[];
+  relationship_artifact_ids: readonly string[];
   entries: readonly BuildPlanEntry[];
+  diagnostics: readonly PublishPlanDiagnostic[];
 }
 
 export type BuildPlan = PublishPlan;
@@ -94,13 +106,6 @@ export function parseArtifactValue(artifact: ArtifactRecord): MaterializedArtifa
 
 function planRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
-
-function getArtifactCharacterId(artifact: ArtifactRecord, rosterIds?: ReadonlySet<string>): string | undefined {
-  const binding = artifactBinding(artifact);
-  if (binding.global || binding.characterIds.length === 0) return undefined;
-  if (rosterIds !== undefined) return binding.characterIds.find((characterId) => rosterIds.has(characterId)) ?? binding.characterIds[0];
-  return binding.characterIds[0];
 }
 
 function textValue(value: unknown): string | undefined {
@@ -242,32 +247,92 @@ function publishPlanFromProjection(projection: ProjectProjection, modeSelection?
   const blueprint = projection.blueprint;
   const worldEnabled = blueprint?.world_enabled ?? true;
   const relationshipsEnabled = blueprint?.relationships_enabled ?? true;
-  const rosterIds = blueprint === undefined || blueprint.characters.length === 0 ? undefined : new Set(blueprint.characters.map((character) => character.id));
-  const characterModes = blueprint === undefined || blueprint.characters.length === 0 ? undefined : new Map(blueprint.characters.flatMap((character) => character.mode === undefined ? [] : [[character.id, character.mode] as const]));
+  const hasBlueprintRoster = blueprint !== undefined && blueprint.characters.length > 0;
+  const rosterIds = hasBlueprintRoster ? new Set(blueprint!.characters.map((character) => character.id)) : undefined;
+  const characterModes = hasBlueprintRoster ? new Map(blueprint!.characters.flatMap((character) => character.mode === undefined ? [] : [[character.id, character.mode] as const])) : undefined;
   let effectiveMode = modeSelection;
   if (effectiveMode === undefined && options.inferMode === true) {
-    const hasZhuji = latest.some((artifact) => artifact.kind === "zhuji");
-    const hasPalette = latest.some((artifact) => artifact.kind === "palette");
+    const hasZhuji = publishPlanFromProjection(projection, "zhuji").entries.some((entry) => entry.kind === "zhuji");
+    const hasPalette = publishPlanFromProjection(projection, "palette").entries.some((entry) => entry.kind === "palette");
     if (hasZhuji !== hasPalette) effectiveMode = hasZhuji ? "zhuji" : "palette";
   }
+  const exportRoster = hasBlueprintRoster
+    ? blueprint!.characters.filter((character) => effectiveMode === undefined
+      ? true
+      : effectiveMode === "both"
+      ? true
+      : character.mode === undefined || character.mode === effectiveMode)
+    : [];
+  const exportRosterIds = new Set(exportRoster.map((character) => character.id));
+  const sourceCharacterIds = [...new Set(latest.flatMap((artifact) => artifactBinding(artifact).characterIds))];
+  const explicitPrimary = blueprint?.primary_character_id_explicit === true ? blueprint.primary_character_id : undefined;
+  const fallbackPrimary = exportRoster[0]?.id ?? (hasBlueprintRoster ? undefined : sourceCharacterIds[0]);
+  const diagnostics: PublishPlanDiagnostic[] = [];
+  let primaryCharacterId: string | undefined;
+  if (explicitPrimary !== undefined) {
+    const excludedByMode = hasBlueprintRoster && effectiveMode !== undefined && rosterIds?.has(explicitPrimary) === true && !exportRosterIds.has(explicitPrimary);
+    if (excludedByMode) {
+      diagnostics.push({
+        code: "PRIMARY_CHARACTER_EXCLUDED_BY_MODE",
+        severity: "error",
+        message: `Explicit primary character ${explicitPrimary} is excluded by selected mode ${effectiveMode}.`,
+      });
+    } else if (rosterIds?.has(explicitPrimary) || sourceCharacterIds.includes(explicitPrimary)) {
+      primaryCharacterId = explicitPrimary;
+    } else {
+      primaryCharacterId = fallbackPrimary;
+      diagnostics.push({
+        code: "PRIMARY_CHARACTER_ID_INVALID",
+        severity: "warning",
+        message: `Blueprint primary_character_id "${explicitPrimary}" is not a known character; using ${fallbackPrimary === undefined ? "no primary character" : `deterministic fallback ${fallbackPrimary}`}.`,
+      });
+    }
+  } else if (fallbackPrimary !== undefined) {
+    primaryCharacterId = fallbackPrimary;
+    diagnostics.push({
+      code: "PRIMARY_CHARACTER_ID_FALLBACK",
+      severity: "warning",
+      message: `Blueprint has no explicit primary_character_id; using the first character in the exact export roster (${fallbackPrimary}).`,
+    });
+  }
+
+  const includesArtifact = (artifact: ArtifactRecord): boolean => {
+    if (NON_PLAN_ARTIFACT_KINDS.has(artifact.kind)) return false;
+    if (artifact.kind === "world_lore") return worldEnabled;
+    if (artifact.kind === "relationship") return relationshipsEnabled;
+    const binding = artifactBinding(artifact);
+    if (artifact.kind === "zhuji" || artifact.kind === "palette") {
+      if (effectiveMode === undefined || (effectiveMode !== "both" && effectiveMode !== artifact.kind)) return false;
+    }
+    if (!hasBlueprintRoster) return true;
+    if (binding.characterIds.length === 0) return binding.global;
+    return binding.characterIds.every((characterId) => exportRosterIds.has(characterId));
+  };
   const entries: BuildPlanEntry[] = [];
   for (const artifact of latest) {
-    if (NON_PLAN_ARTIFACT_KINDS.has(artifact.kind)) continue;
-    if (artifact.kind === "world_lore" && !worldEnabled) continue;
-    if (artifact.kind === "relationship" && !relationshipsEnabled) continue;
-    const boundCid = getArtifactCharacterId(artifact, rosterIds);
-    if (boundCid !== undefined && rosterIds !== undefined && !rosterIds.has(boundCid)) continue;
-    if (boundCid !== undefined && effectiveMode !== undefined && effectiveMode !== "both" && characterModes !== undefined) {
-      const declaredMode = characterModes.get(boundCid);
-      if (declaredMode !== undefined && declaredMode !== effectiveMode) continue;
-    }
-    if (artifact.kind === "zhuji" || artifact.kind === "palette") {
-      if (effectiveMode === undefined) continue;
-      if (effectiveMode !== "both" && effectiveMode !== artifact.kind) continue;
+    if (!includesArtifact(artifact)) continue;
+    const binding = artifactBinding(artifact);
+    if (effectiveMode !== "both" && (artifact.kind === "zhuji" || artifact.kind === "palette") && binding.characterIds.length > 0 && characterModes !== undefined) {
+      const characterId = binding.characterIds[0];
+      const declaredMode = characterId === undefined ? undefined : characterModes.get(characterId);
+      if (characterId !== undefined && declaredMode !== undefined && declaredMode !== artifact.kind) continue;
     }
     entries.push({ key: artifact.key, artifact_id: artifact.id, kind: artifact.kind, revision: artifact.revision });
   }
-  return Object.freeze({ ...(effectiveMode === undefined ? {} : { mode_selection: effectiveMode }), world_enabled: worldEnabled, relationships_enabled: relationshipsEnabled, entries: Object.freeze(entries) });
+  const worldArtifactIds = entries.filter((entry) => entry.kind === "world_lore").map((entry) => entry.artifact_id);
+  const relationshipArtifactIds = entries.filter((entry) => entry.kind === "relationship").map((entry) => entry.artifact_id);
+  return Object.freeze({
+    ...(effectiveMode === undefined ? {} : { mode_selection: effectiveMode }),
+    export_roster: Object.freeze(exportRoster),
+    ...(primaryCharacterId === undefined ? {} : { primary_character_id: primaryCharacterId }),
+    primary_character_id_explicit: explicitPrimary !== undefined,
+    world_enabled: worldEnabled,
+    relationships_enabled: relationshipsEnabled,
+    world_artifact_ids: Object.freeze(worldArtifactIds),
+    relationship_artifact_ids: Object.freeze(relationshipArtifactIds),
+    entries: Object.freeze(entries),
+    diagnostics: Object.freeze(diagnostics),
+  });
 }
 
 export function currentArtifactsFromRecords(artifacts: readonly ArtifactRecord[]): ArtifactRecord[] {

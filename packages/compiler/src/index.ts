@@ -1,7 +1,6 @@
 import {
   canonicalJson,
   computeProjectProjection,
-  currentArtifactsFromRecords,
   contentHash,
   relationshipPerspectiveEntries,
   parseWardrobeMarkdown,
@@ -214,11 +213,11 @@ function stringValues(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()) : [];
 }
 
-export function availableCardModes(artifacts: readonly ArtifactRecord[]): AvailableCardModes {
-  const latest = currentArtifactsFromRecords(artifacts);
+export function availableCardModes(projection: ProjectProjection): AvailableCardModes {
+  const exact = (mode: "zhuji" | "palette"): boolean => projection.publishPlan(mode).entries.some((entry) => entry.kind === mode);
   return {
-    zhuji: latest.some((artifact) => artifact.kind === "zhuji" && modeProjection(artifact) !== undefined),
-    palette: latest.some((artifact) => artifact.kind === "palette" && modeProjection(artifact) !== undefined),
+    zhuji: exact("zhuji"),
+    palette: exact("palette"),
   };
 }
 
@@ -496,51 +495,6 @@ function characterIdsForArtifact(artifact: ArtifactRecord): string[] {
   return [];
 }
 
-function primaryCharacterIdFor(
-  projection: ProjectProjection,
-  artifacts: readonly ArtifactRecord[],
-  sourceOrderedArtifacts: readonly ArtifactRecord[] = artifacts,
-): { id: string | undefined; diagnostics: CompilerDiagnostic[] } {
-  const rosterIds = projection.roster.map((character) => character.id);
-  const sourceCharacterIds = [...new Set(sourceOrderedArtifacts.flatMap(characterIdsForArtifact))];
-  const knownCharacterIds = new Set([...rosterIds, ...sourceCharacterIds]);
-  const fallback = rosterIds[0] ?? sourceCharacterIds[0];
-  const explicitPrimary = projection.blueprint?.primary_character_id_explicit === true
-    ? projection.blueprint.primary_character_id
-    : undefined;
-  if (explicitPrimary !== undefined) {
-    if (knownCharacterIds.has(explicitPrimary)) return { id: explicitPrimary, diagnostics: [] };
-    return {
-      id: fallback,
-      diagnostics: [{
-        code: "PRIMARY_CHARACTER_ID_INVALID",
-        severity: "warning",
-        message: `Blueprint primary_character_id "${explicitPrimary}" is not a known character; using ${fallback === undefined ? "no primary character" : `deterministic fallback ${fallback}`}.`,
-      }],
-    };
-  }
-
-  if (fallback !== undefined && rosterIds[0] !== undefined) {
-    return {
-      id: fallback,
-      diagnostics: [{
-        code: "PRIMARY_CHARACTER_ID_FALLBACK",
-        severity: "warning",
-        message: `Blueprint has no explicit primary_character_id; using roster order (${fallback}) for the primary character.`,
-      }],
-    };
-  }
-
-  return {
-    id: fallback,
-    diagnostics: fallback === undefined ? [] : [{
-      code: "PRIMARY_CHARACTER_ID_FALLBACK",
-      severity: "warning",
-      message: `No explicit primary_character_id or Blueprint roster was found; using source artifact order (${fallback}) for the primary character.`,
-    }],
-  };
-}
-
 function factEntry(fact: FactRecord, index: number): Ccv3LoreEntry {
   const statement = fact.statement.trim();
   const keys = [fact.subject, fact.value].filter((value): value is string => value !== undefined && value.length > 0);
@@ -552,9 +506,10 @@ function projectMetadata(
   primaryCharacterId: string | undefined,
   modeSelection: CardModeSelection | undefined,
   projection: ProjectProjection,
+  exportRoster: readonly { id: string }[],
 ): Record<string, unknown> {
   const artifactIds = new Set(latestArtifacts.flatMap(characterIdsForArtifact));
-  const rosterIds = projection.roster.map((character) => character.id);
+  const rosterIds = exportRoster.map((character) => character.id);
   const ids = [
     ...rosterIds,
     ...[...artifactIds].filter((id) => !rosterIds.includes(id)).sort((left, right) => left.localeCompare(right)),
@@ -605,26 +560,23 @@ function unavailableModeMessage(requested: CardModeSelection, available: Availab
 export function normalizeProject(state: ProjectState, options: CompileOptions = {}): NormalizedProject {
   const projection = computeProjectProjection(state);
   const latest = [...projection.currentArtifacts].sort((left, right) => left.key.localeCompare(right.key));
-  const sourceOrdered = [...projection.currentArtifacts];
-  const available = availableCardModes(latest);
+  const available = availableCardModes(projection);
   const requested = options.mode_selection;
   const modeSelection = resolvedModeSelection(available, requested);
   const plan = projection.publishPlan(modeSelection);
   const planIds = new Set(plan.entries.map((entry) => entry.artifact_id));
   const selected = latest.filter((artifact) => planIds.has(artifact.id));
-  const selectedIds = new Set(selected.map((artifact) => artifact.id));
-  const selectedSourceOrdered = sourceOrdered.filter((artifact) => selectedIds.has(artifact.id));
-  const primarySelection = primaryCharacterIdFor(projection, selected, selectedSourceOrdered);
-  const primaryCharacterId = primarySelection.id;
+  const primaryCharacterId = plan.primary_character_id;
   const names = characterDisplayNames(selected, projection);
   const title = textValue(state.project_name) ?? state.project_id;
   const parts = selected.map((artifact) => artifactEntries(artifact, names, modeSelection));
   const artifactIds = selected.map((artifact) => artifact.id);
   const artifactRevisions = Object.fromEntries(selected.map((artifact) => [artifact.key, artifact.revision]));
-  const projectMetadataValue = projectMetadata(selected, primaryCharacterId, modeSelection, projection);
+  const projectMetadataValue = projectMetadata(selected, primaryCharacterId, modeSelection, projection, plan.export_roster);
+  const planDiagnostics: CompilerDiagnostic[] = plan.diagnostics.map((item) => ({ code: item.code, severity: item.severity, message: item.message }));
   const diagnostics = requested !== undefined && modeSelection === undefined
-    ? [...primarySelection.diagnostics, { code: "MODE_SELECTION_UNAVAILABLE", severity: "error" as const, message: unavailableModeMessage(requested, available) }]
-    : primarySelection.diagnostics;
+    ? [...planDiagnostics, { code: "MODE_SELECTION_UNAVAILABLE", severity: "error" as const, message: unavailableModeMessage(requested, available) }]
+    : planDiagnostics;
   const project: Ccv3Project = {
     project_id: state.project_id,
     title,

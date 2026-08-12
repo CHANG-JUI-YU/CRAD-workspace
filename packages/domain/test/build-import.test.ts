@@ -480,7 +480,7 @@ describe("build, publish and import", () => {
     }
   });
 
-  it("asks for the mode again when both modes are available even if the Blueprint selects one", async () => {
+  it("does not ask for a mode when exact Blueprint scope leaves only one mode", async () => {
     const repository = new MemoryProjectRepository("mode-ask-again");
     const timestamp = new Date().toISOString();
     const precheck = {
@@ -512,13 +512,10 @@ describe("build, publish and import", () => {
     }));
     const service = new BuildService(repository);
     const result = await service.run("op-mode-ask", "preview current card", "builder");
-    expect(result.status).toBe("needs_input");
-    expect(result.summary).toContain("Blueprint 選定");
+    expect(result.status).toBe("completed");
+    expect(result.mode_selection).toBe("zhuji");
     const state = await repository.read();
-    expect(state.audit.some((entry) => entry.event === "build.mode_selection_required")).toBe(true);
-    const confirmed = await service.run("op-mode-ask", "preview current card", "builder", { mode_selection: "zhuji" });
-    expect(confirmed.status).toBe("completed");
-    expect(confirmed.mode_selection).toBe("zhuji");
+    expect(state.audit.some((entry) => entry.event === "build.mode_selection_required")).toBe(false);
   });
 
   it("gates publish against the exact selected mode", async () => {

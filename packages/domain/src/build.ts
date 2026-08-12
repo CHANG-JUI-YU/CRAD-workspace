@@ -13,7 +13,7 @@ import {
   type PublishRecord,
   type RepositoryWriteSet,
 } from "@st-workspace/core";
-import { availableCardModes, compileProject, type CardModeSelection } from "@st-workspace/compiler";
+import { compileProject, type CardModeSelection } from "@st-workspace/compiler";
 import { buildRequiredArtifactManifest } from "./required-artifacts.js";
 import { validateWorkflow } from "./workflow-gate.js";
 import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
@@ -55,7 +55,10 @@ export class BuildService {
       return { status: "needs_input", summary: "目前沒有可建置的 artifact。" };
     }
     const projection = computeProjectProjection(initial);
-    const availableModes = availableCardModes(projection.currentArtifacts);
+    const availableModes = {
+      zhuji: projection.publishPlan("zhuji").entries.some((entry) => entry.kind === "zhuji"),
+      palette: projection.publishPlan("palette").entries.some((entry) => entry.kind === "palette"),
+    };
     const manifest = buildRequiredArtifactManifest(initial);
     const manifestMode = manifest === undefined || manifest.export_modes === "both" ? undefined : manifest.export_modes;
     const modeUsable = (selection: CardModeSelection): boolean => {
@@ -66,7 +69,14 @@ export class BuildService {
       if (selection === "both") return availableModes.zhuji && availableModes.palette;
       return availableModes[selection];
     };
-    const modeSelection = options.mode_selection ?? (manifestMode !== undefined && availableModes[manifestMode] && !(availableModes.zhuji && availableModes.palette) ? manifestMode : undefined);
+    const onlyAvailableMode = availableModes.zhuji === availableModes.palette
+      ? undefined
+      : availableModes.zhuji
+      ? "zhuji"
+      : availableModes.palette
+      ? "palette"
+      : undefined;
+    const modeSelection = options.mode_selection ?? (manifestMode !== undefined && availableModes[manifestMode] ? manifestMode : onlyAvailableMode);
     if (availableModes.zhuji && availableModes.palette && modeSelection === undefined) {
       const question = manifestMode === undefined
         ? "本次打包同時有珠璣與調色盤模組，請選擇：珠璣、調色盤，或兩者。"

@@ -251,6 +251,9 @@ export function buildRequiredArtifactManifest(
   const inScope = new Set<string>();
   const inScopeKeys = new Set<string>();
   const current = projection.currentArtifacts;
+  const publishPlan = projection.publishPlan(exportMode ?? "both");
+  const exactPlanIds = new Set(publishPlan.entries.map((entry) => entry.artifact_id));
+  const exactArtifacts = current.filter((artifact) => exactPlanIds.has(artifact.id));
 
   const addScope = (artifactIds: readonly string[]): void => {
     for (const artifactId of artifactIds) {
@@ -261,7 +264,6 @@ export function buildRequiredArtifactManifest(
     }
   };
 
-  const explicitPrimary = text(blueprint.primary_character_id);
   const rosterOrdered = [...characters]
     .map((item, index) => ({ item, index }))
     .sort((left, right) => {
@@ -269,15 +271,8 @@ export function buildRequiredArtifactManifest(
       const rightOrdinal = typeof right.item.ordinal === "number" ? right.item.ordinal : right.index + 1;
       return leftOrdinal - rightOrdinal;
     });
-  const fallbackPrimary = text(rosterOrdered[0]?.item.id);
-  const primaryCharacterId = explicitPrimary ?? fallbackPrimary;
-  if (explicitPrimary === undefined && fallbackPrimary !== undefined) {
-    diagnostics.push({
-      code: "BLUEPRINT_PRIMARY_CHARACTER_FALLBACK",
-      severity: "warning",
-      message: `Blueprint has no explicit primary_character_id; using roster order (${fallbackPrimary}) for the primary character.`,
-    });
-  }
+  const primaryCharacterId = publishPlan.primary_character_id;
+  for (const diagnostic of publishPlan.diagnostics) diagnostics.push(diagnostic);
 
   const characterRequirements: ManifestCharacterRequirement[] = [];
   for (const { item } of rosterOrdered) {
@@ -337,7 +332,7 @@ export function buildRequiredArtifactManifest(
 
   const world = record(blueprint.world) as BlueprintWorldShape | undefined;
   const worldEnabled = world?.enabled === true;
-  const worldArtifacts = worldArtifactIds(current);
+  const worldArtifacts = worldArtifactIds(exactArtifacts);
   const worldTiming = text(world?.authoring_timing);
   if (worldEnabled) addScope(worldArtifacts);
   if (worldEnabled && worldArtifacts.length === 0) {
@@ -350,7 +345,7 @@ export function buildRequiredArtifactManifest(
 
   const relationships = record(blueprint.relationships) as BlueprintRelationshipsShape | undefined;
   const relationshipsEnabled = relationships?.enabled === true;
-  const relationshipArtifacts = relationshipArtifactIds(current);
+  const relationshipArtifacts = relationshipArtifactIds(exactArtifacts);
   if (relationshipsEnabled) addScope(relationshipArtifacts);
   if (relationshipsEnabled && relationshipArtifacts.length === 0) {
     diagnostics.push({
@@ -360,7 +355,7 @@ export function buildRequiredArtifactManifest(
     });
   }
 
-  const greeting = greetingCoversPrimary(current, primaryCharacterId ?? "");
+  const greeting = greetingCoversPrimary(exactArtifacts, primaryCharacterId ?? "");
   const greetingRequired = characters.length > 0;
   addScope(greeting.artifactIds);
   if (greetingRequired && primaryCharacterId !== undefined && !greeting.complete) {
@@ -382,11 +377,11 @@ export function buildRequiredArtifactManifest(
     if (character.mode === undefined) continue;
     const includedInExport = exportMode === undefined || exportMode === character.mode;
     if (!includedInExport) continue;
-    for (const artifact of current) {
+    for (const artifact of exactArtifacts) {
       if (isModeModule(artifact, character.mode, character.character_id)) addScope([artifact.id]);
     }
   }
-  for (const artifact of current.filter((item) => item.kind === "wardrobe")) {
+  for (const artifact of exactArtifacts.filter((item) => item.kind === "wardrobe")) {
     const parts = artifact.key.split(":");
     const wardrobeCid = parts.length >= 2 ? parts[1] : undefined;
     if (wardrobeCid === undefined || includedCharacterIds.has(wardrobeCid)) {
@@ -408,8 +403,8 @@ export function buildRequiredArtifactManifest(
     relationships: { enabled: relationshipsEnabled, required: relationshipsEnabled, complete: relationshipsEnabled ? relationshipArtifacts.length > 0 : true, artifact_ids: relationshipArtifacts },
     greeting: { enabled: greetingRequired, required: greetingRequired, complete: !greetingRequired || primaryCharacterId === undefined || greeting.complete, artifact_ids: greeting.artifactIds },
     export_modes: exportModes,
-    in_scope_artifact_ids: [...inScope],
-    in_scope_artifact_keys: [...inScopeKeys],
+    in_scope_artifact_ids: publishPlan.entries.map((entry) => entry.artifact_id),
+    in_scope_artifact_keys: publishPlan.entries.map((entry) => entry.key),
     diagnostics,
   };
 }

@@ -56,21 +56,13 @@ function parsedModeModules(state: ProjectState, kind: "zhuji" | "palette", chara
   return modules;
 }
 
-/** Actual buildable modes derived from current module artifacts, mirroring compiler availableCardModes. */
+/** Actual buildable modes derived from the exact publish projection. */
 function availableCardModesRuntime(state: ProjectState): { zhuji: boolean; palette: boolean } {
-  const current = latestByKey(state);
-  const hasModeModule = (kind: "zhuji" | "palette"): boolean => {
-    return current.some((artifact) => {
-      if (artifact.kind !== kind) return false;
-      try {
-        const value = JSON.parse(artifact.content) as { character_id?: unknown; module?: { module?: unknown } };
-        return typeof value.character_id === "string" && typeof value.module?.module === "string";
-      } catch {
-        return false;
-      }
-    });
+  const projection = computeProjectProjection(state);
+  return {
+    zhuji: projection.publishPlan("zhuji").entries.some((entry) => entry.kind === "zhuji"),
+    palette: projection.publishPlan("palette").entries.some((entry) => entry.kind === "palette"),
   };
-  return { zhuji: hasModeModule("zhuji"), palette: hasModeModule("palette") };
 }
 
 function responseFromOperation(operation: OperationRecord): RequestResult {

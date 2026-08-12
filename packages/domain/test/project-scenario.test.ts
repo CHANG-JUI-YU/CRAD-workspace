@@ -115,4 +115,48 @@ describe("project scenario invariants", () => {
     expect(plan.entries.filter((entry) => entry.kind === "palette")).toHaveLength(1);
     expect(new Set(plan.entries.map((entry) => entry.artifact_id)).size).toBe(plan.entries.length);
   });
+
+  it("blocks an explicit primary excluded by the selected mode", async () => {
+    const scenario = await projectScenario({
+      projectName: "Primary mode boundary",
+      roster: [
+        { id: "palette-primary", label: "Palette Primary", mode: "palette" },
+        { id: "zhuji-secondary", label: "Zhuji Secondary", mode: "zhuji" },
+      ],
+      primaryCharacterId: "palette-primary",
+    });
+    const state = await scenario.repository.read();
+    const projection = computeProjectProjection(state);
+    const zhujiPlan = projection.publishPlan("zhuji");
+    const palettePlan = projection.publishPlan("palette");
+
+    expect(zhujiPlan.export_roster.map((character) => character.id)).toEqual(["zhuji-secondary"]);
+    expect(zhujiPlan.primary_character_id).toBeUndefined();
+    expect(zhujiPlan.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "PRIMARY_CHARACTER_EXCLUDED_BY_MODE", severity: "error" }),
+    ]));
+    expect(palettePlan.primary_character_id).toBe("palette-primary");
+    expect(palettePlan.diagnostics).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "PRIMARY_CHARACTER_EXCLUDED_BY_MODE" }),
+    ]));
+  });
+
+  it("uses exact publish scope for mode availability and deterministic primary fallback", async () => {
+    const scenario = await projectScenario({
+      projectName: "Exact mode scope",
+      roster: [{ id: "palette-only", label: "Palette Only", mode: "palette" }],
+      primaryCharacterId: null,
+      outOfRosterCharacterId: "stale-zhuji",
+    });
+    const state = await scenario.repository.read();
+    const projection = computeProjectProjection(state);
+    const plan = projection.publishPlan("palette");
+
+    expect(plan.export_roster.map((character) => character.id)).toEqual(["palette-only"]);
+    expect(plan.primary_character_id).toBe("palette-only");
+    expect(plan.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "PRIMARY_CHARACTER_ID_FALLBACK", severity: "warning" }),
+    ]));
+    expect(plan.entries.some((entry) => entry.key.includes("stale-zhuji"))).toBe(false);
+  });
 });
