@@ -2,21 +2,23 @@ import { spawn } from "node:child_process";
 import type { Server } from "node:http";
 import path from "node:path";
 import { startWorkspaceServer } from "./index.js";
+import { computeRuntimeRevision, WORKSPACE_SERVICE } from "./runtime-revision.js";
 
 export const DASHBOARD_HOST = "127.0.0.1";
 export const DASHBOARD_PORT = 8787;
-export const DASHBOARD_SERVICE = "st-workspace-v3";
+export const DASHBOARD_SERVICE = WORKSPACE_SERVICE;
 export const DASHBOARD_URL = `http://${DASHBOARD_HOST}:${DASHBOARD_PORT}/`;
 export const DASHBOARD_HEALTH_URL = `${DASHBOARD_URL}workspace/health`;
 
 export type DashboardProbeResult =
-  | { status: "available" }
+  | { status: "available"; runtime_revision?: string }
   | { status: "absent" }
   | { status: "occupied"; detail: string };
 
 export interface DashboardLaunchResult {
   ownership: "started" | "reused";
   url: string;
+  runtime_revision: string;
   server?: Server;
   browser_warning?: string;
 }
@@ -24,6 +26,7 @@ export interface DashboardLaunchResult {
 export interface DashboardLauncherDependencies {
   fetch?: typeof globalThis.fetch;
   startServer?: typeof startWorkspaceServer;
+  computeRuntimeRevision?: typeof computeRuntimeRevision;
   openBrowser?: (url: string) => Promise<void>;
   wait?: (milliseconds: number) => Promise<void>;
   log?: (message: string) => void;
@@ -31,7 +34,7 @@ export interface DashboardLauncherDependencies {
 
 export class DashboardLauncherError extends Error {
   constructor(
-    readonly code: "DASHBOARD_PORT_IN_USE" | "DASHBOARD_START_FAILED" | "DASHBOARD_HEALTH_TIMEOUT",
+    readonly code: "DASHBOARD_PORT_IN_USE" | "DASHBOARD_SERVICE_STALE" | "DASHBOARD_BUILD_FAILED" | "DASHBOARD_START_FAILED" | "DASHBOARD_HEALTH_TIMEOUT",
     message: string,
     readonly causeValue?: unknown,
   ) {
@@ -73,9 +76,15 @@ export async function probeDashboardService(
       return { status: "occupied", detail: "health endpoint did not return JSON" };
     }
     const health = record(payload);
-    return health?.service === DASHBOARD_SERVICE && health.status === "ready"
+    if (health?.service !== DASHBOARD_SERVICE || health.status !== "ready") {
+      return { status: "occupied", detail: "health response is not ST Workspace V3" };
+    }
+    const runtimeRevision = typeof health.runtime_revision === "string" && health.runtime_revision.length > 0
+      ? health.runtime_revision
+      : undefined;
+    return runtimeRevision === undefined
       ? { status: "available" }
-      : { status: "occupied", detail: "health response is not ST Workspace V3" };
+      : { status: "available", runtime_revision: runtimeRevision };
   } catch (error) {
     if (errorCode(error) === "ECONNREFUSED") return { status: "absent" };
     return { status: "occupied", detail: error instanceof Error ? error.message : String(error) };
@@ -118,10 +127,22 @@ async function openBrowserWithoutStopping(
     await opener(DASHBOARD_URL);
     return undefined;
   } catch (error) {
-    const warning = `DASHBOARD_BROWSER_OPEN_FAILED：無法自動開啟瀏覽器。請手動開啟 ${DASHBOARD_URL}（${error instanceof Error ? error.message : String(error)}）`;
+    const warning = `DASHBOARD_BROWSER_OPEN_FAILED: unable to open ${DASHBOARD_URL}: ${error instanceof Error ? error.message : String(error)}`;
     log(warning);
     return warning;
   }
+}
+
+function matchesExpectedRevision(probe: DashboardProbeResult, expectedRevision: string): boolean {
+  return probe.status === "available" && probe.runtime_revision === expectedRevision;
+}
+
+function staleError(expectedRevision: string, observedRevision: string | undefined): DashboardLauncherError {
+  const observed = observedRevision === undefined ? "missing" : observedRevision;
+  return new DashboardLauncherError(
+    "DASHBOARD_SERVICE_STALE",
+    `DASHBOARD_SERVICE_STALE: the existing ST Workspace service has runtime revision ${observed}, but the current build is ${expectedRevision}. Close the old Dashboard window and restart it.`,
+  );
 }
 
 export async function launchDashboard(
@@ -131,19 +152,32 @@ export async function launchDashboard(
 ): Promise<DashboardLaunchResult> {
   const fetcher = dependencies.fetch ?? globalThis.fetch;
   const startServer = dependencies.startServer ?? startWorkspaceServer;
+  const calculateRevision = dependencies.computeRuntimeRevision ?? computeRuntimeRevision;
   const openBrowser = dependencies.openBrowser ?? openDashboardBrowser;
   const wait = dependencies.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
   const log = dependencies.log ?? console.log;
+  let expectedRevision: string;
+  try {
+    expectedRevision = await calculateRevision(workspaceRoot);
+  } catch (error) {
+    throw new DashboardLauncherError(
+      "DASHBOARD_BUILD_FAILED",
+      `DASHBOARD_BUILD_FAILED: unable to calculate the built runtime revision: ${error instanceof Error ? error.message : String(error)}`,
+      error,
+    );
+  }
+
   const initialProbe = await probeDashboardService(fetcher);
   if (initialProbe.status === "available") {
-    log(`已沿用既有 ST Workspace 服務：${DASHBOARD_URL}`);
+    if (!matchesExpectedRevision(initialProbe, expectedRevision)) throw staleError(expectedRevision, initialProbe.runtime_revision);
+    log(`Reusing ST Workspace server at ${DASHBOARD_URL}`);
     const browserWarning = await openBrowserWithoutStopping(openBrowser, log);
-    return { ownership: "reused", url: DASHBOARD_URL, ...(browserWarning === undefined ? {} : { browser_warning: browserWarning }) };
+    return { ownership: "reused", url: DASHBOARD_URL, runtime_revision: expectedRevision, ...(browserWarning === undefined ? {} : { browser_warning: browserWarning }) };
   }
   if (initialProbe.status === "occupied") {
     throw new DashboardLauncherError(
       "DASHBOARD_PORT_IN_USE",
-      `DASHBOARD_PORT_IN_USE：${DASHBOARD_HOST}:${DASHBOARD_PORT} 已被非 ST Workspace 服務占用（${initialProbe.detail}）。請關閉占用程式後重試。`,
+      `DASHBOARD_PORT_IN_USE: ${DASHBOARD_HOST}:${DASHBOARD_PORT} is occupied by a non-matching service. Close that service before starting ST Workspace.`,
     );
   }
 
@@ -154,24 +188,27 @@ export async function launchDashboard(
       host: DASHBOARD_HOST,
       port: DASHBOARD_PORT,
       projectRoot: path.resolve(workspaceRoot, "projects"),
+      workspaceRoot,
+      runtimeRevision: expectedRevision,
     });
   } catch (error) {
     const racedProbe = await probeDashboardService(fetcher);
     if (racedProbe.status === "available") {
-      log(`已沿用啟動期間出現的 ST Workspace 服務：${DASHBOARD_URL}`);
+      if (!matchesExpectedRevision(racedProbe, expectedRevision)) throw staleError(expectedRevision, racedProbe.runtime_revision);
+      log(`Reusing ST Workspace server at ${DASHBOARD_URL}`);
       const browserWarning = await openBrowserWithoutStopping(openBrowser, log);
-      return { ownership: "reused", url: DASHBOARD_URL, ...(browserWarning === undefined ? {} : { browser_warning: browserWarning }) };
+      return { ownership: "reused", url: DASHBOARD_URL, runtime_revision: expectedRevision, ...(browserWarning === undefined ? {} : { browser_warning: browserWarning }) };
     }
     if (errorCode(error) === "EADDRINUSE" || racedProbe.status === "occupied") {
       throw new DashboardLauncherError(
         "DASHBOARD_PORT_IN_USE",
-        `DASHBOARD_PORT_IN_USE：${DASHBOARD_HOST}:${DASHBOARD_PORT} 已被其他程式占用。請關閉占用程式後重試。`,
+        `DASHBOARD_PORT_IN_USE: ${DASHBOARD_HOST}:${DASHBOARD_PORT} became occupied while starting ST Workspace.`,
         error,
       );
     }
     throw new DashboardLauncherError(
       "DASHBOARD_START_FAILED",
-      `DASHBOARD_START_FAILED：ST Workspace server 啟動失敗。${error instanceof Error ? error.message : String(error)}`,
+      `DASHBOARD_START_FAILED: ST Workspace server could not start: ${error instanceof Error ? error.message : String(error)}`,
       error,
     );
   }
@@ -181,10 +218,17 @@ export async function launchDashboard(
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const health = await probeDashboardService(fetcher);
     if (health.status === "available") {
-      log(`ST Workspace Dashboard 已啟動：${DASHBOARD_URL}`);
-      log("OpenCode 將共用此服務；請保持本視窗開啟，按 Ctrl+C 可停止。");
+      if (!matchesExpectedRevision(health, expectedRevision)) {
+        await closeDashboardServer(server).catch(() => undefined);
+        throw staleError(expectedRevision, health.runtime_revision);
+      }
+      log(`ST Workspace Dashboard is ready at ${DASHBOARD_URL}`);
       const browserWarning = await openBrowserWithoutStopping(openBrowser, log);
-      return { ownership: "started", url: DASHBOARD_URL, server, ...(browserWarning === undefined ? {} : { browser_warning: browserWarning }) };
+      return { ownership: "started", url: DASHBOARD_URL, runtime_revision: expectedRevision, server, ...(browserWarning === undefined ? {} : { browser_warning: browserWarning }) };
+    }
+    if (health.status === "occupied") {
+      await closeDashboardServer(server).catch(() => undefined);
+      throw new DashboardLauncherError("DASHBOARD_PORT_IN_USE", `DASHBOARD_PORT_IN_USE: port ${DASHBOARD_PORT} is occupied by another service.`);
     }
     if (attempt + 1 < attempts) await wait(delayMs);
   }
@@ -192,6 +236,6 @@ export async function launchDashboard(
   await closeDashboardServer(server).catch(() => undefined);
   throw new DashboardLauncherError(
     "DASHBOARD_HEALTH_TIMEOUT",
-    `DASHBOARD_HEALTH_TIMEOUT：server 未在期限內就緒，已停止本次服務。請查看上方錯誤後重試。`,
+    "DASHBOARD_HEALTH_TIMEOUT: ST Workspace did not become ready before the health check deadline.",
   );
 }

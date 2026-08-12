@@ -306,6 +306,12 @@ const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
     impact: "回答未套用。",
     next_actions: ["重新整理後確認訪談狀態。"],
   },
+  INTERVIEW_MULTI_ROSTER_INCOMPLETE: {
+    category: "project",
+    message_zh: "多人角色卡至少需要兩名角色。",
+    impact: "Blueprint 尚未建立，現有訪談答案仍保留。",
+    next_actions: ["回到角色名單步驟，列出至少兩名角色後繼續訪談。"],
+  },
   BLUEPRINT_CHARACTER_NOT_IN_ROSTER: {
     category: "blueprint",
     message_zh: "角色不在目前 Blueprint 的角色名單中。",

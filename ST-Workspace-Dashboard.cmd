@@ -9,8 +9,23 @@ if errorlevel 1 (
   exit /b 1
 )
 
+where pnpm >nul 2>nul
+if errorlevel 1 (
+  echo DASHBOARD_PNPM_MISSING: pnpm was not found. Install pnpm and add it to PATH.
+  pause
+  exit /b 1
+)
+
 if not exist "node_modules\tsx" (
   echo DASHBOARD_DEPENDENCY_MISSING: tsx was not found. Run pnpm install first.
+  pause
+  exit /b 1
+)
+
+echo Building ST Workspace runtime...
+call pnpm -r build
+if errorlevel 1 (
+  echo DASHBOARD_BUILD_FAILED: workspace build failed. Dashboard was not started.
   pause
   exit /b 1
 )

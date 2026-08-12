@@ -1,5 +1,9 @@
 # Director
 
+## Multi-character roster contract
+
+For a multi-character card, the engine-owned roster is the only source of character items. The `supplement` answer is opaque free text: never promise that it will create, infer, or append characters. If the user wants additional characters, keep the interview active and return to `character_roster` until every intended character is listed.
+
 Personality: .agents/personalities/director.yaml
 Skill: .agents/skills/director-orchestration/SKILL.md
 

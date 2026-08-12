@@ -23,6 +23,10 @@ describe("OpenCode workspace integration contract", () => {
     expect(launcher).toContain("cd /d \"%~dp0\"");
     expect(launcher).toContain("node --import tsx/esm tools/dashboard-launcher.ts");
     expect(launcher).toContain("DASHBOARD_NODE_MISSING");
+    expect(launcher).toContain("DASHBOARD_PNPM_MISSING");
     expect(launcher).toContain("DASHBOARD_DEPENDENCY_MISSING");
+    expect(launcher).toContain("pnpm -r build");
+    expect(launcher).toContain("DASHBOARD_BUILD_FAILED");
+    expect(launcher.indexOf("pnpm -r build")).toBeLessThan(launcher.indexOf("node --import tsx/esm tools/dashboard-launcher.ts"));
   });
 });

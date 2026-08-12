@@ -5,12 +5,14 @@ import { type AgentAdapter, type WorkspaceProjectManager, type WorkspaceRuntime,
 import { structuredError } from "./errors.js";
 import { body, compact, dashboardPathId, dashboardQuery, json, parseRequest } from "./http-utils.js";
 import { mcpProtocolVersion, toolDefinitions } from "./mcp-tools.js";
+import { WORKSPACE_SERVICE } from "./runtime-revision.js";
 
 export interface WorkspaceRouteDeps {
   actor: string;
   projectManager?: WorkspaceProjectManager;
   runtime?: WorkspaceRuntime;
   worker: WorkspaceWorker;
+  runtimeRevision: string;
   getRuntime(): Promise<WorkspaceRuntime>;
   getAgentAdapter(): Promise<AgentAdapter>;
 }
@@ -156,7 +158,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         return true;
       }
       if (request.method === "GET" && url.pathname === "/workspace/health") {
-        json(response, 200, { service: "st-workspace-v3", status: "ready", worker: deps.worker.status() });
+        json(response, 200, { service: WORKSPACE_SERVICE, status: "ready", runtime_revision: deps.runtimeRevision, worker: deps.worker.status() });
         return true;
       }
       if (request.method === "GET" && url.pathname === "/workspace/agents") {

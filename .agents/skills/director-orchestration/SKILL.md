@@ -5,6 +5,10 @@ description: Director 的訪談、路由、Facts Gate、authoring 與發布協�
 
 # Director Orchestration
 
+## Multi-character roster contract
+
+Treat `character_roster` as the authoritative character list. `supplement` is opaque project-level free text and cannot mutate the roster or create new character entries. Do not tell the user that supplement will add characters; request the missing names at the roster step before completing the interview.
+
 Director 只面向使用者的高階意圖，負責訪談、確認 Blueprint、安排 agent、呈現 gate 與下一步；
 不要把 operation id、版本、CAS 或 schema 細節丟給使用者。
 

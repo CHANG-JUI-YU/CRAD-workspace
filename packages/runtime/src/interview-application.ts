@@ -2,8 +2,10 @@ import {
   beginInterview,
   canonicalJson,
   computeProjectProjection,
+  CoreError,
   contentHash,
   FORMAL_NAME_QUESTION_PREFIX,
+  hasValidMultiCharacterRoster,
   internalId,
   normalizeInterviewStateForDisplay,
   parseRelationshipParticipants,
@@ -418,6 +420,9 @@ function worldConfig(interview: InterviewState): Record<string, unknown> | undef
 }
 
 function buildBlueprintPrecheck(projectId: string, operationId: string, interview: InterviewState, actor: string): BlueprintPrecheckRecord {
+  if (!hasValidMultiCharacterRoster(interview)) {
+    throw new CoreError("INTERVIEW_MULTI_ROSTER_INCOMPLETE", "Multi-character cards require at least two roster entries before a Blueprint can be created.", true);
+  }
   const values = interview.values;
   const mode = collaborationMode(values);
   const intakeRevision = contentHash(canonicalJson(values));

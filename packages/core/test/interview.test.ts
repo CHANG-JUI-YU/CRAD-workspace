@@ -14,6 +14,28 @@ function answer(state: InterviewState, value: string): InterviewState {
 }
 
 describe("project interview engine", () => {
+  it("keeps an invalid multi-character completion active and returns to the roster", () => {
+    const state: InterviewState = {
+      schema_version: 1,
+      status: "active",
+      flow: "source_adaptation",
+      current: { id: "additional_settings", text: "Additional settings?", kind: "confirmation", options: ["no", "yes"] },
+      answers: [],
+      values: { card_shape: "多人角色卡" },
+      characters: [{ id: "character-1", label: "Only character", ordinal: 1 }],
+    };
+
+    const next = answer(state, "no");
+
+    expect(next.status).toBe("active");
+    expect(next.current?.id).toBe("character_roster");
+    expect(next.current?.kind).toBe("free_text");
+    expect(next.answers).toHaveLength(1);
+    expect(next.values).toMatchObject({ card_shape: "多人角色卡", additional_settings: "no" });
+    expect(next.characters).toEqual(state.characters);
+    expect(next.confirmed_no_additional_settings).toBeUndefined();
+  });
+
   it("rejects corrupted choice answers without advancing the interview", () => {
     let state = beginInterview(createInterviewState());
 
@@ -62,6 +84,16 @@ describe("project interview engine", () => {
       "\u5B8C\u5168\u539F\u5275",
       "\u539F\u4F5C\u6539\u7DE8",
     ]));
+  });
+
+  it("routes the exact multi-character UI option into the source-adaptation roster", () => {
+    let state = beginInterview(createInterviewState());
+    state = answer(state, "角色設定");
+    state = answer(state, "多人角色卡");
+    state = answer(state, "原作改編");
+
+    expect(state.flow).toBe("source_adaptation");
+    expect(state.current?.id).toBe("character_roster");
   });
 
   it("keeps Zhuji self-introduction out of intake and asks for a Blueprint direction", () => {

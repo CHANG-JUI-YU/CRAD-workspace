@@ -7,6 +7,7 @@ import { structuredError } from "./errors.js";
 export { toolDefinitions } from "./mcp-tools.js";
 import { json } from "./http-utils.js";
 import { handleMcpRequest, handleRestRequest, type WorkspaceRouteDeps } from "./routes.js";
+import { computeRuntimeRevision } from "./runtime-revision.js";
 
 export interface WorkspaceServerOptions {
   runtime?: WorkspaceRuntime;
@@ -16,14 +17,17 @@ export interface WorkspaceServerOptions {
   workerOptions?: WorkspaceWorkerOptions;
   autoStartWorker?: boolean;
   authToken?: string;
+  runtimeRevision?: string;
 }
 
 export interface WorkspaceServer extends Server {
   readonly workspaceWorker: WorkspaceWorker;
+  readonly runtimeRevision: string;
 }
 
 export function createWorkspaceServer(options: WorkspaceServerOptions): WorkspaceServer {
   const actor = options.actor ?? "agent";
+  const runtimeRevision = options.runtimeRevision ?? "manual";
   if (options.runtime === undefined && options.projectManager === undefined) throw new Error("workspace server requires a runtime or project manager");
   const router = new AgentRouter();
   const runtimeForWorker = options.projectManager === undefined
@@ -53,6 +57,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       const deps: WorkspaceRouteDeps = {
         actor,
         worker,
+        runtimeRevision,
         getRuntime,
         getAgentAdapter: async () => new AgentAdapter(await getRuntime(), router),
       };
@@ -71,15 +76,16 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
     }
   });
   server.once("close", () => worker.stop());
-  return Object.assign(server, { workspaceWorker: worker });
+  return Object.assign(server, { workspaceWorker: worker, runtimeRevision });
 }
 
-export async function startWorkspaceServer(options: { port?: number; host?: string; projectRoot?: string; projectId?: string; actor?: string; authToken?: string } = {}): Promise<Server> {
+export async function startWorkspaceServer(options: { port?: number; host?: string; projectRoot?: string; projectId?: string; actor?: string; authToken?: string; workspaceRoot?: string; runtimeRevision?: string } = {}): Promise<Server> {
   const host = options.host ?? process.env.ST_WORKSPACE_HOST ?? "127.0.0.1";
   const isLocalHost = host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
   if (!isLocalHost && options.authToken === undefined) {
     throw new CoreError("EXTERNAL_HOST_AUTH_REQUIRED", `Host ${host} exposes every read/write endpoint; refusing to start without an auth token.`, true);
   }
+  const runtimeRevision = options.runtimeRevision ?? await computeRuntimeRevision(options.workspaceRoot ?? process.cwd());
   const projectRoot = options.projectRoot ?? process.env.ST_WORKSPACE_PROJECT_ROOT ?? "projects";
   const fetcher = new HttpSourceFetcher();
   // An explicitly supplied root is already a complete workspace selection;
@@ -92,8 +98,8 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
     ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true, attachmentStore: new FileAttachmentStore(repository) }) })
     : undefined;
   const serverOptions: WorkspaceServerOptions = manager !== undefined
-    ? { projectManager: manager, actor: options.actor ?? "server", ...(options.authToken === undefined ? {} : { authToken: options.authToken }) }
-    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server", ...(options.authToken === undefined ? {} : { authToken: options.authToken }) };
+    ? { projectManager: manager, actor: options.actor ?? "server", runtimeRevision, ...(options.authToken === undefined ? {} : { authToken: options.authToken }) }
+    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server", runtimeRevision, ...(options.authToken === undefined ? {} : { authToken: options.authToken }) };
   const server = createWorkspaceServer(serverOptions);
   await new Promise<void>((resolve, reject) => {
     const listening = (): void => {

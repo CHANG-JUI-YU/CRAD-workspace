@@ -88,7 +88,19 @@ const isNo = (value: string): boolean => {
     || /不需要(?:任何|什麼)?(?:設定|世界)/iu.test(normalized);
 };
 const isYes = (value: string): boolean => !isNo(value) && (/^(?:yes|y|需要|好|要|啟用|開啟|开启)$/iu.test(value.trim()) || /需要(?:世界|設定)/iu.test(value));
-const isMulti = (value: string): boolean => /multi/iu.test(value) || /多人卡|多角色卡/iu.test(value);
+/** The single authoritative card-shape predicate used by Core and Runtime. */
+export const isMultiCharacterCard = (value: unknown): boolean => typeof value === "string" && (/multi/iu.test(value) || /多人(?:角色)?卡|多角色卡|多人/iu.test(value));
+
+/**
+ * A multi-character card is only valid when the interview has a real roster.
+ * This is deliberately conditional: single-character and world-only flows keep
+ * their backward-compatible semantics.
+ */
+export const hasValidMultiCharacterRoster = (interview: Pick<InterviewState, "values" | "characters">): boolean => (
+  !isMultiCharacterCard(interview.values.card_shape) || (interview.characters !== undefined && interview.characters.length >= 2)
+);
+
+const isMulti = (value: string): boolean => isMultiCharacterCard(value);
 const isWorld = (value: string): boolean => /world/iu.test(value) || /世界|世界觀/iu.test(value);
 const isWorldCharacterCard = (value: string): boolean => /建立含世界的角色卡|character\s*card\s*with\s*world/iu.test(value);
 const isExistingWorld = (value: string): boolean => normalizeChoiceValue(value) === normalizeChoiceValue("既有專案補世界");
@@ -677,6 +689,18 @@ export const workflow_answer_interview = (state: InterviewState, input: Intervie
   const characters = transition.characters ?? state.characters;
   const activeCharacterId = transition.active_character_id ?? state.active_character_id;
   if (transition.complete === true) {
+    if (!hasValidMultiCharacterRoster({ values, ...(characters === undefined ? {} : { characters }) })) {
+      const { confirmed_no_additional_settings: _confirmed, ...activeState } = state;
+      return {
+        ...activeState,
+        flow: transition.flow,
+        current: characterRosterQuestion(true),
+        answers,
+        values,
+        ...(characters === undefined ? {} : { characters }),
+        ...(activeCharacterId === undefined ? {} : { active_character_id: activeCharacterId }),
+      };
+    }
     return {
       schema_version: state.schema_version,
       status: "complete",

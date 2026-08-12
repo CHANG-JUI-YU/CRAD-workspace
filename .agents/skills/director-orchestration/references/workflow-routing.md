@@ -1,5 +1,7 @@
 # Workflow Routing
 
+Roster rule: `character_roster` is authoritative for multi-character projects. A `supplement` response is opaque free text only; it must not be parsed or described as a way to create additional character items. Missing characters must be listed at the roster step before interview completion.
+
 固定 vocabulary 為 intake、source_processing、facts_review、blueprint、pre_world_authoring、pre_world_review、authoring、semantic_review、post_world_authoring、post_world_review、greetings_authoring、content_review、compile_preview、publish_review、published。Engine 依 Blueprint 跳過不適用階段。`before_characters` 必須完成 World Creator 與 World Critic task 後才進入角色 authoring；`after_characters` 必須先完成所有角色與 Character Critic task，才建立 World Creator 與 World Critic task；disabled 跳過四個 world stages。所有路徑都在相關 Critic task 真正完成後才可進入 greetings，世界與角色絕不並行。獨立 worldbook 走 pre-world 兩階段且不要求 characters。
 
 訪談互動固定為單題往返：Director 每輪只呈現引擎目前的唯一問題，等待使用者回答並保存後才呈現下一題。不得將多個未決問題合併成前置問卷、不得一次推進多個訪談分支；多人角色方向也要逐名逐題詢問。這是對使用者的互動契約，不是可由模型自行放寬的呈現偏好。

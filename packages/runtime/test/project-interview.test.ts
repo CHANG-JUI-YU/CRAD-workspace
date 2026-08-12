@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { FileProjectRepository, MemoryProjectRepository, type RequestResult } from "@st-workspace/core";
+import { createProjectState, FileProjectRepository, MemoryProjectRepository, type RequestResult } from "@st-workspace/core";
 import { WorkspaceProjectManager, WorkspaceRuntime } from "../src/index.js";
 
 const roots: string[] = [];
@@ -12,6 +12,35 @@ afterEach(async () => {
 });
 
 describe("project interview runtime", () => {
+  it("rejects an invalid completed multi-character state before creating a precheck", async () => {
+    const repository = new MemoryProjectRepository("invalid-multi-roster");
+    const timestamp = new Date().toISOString();
+    await repository.commit(0, (state) => ({
+      ...createProjectState(state.project_id),
+      project_status: "interviewing" as const,
+      interview: {
+        schema_version: 1 as const,
+        status: "complete" as const,
+        flow: "source_adaptation" as const,
+        answers: [],
+        values: { card_shape: "多人角色卡" },
+        characters: [{ id: "character-1", label: "Only character", ordinal: 1 }],
+      },
+      operations: [{ id: "interview-invalid", kind: "interview" as const, request: "project interview", actor: "user", status: "needs_input" as const, created_at: timestamp, updated_at: timestamp, progress: [] }],
+    }));
+    const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });
+    const before = await repository.read();
+
+    await expect(runtime.answerInterview("no", { actor: "user", attachments: [] })).rejects.toMatchObject({ code: "INTERVIEW_MULTI_ROSTER_INCOMPLETE", recoverable: true });
+
+    const after = await repository.read();
+    expect(after.revision).toBe(before.revision);
+    expect(after.blueprint_prechecks).toHaveLength(0);
+    expect(after.artifacts).toHaveLength(0);
+    expect(after.audit).toHaveLength(0);
+    expect(after.operations).toEqual(before.operations);
+  });
+
   it("pauses new projects for interview and records answers atomically", async () => {
     const repository = new MemoryProjectRepository("project-001");
     const runtime = new WorkspaceRuntime(repository, { interviewRequired: true });

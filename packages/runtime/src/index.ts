@@ -8,6 +8,7 @@ import {
   computeProjectProjection,
   CoreError,
   contentHash,
+  hasValidMultiCharacterRoster,
   createQualityPolicySnapshot,
   executionContextFromOperation,
   validateFactReferences,
@@ -505,6 +506,9 @@ export class WorkspaceRuntime {
       operation = created;
     }
     if (operation === undefined) throw new CoreError("INTERVIEW_OPERATION_NOT_FOUND", "找不到目前的訪談操作", true);
+    if (state.interview.status === "complete" && !hasValidMultiCharacterRoster(state.interview)) {
+      throw new CoreError("INTERVIEW_MULTI_ROSTER_INCOMPLETE", "Multi-character cards require at least two roster entries before a Blueprint can be created.", true);
+    }
     const pendingPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "needs_input");
     if (state.interview.status === "complete" && pendingPrecheck !== undefined) {
       const parsed = state.interview.current === undefined ? undefined : parsePrecheckConfirmQuestionId(state.interview.current.id);
