@@ -7,7 +7,6 @@ export interface AgentResolution {
   readonly kind: RoutedKind;
   readonly intent: string;
   readonly explicit: boolean;
-  readonly fallback: boolean;
 }
 
 function matches(value: string, pattern: RegExp): boolean {
@@ -78,12 +77,12 @@ export class AgentRouter {
       }
       const kind = kindForAgent(explicitDefinition, request);
       /* c8 ignore next -- AgentRegistry requires at least one intent. */
-      return { agent_id: explicitDefinition.id, agent_role: explicitDefinition.role, kind, intent: explicitDefinition.intents[0] ?? "route", explicit: true, fallback: false };
+      return { agent_id: explicitDefinition.id, agent_role: explicitDefinition.role, kind, intent: explicitDefinition.intents[0] ?? "route", explicit: true };
     }
     const kind = classifyIntent(request);
     const selected = specialistFor(kind, request, this.registry);
     /* c8 ignore next -- AgentRegistry requires at least one intent. */
-    return { agent_id: selected.id, agent_role: selected.role, kind, intent: selected.intents[0] ?? "route", explicit: false, fallback: false };
+    return { agent_id: selected.id, agent_role: selected.role, kind, intent: selected.intents[0] ?? "route", explicit: false };
   }
 
   registryView(): AgentRegistry {

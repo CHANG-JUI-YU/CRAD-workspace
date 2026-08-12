@@ -417,100 +417,6 @@ function relationshipEntry(artifact: ArtifactRecord, parsed: Record<string, unkn
   return lines.length === 0 ? [] : [entry(`artifact.${artifact.id}.relationships`, "關係", lines.join("\n"), [...characterIds.map(displayName), ...characterIds], 300)];
 }
 
-function legacyArtifactEntries(artifact: ArtifactRecord, primaryCharacterId?: string): ArtifactParts {
-  const parsed = parseJson(artifact.content);
-  if (artifact.kind === "character" && parsed?.document !== undefined && parsed.document !== null && typeof parsed.document === "object") {
-    const document = parsed.document as Record<string, unknown>;
-    const characterId = textValue(document.id) ?? artifact.name;
-    const primary = primaryCharacterId === undefined || primaryCharacterId === characterId;
-    const summary = textValue(document.summary);
-    const sections = Array.isArray(document.sections) ? document.sections : [];
-    const personality: string[] = [];
-    const scenario: string[] = [];
-    const entries = sections.flatMap((section, index) => {
-      if (section === null || typeof section !== "object" || Array.isArray(section)) return [];
-      const value = section as Record<string, unknown>;
-      const title = textValue(value.title) ?? `Section ${index + 1}`;
-      const content = textValue(value.content);
-      if (content === undefined) return [];
-      if (/personality|trait|性格|特質/iu.test(title)) personality.push(content);
-      if (/scenario|background|背景/iu.test(title)) scenario.push(content);
-      return [entry(`artifact.${artifact.id}.section.${index}`, title, content, [textValue(document.display_name) ?? artifact.name], index + 1)];
-    });
-    const primaryFields: Pick<ArtifactParts, "description" | "personality" | "scenario"> = {};
-    if (primary) {
-      if (summary !== undefined) primaryFields.description = summary;
-      const personalityText = joinText(personality);
-      if (personalityText !== undefined) primaryFields.personality = personalityText;
-      const scenarioText = joinText(scenario);
-      if (scenarioText !== undefined) primaryFields.scenario = scenarioText;
-    }
-    return {
-      ...primaryFields,
-      alternate: [],
-      group_only: [],
-      entries,
-    };
-  }
-  if (artifact.kind === "greeting" && parsed?.document !== undefined && parsed.document !== null && typeof parsed.document === "object") {
-    const greetings = (parsed.document as Record<string, unknown>).greetings;
-    if (Array.isArray(greetings)) {
-      const primary = greetings.find((item) => item !== null && typeof item === "object" && (item as Record<string, unknown>).kind === "primary");
-      const alternate = greetings.filter((item) => item !== null && typeof item === "object" && (item as Record<string, unknown>).kind === "alternate").map((item) => textValue((item as Record<string, unknown>).content) ?? "");
-      const groupOnly = greetings.filter((item) => item !== null && typeof item === "object" && (item as Record<string, unknown>).kind === "group_only").map((item) => textValue((item as Record<string, unknown>).content) ?? "");
-      const firstMes = primary !== undefined && typeof primary === "object" ? textValue((primary as Record<string, unknown>).content) : undefined;
-      return { ...(firstMes === undefined ? {} : { first_mes: firstMes }), alternate, group_only: groupOnly, entries: [] };
-    }
-  }
-  if (artifact.kind === "world_lore" && parsed?.entries !== undefined && Array.isArray(parsed.entries)) {
-    return { alternate: [], group_only: [], entries: parsed.entries.flatMap((item, index) => {
-      if (item === null || typeof item !== "object" || Array.isArray(item)) return [];
-      const value = item as Record<string, unknown>;
-      const id = textValue(value.id) ?? `${artifact.id}-${index}`;
-      const title = textValue(value.title) ?? id;
-      const content = textValue(value.content);
-      return content === undefined ? [] : [entry(`artifact.${artifact.id}.${id}`, title, content, [], index + 1)];
-    }) };
-  }
-  if (artifact.kind === "relationship" && parsed !== undefined) {
-    return { alternate: [], group_only: [], entries: relationshipEntry(artifact, parsed, new Map()) };
-  }
-  const mode = modeProjection(artifact);
-  if (artifact.kind === "wardrobe") {
-    const characterId = artifact.name.split("/")[0]?.trim();
-    const primary = primaryCharacterId === undefined || characterId === primaryCharacterId;
-    const parsed = parseWardrobeMarkdown(artifact.content);
-    if (!parsed.ok) return { alternate: [], group_only: [], entries: [] };
-    const title = parsed.document.title || `${characterId ?? artifact.name} 的衣櫃`;
-    return {
-      ...(primary ? { wardrobe: artifact.content } : {}),
-      alternate: [],
-      group_only: [],
-      entries: [entry(`artifact.${artifact.id}.wardrobe`, title, artifact.content, characterId === undefined ? [] : [characterId], 200)],
-    };
-  }
-  if (mode !== undefined) {
-    const primary = primaryCharacterId === undefined || mode.characterId === primaryCharacterId;
-    let mainFields: Pick<ArtifactParts, "description" | "personality" | "scenario"> = {};
-    if (primary && artifact.kind === "palette" && mode.module === "basic_information") mainFields = { description: mode.text };
-    if (primary && artifact.kind === "palette" && mode.module === "personality_palette") mainFields = { personality: mode.text };
-    if (primary && artifact.kind === "zhuji" && ["appearance", "self_introduction"].includes(mode.module)) mainFields = { description: mode.text };
-    if (primary && artifact.kind === "zhuji" && ["inner_nature", "trait_refinement", "trait_dialogue"].includes(mode.module)) mainFields = { personality: mode.text };
-    if (primary && artifact.kind === "zhuji" && ["extension", "scene_dialogue"].includes(mode.module)) mainFields = { scenario: mode.text };
-    return {
-      ...mainFields,
-      alternate: [],
-      group_only: [],
-      entries: [entry(`artifact.${artifact.id}.mode`, `${mode.mode}/${mode.module}: ${mode.title}`, mode.text, [mode.characterId, mode.module], 100)],
-    };
-  }
-  if (["conversion", "plugin", "review", "source_research", "fact_curation", "fact_review", "import_analysis", "director_routing"].includes(artifact.kind)) {
-    return { alternate: [], group_only: [], entries: [] };
-  }
-  const fallback = artifact.content.trim();
-  return { ...(fallback.length > 0 ? { description: fallback } : {}), alternate: [], group_only: [], entries: fallback.length > 0 ? [entry(`artifact.${artifact.id}`, artifact.name, fallback)] : [] };
-}
-
 function artifactEntries(artifact: ArtifactRecord, names: ReadonlyMap<string, string>, modeSelection: CardModeSelection | undefined): ArtifactParts {
   const parsed = parseJson(artifact.content);
   if (artifact.kind === "greeting" && parsed?.document !== undefined && parsed.document !== null && typeof parsed.document === "object") {
@@ -864,6 +770,3 @@ export function compileWorkspaceBundle(bundleValue: unknown, options: CompileOpt
   const json = canonicalJson(card);
   return { card, json, png: writeCardToPng(undefined, card, { includeV2Backfill: true }), content_hash: contentHash(json) };
 }
-
-export const buildProject = compileProject;
-export const normalizeAuthorProject = normalizeProject;

@@ -31,12 +31,6 @@ function parseBuildModeSelection(value: string): BuildModeSelection | undefined 
   return undefined;
 }
 
-function hasUsableArtifact(_artifact: ProjectState["artifacts"][number]): boolean {
-  // v3 currently models artifact liveness through revision replacement rather
-  // than stale/missing statuses; keep this boundary for future status growth.
-  return true;
-}
-
 /** Current projection: the latest revision per artifact key, mirroring domain/gate semantics. */
 function latestByKey(state: ProjectState): ArtifactRecord[] {
   return [...computeProjectProjection(state).currentArtifacts];
@@ -51,7 +45,7 @@ function blueprintRosterIds(state: ProjectState): Set<string> | undefined {
 function parsedModeModules(state: ProjectState, kind: "zhuji" | "palette", characterId: string): Set<string> {
   const modules = new Set<string>();
   for (const artifact of latestByKey(state)) {
-    if (artifact.kind !== kind || !hasUsableArtifact(artifact)) continue;
+    if (artifact.kind !== kind) continue;
     try {
       const value = JSON.parse(artifact.content) as { character_id?: unknown; module?: { module?: unknown } };
       if (value.character_id === characterId && typeof value.module?.module === "string") modules.add(value.module.module);
@@ -100,7 +94,6 @@ export {
   executionLeaseGuard,
   stripLease,
   parseBuildModeSelection,
-  hasUsableArtifact,
   latestByKey,
   blueprintRosterIds,
   parsedModeModules,

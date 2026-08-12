@@ -307,3 +307,30 @@ Dashboard 會在每次操作期間顯示 loading 並暫停重複操作；失敗�
 operation，只問一個可恢復的高階問題，不要求使用者補底層參數。error boundary
 以 CoreError.recoverable 分類 HTTP 400／500 與 MCP -32602／-32603，未知錯誤一律
 回 INTERNAL_ERROR。
+
+## Legacy 策略與收束
+
+Legacy 能力只保留在明確的 import／migration／repair 邊界，新專案一律走
+Blueprint 路徑（訪談 → precheck → Blueprint → plan gate → compiler），不會進入
+任何 legacy fallback：
+
+- **保留：舊卡導入**。`ImportService`（YAML／CCv3 V1/V2/V3）與訪談的「舊卡審核」
+  流程（`importLegacyCard`）會把卡片正規化為 Character／Greeting／World artifact。
+- **保留：舊 state migration**。`FileProjectRepository` 讀取時自動歸檔 legacy
+  layout（root `state.json`／`proposals/`／舊 exports），寫入 `migration.json`；
+  v2 `fact_review_passes` 會在載入時 backfill 為 `fact_review_decisions`
+  （不開啟新的 Review Run）。
+- **保留：repair／migration adapter**。`repairPreview`／`repairRun`（plan hash +
+  `REPAIR_PLAN_STALE`）、CLI `repair-export`（`compileWorkspaceBundle` 投影舊
+  bundle）、`inspectLegacyProject`（唯讀 legacy 目錄掃描）、
+  `applyLegacyFactReview`（v2 fact review 相容 adapter）皆為唯讀或一次性搬遷
+  工具；新審查流量只走 FactReviewRun／FactReviewDecision。
+- **新專案防護**。managed 專案（`interviewRequired`）必須先完成 precheck 確認才
+  能建置；`workflow-gate` 對未確認 precheck 回 `BLUEPRINT_PRECHECK_REQUIRED`，
+  authoring readiness 驗證 Blueprint roster／mode／前置模組。無 Blueprint 的
+  full-artifact gate 只服務 legacy／unmanaged 專案的相容性。
+- **已移除的 dead code**。compiler 的 `legacyArtifactEntries` 與
+  `buildProject`／`normalizeAuthorProject` aliases、runtime 的恆真
+  `hasUsableArtifact`、`AgentResolution.fallback` 旗標、重複的
+  `resolveExecutionContext`／`executionContextFor` 實作、knowledge.ts 中註解掉的
+  舊 `applyReview` 實作，均已清除。

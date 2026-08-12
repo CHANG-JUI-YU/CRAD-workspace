@@ -191,7 +191,7 @@ import { dashboardSnapshot as dashboardSnapshotQuery, publishPreview as publishP
 import { dashboardArtifacts as dashboardArtifactsQuery, dashboardArtifact as dashboardArtifactQuery, dashboardArtifactHistory as dashboardArtifactHistoryQuery, dashboardAudit as dashboardAuditQuery, dashboardBuilds as dashboardBuildsQuery, dashboardCandidates as dashboardCandidatesQuery, dashboardFacts as dashboardFactsQuery, dashboardIssues as dashboardIssuesQuery, dashboardOperation as dashboardOperationQuery, dashboardOperations as dashboardOperationsQuery, dashboardPublishes as dashboardPublishesQuery, dashboardReviewRun as dashboardReviewRunQuery, dashboardReviewRuns as dashboardReviewRunsQuery, dashboardReviews as dashboardReviewsQuery, dashboardSource as dashboardSourceQuery, dashboardSources as dashboardSourcesQuery, dashboardSummary as dashboardSummaryQuery, dashboardCandidate as dashboardCandidateQuery } from "./dashboard-query.js";
 import { applyFactReviewBatch as applyFactReviewBatchQuery, factReviewContext as factReviewContextQuery, reextract as reextractQuery, resolveFactConflict as resolveFactConflictQuery, startFactReviewRun as startFactReviewRunQuery } from "./fact-review-application.js";
 import { buildBlueprintPrecheck, collaborationMode, createBlueprintArtifact, directionForSubject, intakeKeyForConfirmation, interviewCharacterSubjects, interviewContext as interviewContextQuery, isBarePrecheckConfirmation, isBlueprintConfirmation, isBlueprintRevisionRequest, latestBlueprintSnapshot, mergeExpansionIntoBlueprint, mergePatchBlueprint, mergeWorldIntoBlueprint, nonEmptyInterviewValue, nonEmptyString, objectValue, PALETTE_MODULE_ORDER, parsePrecheckConfirmQuestionId, precheckConfirmQuestion, precheckSubjectLabel, sourceAdaptationIntentFromValues, sourceFactsReady, startInterview as startInterviewQuery, worldConfig, isSourceAdaptationProject, relationshipConfig, authoringModeForSubject, canonPolicyFromValues, ZHUJI_MODULE_ORDER } from "./interview-application.js";
-import { availableCardModesRuntime, blueprintRosterIds, executionLeaseGuard, hasUsableArtifact, latestByKey, now, OPERATION_LEASE_MS, parsedModeModules, parseBuildModeSelection, responseFromOperation, stripLease } from "./operation-runner.js";
+import { availableCardModesRuntime, blueprintRosterIds, executionLeaseGuard, latestByKey, now, OPERATION_LEASE_MS, parsedModeModules, parseBuildModeSelection, responseFromOperation, stripLease } from "./operation-runner.js";
 import { defaultAgentForTemplate, nextFactReviewer, pluginIdOf, proposalCapability, resolveNaturalReviewTarget, reviewCriticForArtifactKind } from "./operation-recovery.js";
 import { createAdaptationDecision as createAdaptationDecisionQuery, executionContextFor as executionContextForQuery, resolveExecutionContext as resolveExecutionContextQuery, selectSourceCandidates as selectSourceCandidatesQuery, sourceCandidates as sourceCandidatesQuery } from "./source-application.js";
 export * from "./runtime-views.js";
@@ -733,26 +733,7 @@ export class WorkspaceRuntime {
   }
 
   resolveExecutionContext(operation: OperationRecord, optionalAgent?: string): { agent_id: string; agent_role: string } {
-    const snapshotAgent = operation.execution_snapshot?.execution_agent_id;
-    const snapshotRole = operation.execution_snapshot?.execution_agent_role;
-    if (snapshotAgent !== undefined && snapshotAgent.trim().length > 0) {
-      return { agent_id: snapshotAgent.trim(), agent_role: snapshotRole ?? "specialist" };
-    }
-    if (optionalAgent !== undefined && optionalAgent.trim().length > 0) {
-      return { agent_id: optionalAgent.trim(), agent_role: "specialist" };
-    }
-    switch (operation.kind) {
-      case "authoring":
-        return { agent_id: "director", agent_role: "orchestrator" };
-      case "review":
-        return { agent_id: "fact-reviewer-1", agent_role: "fact_reviewer" };
-      case "knowledge":
-        return { agent_id: "fact-curator", agent_role: "fact_curator" };
-      case "source":
-        return { agent_id: "source-researcher", agent_role: "source_researcher" };
-      default:
-        return { agent_id: "director", agent_role: "orchestrator" };
-    }
+    return resolveExecutionContextQuery(operation, optionalAgent);
   }
 
   private executionContextFor(
@@ -761,16 +742,7 @@ export class WorkspaceRuntime {
     identity?: { id: string; role: string },
     options: { lease?: ExecutionLeaseContext; target?: { artifactId: string; artifactKind?: ArtifactKind }; capabilities?: readonly string[] } = {},
   ): ExecutionContext {
-    const resolvedLegacy = this.resolveExecutionContext(operation);
-    const resolved = identity ?? { id: resolvedLegacy.agent_id, role: resolvedLegacy.agent_role };
-    const auditActor = workspace.actor.trim().length > 0 ? workspace.actor.trim() : operation.actor ?? "worker";
-    return executionContextFromOperation(operation, {
-      auditActor,
-      executionAgent: resolved,
-      ...(options.lease === undefined ? {} : { lease: options.lease }),
-      ...(options.target === undefined ? {} : { target: options.target }),
-      ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
-    });
+    return executionContextForQuery(operation, workspace, identity, options);
   }
 
   private async assertExecutionLease(execution: ExecutionContext): Promise<void> {
@@ -2556,7 +2528,6 @@ export class WorkspaceRuntime {
     if (!workflowBacked) return;
     const latestRecordedPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
     const blueprint = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint"
-      && hasUsableArtifact(artifact)
       && (latestRecordedPrecheck === undefined || artifact.blueprint_precheck_id === latestRecordedPrecheck.id));
     if (blueprint === undefined) {
       throw new CoreError("BLUEPRINT_REQUIRED", "請先完成並保存 Blueprint，確認後才能開始珠璣或調色盤模組創作。", true);
@@ -2623,7 +2594,6 @@ export class WorkspaceRuntime {
     if (!workflowBacked) return;
     const latestRecordedPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
     const blueprint = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint"
-      && hasUsableArtifact(artifact)
       && (latestRecordedPrecheck === undefined || artifact.blueprint_precheck_id === latestRecordedPrecheck.id));
     if (blueprint === undefined) {
       throw new CoreError("BLUEPRINT_REQUIRED", "請先完成並保存 Blueprint，確認後才能建立衣櫃。", true);
@@ -2649,7 +2619,6 @@ export class WorkspaceRuntime {
     if (!workflowBacked) return;
     const latestRecordedPrecheck = [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
     const blueprint = [...state.artifacts].reverse().find((artifact) => artifact.kind === "blueprint"
-      && hasUsableArtifact(artifact)
       && (latestRecordedPrecheck === undefined || artifact.blueprint_precheck_id === latestRecordedPrecheck.id));
     const world = blueprint === undefined ? undefined : (() => {
       try {
@@ -2661,8 +2630,8 @@ export class WorkspaceRuntime {
     if (world?.enabled !== true) return;
     const timing = typeof world.authoring_timing === "string" && world.authoring_timing.length > 0 ? world.authoring_timing : "before_characters";
     const characterKinds: readonly ArtifactKind[] = ["character", "zhuji", "palette", "wardrobe"];
-    const hasWorldLore = latestByKey(state).some((artifact) => artifact.kind === "world_lore" && hasUsableArtifact(artifact));
-    const hasCharacterSide = latestByKey(state).some((artifact) => characterKinds.includes(artifact.kind) && hasUsableArtifact(artifact));
+    const hasWorldLore = latestByKey(state).some((artifact) => artifact.kind === "world_lore");
+    const hasCharacterSide = latestByKey(state).some((artifact) => characterKinds.includes(artifact.kind));
     if (timing === "before_characters") {
       if (characterKinds.includes(kind) && !hasWorldLore) {
         throw new CoreError("WORLD_AUTHORING_ORDER", "世界設定需在角色創作之前完成；請先建立世界設定。", true);
