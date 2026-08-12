@@ -194,12 +194,14 @@ export const relationshipNetworkSummarySchema = z
 
 export const relationshipsDocumentSchema = z
   .object({
-    schema_version: z.literal(1),
+    schema_version: z.union([z.literal(1), z.literal(2)]),
     document_id: templateIdSchema,
     team_code: relationshipTeamCodeSchema,
     character_ids: z.array(templateIdSchema).min(2),
     character_summaries: z.array(relationshipCharacterSummarySchema),
-    perspectives: z.array(directionalPerspectiveSchema),
+    perspectives: z.array(directionalPerspectiveSchema).optional(),
+    self_perspectives: z.array(directionalPerspectiveSchema).default([]),
+    edges: z.array(directionalPerspectiveSchema).default([]),
     groups: z.array(relationshipGroupSchema).default([]),
     summary: relationshipNetworkSummarySchema,
     provenance: z.array(templateProvenanceSchema).default([]),
@@ -219,13 +221,24 @@ export const relationshipsDocumentSchema = z
     });
     for (const id of participants) if (!summaries.has(id)) context.addIssue({ code: "custom", path: ["character_summaries"], message: `missing summary for ${id}` });
     const pairs = new Set<string>();
-    document.perspectives.forEach((perspective, index) => {
-      if (!participants.has(perspective.source_character_id) || !participants.has(perspective.target_character_id)) context.addIssue({ code: "custom", path: ["perspectives", index], message: "perspective must use participant ids" });
-      const key = `${perspective.source_character_id}\u0000${perspective.target_character_id}`;
-      if (pairs.has(key)) context.addIssue({ code: "custom", path: ["perspectives", index], message: "perspective pair must be unique" });
+    const validatePerspective = (item: { source_character_id: string; target_character_id: string }, path: (string | number)[], requireSelf: boolean | undefined): void => {
+      if (!participants.has(item.source_character_id) || !participants.has(item.target_character_id)) context.addIssue({ code: "custom", path, message: "perspective must use participant ids" });
+      if (requireSelf === true && item.source_character_id !== item.target_character_id) context.addIssue({ code: "custom", path, message: "self perspective must use the same source and target" });
+      if (requireSelf === false && item.source_character_id === item.target_character_id) context.addIssue({ code: "custom", path, message: "directed edge must not be a self perspective" });
+      const key = `${item.source_character_id}\u0000${item.target_character_id}`;
+      if (pairs.has(key)) context.addIssue({ code: "custom", path, message: "perspective pair must be unique" });
       pairs.add(key);
-    });
-    for (const source of participants) for (const target of participants) if (!pairs.has(`${source}\u0000${target}`)) context.addIssue({ code: "custom", path: ["perspectives"], message: `missing perspective ${source} -> ${target}` });
+    };
+    if (document.schema_version === 1) {
+      if (document.perspectives === undefined) context.addIssue({ code: "custom", path: ["perspectives"], message: "v1 relationship documents require the full perspectives matrix" });
+      document.perspectives?.forEach((perspective, index) => validatePerspective(perspective, ["perspectives", index], undefined));
+      for (const source of participants) for (const target of participants) if (!pairs.has(`${source}\u0000${target}`)) context.addIssue({ code: "custom", path: ["perspectives"], message: `missing perspective ${source} -> ${target}` });
+    } else {
+      if (document.perspectives !== undefined) context.addIssue({ code: "custom", path: ["perspectives"], message: "v2 relationship documents use self_perspectives and edges instead of perspectives" });
+      document.self_perspectives.forEach((perspective, index) => validatePerspective(perspective, ["self_perspectives", index], true));
+      document.edges.forEach((perspective, index) => validatePerspective(perspective, ["edges", index], false));
+      for (const id of participants) if (!pairs.has(`${id}\u0000${id}`)) context.addIssue({ code: "custom", path: ["self_perspectives"], message: `missing self perspective for ${id}` });
+    }
     const groups = new Set<string>();
     document.groups.forEach((group, groupIndex) => {
       if (groups.has(group.id)) context.addIssue({ code: "custom", path: ["groups", groupIndex, "id"], message: "group id must be unique" });
@@ -576,7 +589,7 @@ export const TEMPLATE_GUIDES: Readonly<Record<TemplateKind, { skill: string; tit
   palette: { skill: "palette-creation", title: "Palette module", required: ["character_id", "module.module", "module.title", "module.content"], example: { kind: "palette", character_id: "demo", module: { schema_version: 1, mode: "palette", module: "basic_information", title: "Basic information", content: "A compact palette description" } } },
   wardrobe: { skill: "wardrobe-creation", title: "Cross-mode wardrobe", required: ["character_id", "content"], example: { kind: "wardrobe", character_id: "demo", content: "wardrobe.md tables must include 款式、顏色、材質、數量、主要場合、狀態、備註; same cut in different colors must be separate rows with concrete fit, care, storage and use notes" } },
   greetings: { skill: "greetings-creation", title: "Greetings document", required: ["document.greetings", "one greeting.kind=primary"], example: { kind: "greetings", document: { schema_version: 1, greetings: [{ id: "arrival", kind: "primary", content: "Hello.", character_ids: ["demo"] }] } } },
-  relationships: { skill: "relationship-creation", title: "Relationship network", required: ["document.character_ids", "document.character_summaries", "document.perspectives", "document.summary"], example: { kind: "relationships", document: "include every participant pair in perspectives" } },
+  relationships: { skill: "relationship-creation", title: "Relationship network", required: ["document.character_ids", "document.character_summaries", "document.self_perspectives", "document.edges", "document.summary"], example: { kind: "relationships", document: "schema_version 2; include one self_perspective per participant and only non-neutral directed edges" } },
   world: { skill: "world-lore-creation", title: "World lore entries", required: ["document_id", "entries", "entries[].category", "entries[].title", "entries[].content"], example: { kind: "world", document_id: "harbor-network", entries: [{ schema_version: 1, id: "harbor", category: "geography", title: "Harbor", content: "A coastal city" }] } },
   conversion: { skill: "mode-conversion", title: "Mode conversion", required: ["character_id", "source_mode", "target_mode", "modules", "mappings"], example: { kind: "conversion", character_id: "demo", source_mode: "zhuji", target_mode: "palette", modules: [], mappings: [{ source: "appearance", target: "basic_information", summary: "maps appearance to basic information" }] } },
   import_analysis: { skill: "card-import-analysis", title: "Card import mapping", required: ["mappings", "losses", "recommendations"], example: { kind: "import_analysis", mappings: [{ source_field: "/name", target_contract: "character", target_field: "/display_name", summary: "direct mapping" }] } },

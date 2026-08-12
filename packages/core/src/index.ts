@@ -12,6 +12,7 @@ export * from "./core-utilities.js";
 export * from "./project-state.js";
 export * from "./operations.js";
 export * from "./project-projection.js";
+export * from "./relationship-graph.js";
 export * from "./project-state-schema.js";
 export * from "./artifact-fingerprint.js";
 export * from "./repository/project-repository.js";

@@ -3,6 +3,7 @@ import {
   contentHash,
   CoreError,
   internalId,
+  normalizeSparseRelationshipsDocument,
   templateProposalValueSchema,
   zhujiProposalValueSchema,
   type ArtifactKind,
@@ -148,15 +149,18 @@ export class AuthoringService {
     await assertExecutionLease(this.repository, execution);
     const parsed = templateProposalValueSchema.safeParse(proposal);
     if (!parsed.success) throw new CoreError("TEMPLATE_SCHEMA_INVALID", parsed.error.message, true);
-    if (parsed.data.kind === "zhuji") return this.createZhuji(operationId, parsed.data, actorInput, legacyAuditActor);
-    if (parsed.data.kind === "conversion") return this.conversion.materialize(operationId, parsed.data, actorInput, legacyAuditActor);
+    const proposalValue = parsed.data.kind === "relationships"
+      ? { ...parsed.data, document: normalizeSparseRelationshipsDocument(parsed.data.document) }
+      : parsed.data;
+    if (proposalValue.kind === "zhuji") return this.createZhuji(operationId, proposalValue, actorInput, legacyAuditActor);
+    if (proposalValue.kind === "conversion") return this.conversion.materialize(operationId, proposalValue, actorInput, legacyAuditActor);
     const initial = await this.repository.read();
     const operation = initial.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
-    const kind = templateArtifactKind(parsed.data.kind);
-    const name = templateName(parsed.data);
-    const key = keyFor(kind, keyName(parsed.data));
-    const content = parsed.data.kind === "wardrobe" ? parsed.data.content : canonicalJson(parsed.data);
+    const kind = templateArtifactKind(proposalValue.kind);
+    const name = templateName(proposalValue);
+    const key = keyFor(kind, keyName(proposalValue));
+    const content = proposalValue.kind === "wardrobe" ? proposalValue.content : canonicalJson(proposalValue);
     const hash = contentHash(content);
     const previous = [...initial.artifacts].reverse().find((artifact) => artifact.key === key);
     const artifact: ArtifactRecord = {
@@ -165,7 +169,7 @@ export class AuthoringService {
       kind,
       name,
       content,
-      media_type: parsed.data.kind === "wardrobe" ? "text/markdown" : "application/json",
+      media_type: proposalValue.kind === "wardrobe" ? "text/markdown" : "application/json",
       content_hash: hash,
       revision: hash,
       status: "draft",
@@ -176,7 +180,7 @@ export class AuthoringService {
       ...(previous === undefined ? {} : { based_on: previous.revision }),
       ...blueprintBinding(initial),
     };
-    const summary = `Stored ${parsed.data.kind} template ${name}.`;
+    const summary = `Stored ${proposalValue.kind} template ${name}.`;
     let reusedId: string | undefined;
     await this.repository.commit(initial.revision, (current) => {
       assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
@@ -186,7 +190,7 @@ export class AuthoringService {
         return {
           ...current,
           operations: current.operations.map((item) => item.id === operationId
-            ? updateOperation(item, { status: "completed", result_summary: `Template ${parsed.data.kind} is already stored.` })
+            ? updateOperation(item, { status: "completed", result_summary: `Template ${proposalValue.kind} is already stored.` })
             : item),
         };
       }
@@ -195,7 +199,7 @@ export class AuthoringService {
         ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
         artifacts: [...current.artifacts, artifact],
         operations: current.operations.map((item) => item.id === operationId
-          ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: artifact.id, status: "completed", message: `Validated ${parsed.data.kind} template.` }], result_summary: summary })
+            ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: artifact.id, status: "completed", message: `Validated ${proposalValue.kind} template.` }], result_summary: summary })
           : item),
         audit: [...current.audit, {
           id: internalId("audit"),
@@ -204,11 +208,11 @@ export class AuthoringService {
           actor: auditActor,
           occurred_at: now(),
           project_revision: current.revision + 1,
-          details: { artifact_id: artifact.id, key, template_kind: parsed.data.kind, artifact_kind: kind, based_on: previous?.revision, agent_id: actor },
+          details: { artifact_id: artifact.id, key, template_kind: proposalValue.kind, artifact_kind: kind, based_on: previous?.revision, agent_id: actor },
         }],
       };
     });
-    if (reusedId !== undefined) return { artifact_id: reusedId, artifact_key: key, status: "completed", summary: `Reused existing ${parsed.data.kind} template.` };
+    if (reusedId !== undefined) return { artifact_id: reusedId, artifact_key: key, status: "completed", summary: `Reused existing ${proposalValue.kind} template.` };
     return { artifact_id: artifact.id, artifact_key: key, status: "completed", summary };
   }
 

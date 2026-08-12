@@ -10,7 +10,7 @@ import {
   type ProjectState,
 } from "@st-workspace/core";
 import { FACT_REVIEW_POLICY_REVISION, factCandidateRevision } from "./fact-policy.js";
-import { candidateOccurrenceForFact, latestDecisionForOccurrence } from "./fact-projection.js";
+import { candidateOccurrenceForFact, latestDecisionForOccurrence, reviewRunProjectionRevision as canonicalReviewRunProjectionRevision } from "./fact-projection.js";
 
 export interface FactReviewContextOptions {
   cursor?: string;
@@ -88,19 +88,7 @@ export function buildFactReviewContext(state: ProjectState, options: FactReviewC
 }
 
 export function reviewProjectionRevision(state: ProjectState, runId: string): string {
-  const run = state.fact_review_runs.find((candidate) => candidate.id === runId);
-  const occurrenceIds = new Set(run?.candidate_occurrence_ids ?? state.fact_review_decisions.filter((decision) => decision.review_run_id === runId).map((decision) => decision.candidate_occurrence_id));
-  return contentHash(canonicalJson({
-    run_id: runId,
-    facts: state.facts.filter((fact) => occurrenceIds.has(candidateOccurrenceForFact(fact))).map((fact) => ({
-      id: fact.id,
-      occurrence: candidateOccurrenceForFact(fact),
-      status: fact.status,
-      fact_revision: fact.fact_revision ?? 0,
-      evidence_revision: fact.evidence_revision,
-    })).sort((left, right) => left.occurrence.localeCompare(right.occurrence)),
-    decisions: state.fact_review_decisions.filter((decision) => decision.review_run_id === runId).map((decision) => ({ id: decision.id, occurrence: decision.candidate_occurrence_id, decision: decision.decision, candidate_revision: decision.candidate_revision })),
-  }));
+  return canonicalReviewRunProjectionRevision(state, runId);
 }
 
 export interface FactReviewRunPlan {

@@ -30,11 +30,12 @@ describe("semantic project compilation", () => {
       artifact("relationship-team", "relationship:team", "relationship", "team", {
         kind: "relationships",
         document: {
-          schema_version: 1,
+          schema_version: 2,
           team_code: "ABC123",
           character_ids: ["demo", "other"],
           character_summaries: [{ character_id: "demo", summary: "The anchor." }, { character_id: "other", summary: "The counterpoint." }],
-          perspectives: [{ source_character_id: "demo", target_character_id: "other", summary: "Trusts the counterpoint." }, { source_character_id: "other", target_character_id: "demo", summary: "Challenges the anchor." }],
+          self_perspectives: [{ source_character_id: "demo", target_character_id: "demo", summary: "Sees itself as the anchor." }, { source_character_id: "other", target_character_id: "other", summary: "Sees itself as independent." }],
+          edges: [{ source_character_id: "demo", target_character_id: "other", summary: "Trusts the counterpoint." }],
           groups: [],
           summary: { network_character: "A balanced pair.", inter_group_relations: "None.", stability: "Stable.", conflict_triggers: [], intimacy_opportunities: [] },
           provenance: [],
@@ -58,6 +59,9 @@ describe("semantic project compilation", () => {
       "關係",
     ]));
     expect(first.card.data.character_book?.entries.some((entry) => entry.content.includes("Trusts the counterpoint."))).toBe(true);
+    const relationshipEntry = first.card.data.character_book?.entries.find((entry) => entry.content.includes("Self perspectives:"));
+    expect(relationshipEntry).toBeDefined();
+    expect(relationshipEntry?.content ?? "").toContain("Directed edges:");
     expect(first.card.data.character_book?.entries.some((entry) => entry.content.includes("demo/zhuji-to-palette"))).toBe(false);
     const workspace = first.card.data.extensions["card-workspace"] as { project?: { primary_character_id?: string; characters?: Array<{ id: string }>; mode_artifacts?: unknown[] } };
     expect(workspace.project?.primary_character_id).toBe("demo");

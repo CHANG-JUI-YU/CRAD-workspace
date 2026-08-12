@@ -6,6 +6,7 @@ import {
   factCurationProposalValueSchema,
   greetingsDocumentSchema,
   htmlSourceSchema,
+  normalizeSparseRelationshipsDocument,
   paletteProposalValueSchema,
   pluginProposalValueSchema,
   relationshipsDocumentSchema,
@@ -114,7 +115,7 @@ describe("structured template contracts", () => {
     expect(factCurationProposalValueSchema.safeParse(values[10]).success).toBe(true);
   });
 
-  it("enforces primary greetings and complete relationship perspectives", () => {
+  it("enforces primary greetings and supports sparse relationship graphs with v1 migration", () => {
     expect(greetingsDocumentSchema.safeParse({ schema_version: 1, greetings: [{ id: "a", kind: "alternate", content: "Hi", character_ids: ["demo"] }] }).success).toBe(false);
     expect(greetingsDocumentSchema.safeParse({ schema_version: 1, greetings: [
       { id: "a", kind: "primary", content: "Hi", character_ids: ["demo"] },
@@ -124,6 +125,24 @@ describe("structured template contracts", () => {
     expect(relationshipsDocumentSchema.safeParse({ ...relationshipDocument, character_ids: ["alice", "alice"], character_summaries: [] }).success).toBe(false);
     expect(relationshipsDocumentSchema.safeParse({ ...relationshipDocument, character_summaries: [{ character_id: "unknown", summary: "No participant." }] }).success).toBe(false);
     expect(relationshipsDocumentSchema.safeParse({ ...relationshipDocument, perspectives: [...relationshipDocument.perspectives, { source_character_id: "alice", target_character_id: "beth", summary: "Duplicate." }] }).success).toBe(false);
+    const { perspectives: _legacyPerspectives, ...sparseBase } = relationshipDocument;
+    const sparse = {
+      ...sparseBase,
+      schema_version: 2 as const,
+      self_perspectives: [
+        { source_character_id: "alice", target_character_id: "alice", summary: "Sees herself as careful." },
+        { source_character_id: "beth", target_character_id: "beth", summary: "Sees herself as direct." },
+      ],
+      edges: [{ source_character_id: "alice", target_character_id: "beth", summary: "Trusts Beth's courage." }],
+    };
+    const parsedSparse = relationshipsDocumentSchema.safeParse(sparse);
+    expect(parsedSparse.success).toBe(true);
+    expect(relationshipsDocumentSchema.safeParse({ ...sparse, self_perspectives: sparse.self_perspectives.slice(0, 1) }).success).toBe(false);
+    const migrated = normalizeSparseRelationshipsDocument(relationshipDocument);
+    expect(migrated.schema_version).toBe(2);
+    expect(migrated.self_perspectives).toHaveLength(2);
+    expect(migrated.edges).toHaveLength(2);
+    expect("perspectives" in migrated).toBe(false);
     expect(relationshipsDocumentSchema.safeParse({ ...relationshipDocument, groups: [{ id: "g", name: "Group", member_ids: ["alice", "alice"], formation_cause: "Cause", operating_pattern: "Pattern", exclusivity: "Open", joining_conditions: "Invite" }, { id: "g", name: "Group 2", member_ids: ["unknown", "beth"], formation_cause: "Cause", operating_pattern: "Pattern", exclusivity: "Open", joining_conditions: "Invite" }] }).success).toBe(false);
   });
 

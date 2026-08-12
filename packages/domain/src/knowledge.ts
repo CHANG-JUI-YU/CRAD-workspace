@@ -239,24 +239,8 @@ function factCandidateRevision(fact: FactRecord, sources: readonly SourceRecord[
   }));
 }
 
-export function reviewRunProjectionRevision(state: { facts: readonly FactRecord[]; fact_review_decisions: readonly FactReviewDecisionRecord[] }, runId: string): string {
-  return contentHash(canonicalJson({
-    run_id: runId,
-    facts: state.facts.map((fact) => ({
-      id: fact.id,
-      candidate_occurrence_id: candidateOccurrenceForFact(fact),
-      status: fact.status,
-      fact_revision: fact.fact_revision ?? 0,
-      updated_at: fact.updated_at,
-    })),
-    decisions: state.fact_review_decisions.filter((decision) => decision.review_run_id === runId).map((decision) => ({
-      id: decision.id,
-      candidate_occurrence_id: decision.candidate_occurrence_id,
-      decision: decision.decision,
-      reviewer_identity: decision.reviewer_identity,
-      candidate_revision: decision.candidate_revision,
-    })),
-  }));
+export function reviewRunProjectionRevision(state: { facts: readonly FactRecord[]; fact_review_decisions: readonly FactReviewDecisionRecord[]; fact_review_runs?: readonly FactReviewRunRecord[] }, runId: string): string {
+  return pipelineReviewRunProjectionRevision(state, runId);
 }
 
 function latestDecisionForOccurrence(

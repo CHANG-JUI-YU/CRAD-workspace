@@ -3,6 +3,7 @@ import {
   computeProjectProjection,
   currentArtifactsFromRecords,
   contentHash,
+  relationshipPerspectiveEntries,
   parseWardrobeMarkdown,
   pluginProposalValueSchema,
   type ArtifactRecord,
@@ -351,7 +352,7 @@ function relationshipEntry(artifact: ArtifactRecord, parsed: Record<string, unkn
     : [];
   const displayName = (id: string): string => names.get(id) ?? id;
   const summaries = Array.isArray(document.character_summaries) ? document.character_summaries : [];
-  const perspectives = Array.isArray(document.perspectives) ? document.perspectives : [];
+  const perspectives = relationshipPerspectiveEntries(document);
   const groups = Array.isArray(document.groups) ? document.groups : [];
   const summary = recordValue(document.summary);
   const network = joinText([
@@ -371,8 +372,18 @@ function relationshipEntry(artifact: ArtifactRecord, parsed: Record<string, unkn
       return value === undefined ? undefined : `- ${id === undefined ? "unknown" : displayName(id)}: ${textValue(value.summary) ?? ""}`;
     }).filter((item): item is string => item !== undefined).join("\n")}`);
   }
-  if (perspectives.length > 0) {
-    lines.push(`Perspectives:\n${perspectives.map((item) => {
+  const selfPerspectives = perspectives.filter((item) => item.source_character_id === item.target_character_id);
+  const directedEdges = perspectives.filter((item) => item.source_character_id !== item.target_character_id);
+  if (selfPerspectives.length > 0) {
+    lines.push(`Self perspectives:\n${selfPerspectives.map((item) => {
+      const value = recordValue(item);
+      const source = textValue(value?.source_character_id);
+      const target = textValue(value?.target_character_id);
+      return value === undefined ? undefined : `- ${source === undefined ? "unknown" : displayName(source)} -> ${target === undefined ? "unknown" : displayName(target)}: ${textValue(value.summary) ?? ""}`;
+    }).filter((item): item is string => item !== undefined).join("\n")}`);
+  }
+  if (directedEdges.length > 0) {
+    lines.push(`Directed edges:\n${directedEdges.map((item) => {
       const value = recordValue(item);
       const source = textValue(value?.source_character_id);
       const target = textValue(value?.target_character_id);

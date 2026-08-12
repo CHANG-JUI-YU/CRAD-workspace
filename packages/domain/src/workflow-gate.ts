@@ -1,4 +1,4 @@
-import { artifactDependencyFingerprint, computeProjectProjection, parseWardrobeMarkdown, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
+import { artifactDependencyFingerprint, computeProjectProjection, parseWardrobeMarkdown, relationshipPerspectiveEntries, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "./required-artifacts.js";
 import { contradictingAcceptedFacts } from "./knowledge.js";
 
@@ -171,7 +171,7 @@ function reportMissingReferences(state: ProjectState, artifacts: ArtifactRecord[
         const item = record(summary);
         if (typeof item?.character_id === "string" && !characters.has(normalized(item.character_id))) refs.push(item.character_id);
       }
-      for (const perspective of Array.isArray(document?.perspectives) ? document.perspectives : []) {
+      for (const perspective of relationshipPerspectiveEntries(document)) {
         const item = record(perspective);
         for (const id of [item?.source_character_id, item?.target_character_id]) {
           if (typeof id === "string" && !characters.has(normalized(id))) refs.push(id);
