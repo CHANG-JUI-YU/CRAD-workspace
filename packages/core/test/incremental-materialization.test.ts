@@ -50,6 +50,82 @@ function structuredArtifact(id: string, key: string, kind: ArtifactRecord["kind"
   };
 }
 
+type WinnerCase = {
+  label: string;
+  kind: Extract<ArtifactRecord["kind"], "character" | "world_lore" | "greeting" | "zhuji" | "wardrobe">;
+  key: string;
+  name: string;
+  content: (marker: string) => string;
+  media_type: "application/json" | "text/markdown";
+};
+
+const winnerCases: WinnerCase[] = [
+  {
+    label: "Character",
+    kind: "character",
+    key: "character:c01",
+    name: "c01",
+    media_type: "application/json",
+    content: (marker) => JSON.stringify({ document: { id: "c01", display_name: "Character", summary: marker } }),
+  },
+  {
+    label: "World",
+    kind: "world_lore",
+    key: "world_lore:setting",
+    name: "setting",
+    media_type: "application/json",
+    content: (marker) => JSON.stringify({ kind: "world", entries: [{ id: marker, title: marker, content: marker }] }),
+  },
+  {
+    label: "Greeting",
+    kind: "greeting",
+    key: "greeting:project",
+    name: "project",
+    media_type: "application/json",
+    content: (marker) => JSON.stringify({ kind: "greetings", document: { greetings: [{ id: "primary", kind: "primary", content: marker, character_ids: ["c01"] }] } }),
+  },
+  {
+    label: "Mode",
+    kind: "zhuji",
+    key: "zhuji:c01/appearance",
+    name: "c01/appearance",
+    media_type: "application/json",
+    content: (marker) => JSON.stringify({ kind: "zhuji", character_id: "c01", module: { module: "appearance" }, data: { marker } }),
+  },
+  {
+    label: "Wardrobe",
+    kind: "wardrobe",
+    key: "wardrobe:c01",
+    name: "c01/wardrobe",
+    media_type: "text/markdown",
+    content: (marker) => `# Wardrobe\n\n${marker}`,
+  },
+];
+
+function winnerRevision(spec: WinnerCase, marker: string): ArtifactRecord {
+  const content = spec.content(marker);
+  const hash = contentHash(content);
+  return {
+    id: `${spec.kind}-${marker.toLowerCase()}`,
+    key: spec.key,
+    kind: spec.kind,
+    name: spec.name,
+    content,
+    media_type: spec.media_type,
+    content_hash: hash,
+    revision: hash,
+    status: "draft",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    created_by: "test",
+    operation_id: "op-test",
+  };
+}
+
+function contentText(content: string | Uint8Array): string {
+  return typeof content === "string" ? content : Buffer.from(content).toString("utf8");
+}
+
 function fact(id: string, subject?: string, entityRefs?: string[], classification: FactRecord["classification"] = "trait"): FactRecord {
   return {
     id,
@@ -115,6 +191,31 @@ describe("incremental materialization and dependency fingerprints", () => {
     expect(writeSet.files?.some((file) => file.path.includes("wardrobe/revisions/"))).toBe(true);
     expect(writeSet.files?.some((file) => file.content.toString().includes("Old wardrobe"))).toBe(true);
     expect(writeSet.files?.some((file) => file.path.endsWith("wardrobe/wardrobe.md") && file.content.toString().includes("New wardrobe"))).toBe(true);
+  });
+
+  it.each(winnerCases)("re-materializes the previous $label winner after removing the current revision", async (spec) => {
+    const empty = createProjectState(`winner-${spec.kind}`);
+    const revisionA = winnerRevision(spec, "A");
+    const revisionB = winnerRevision(spec, "B");
+    const withA = { ...empty, artifacts: [revisionA] };
+    const withB = { ...withA, revision: 1, artifacts: [revisionA, revisionB] };
+    const afterRemovingB = { ...withB, revision: 2, artifacts: [revisionA] };
+
+    const materialized = new Map<string, string>();
+    const apply = (writeSet: Awaited<ReturnType<typeof incrementalMaterializationWriteSet>>) => {
+      for (const path of writeSet.remove ?? []) materialized.delete(path);
+      for (const file of writeSet.files ?? []) materialized.set(file.path, contentText(file.content));
+    };
+
+    apply(await incrementalMaterializationWriteSet(empty, withA, "C:/project"));
+    apply(await incrementalMaterializationWriteSet(withA, withB, "C:/project"));
+    expect([...materialized.values()].some((content) => content.includes("B"))).toBe(true);
+
+    const rollback = await incrementalMaterializationWriteSet(withB, afterRemovingB, "C:/project");
+    expect(rollback.files?.some((file) => contentText(file.content).includes("A"))).toBe(true);
+    apply(rollback);
+    expect([...materialized.values()].some((content) => content.includes("A"))).toBe(true);
+    expect([...materialized.values()].some((content) => content.includes("B"))).toBe(false);
   });
 
   it("uses stable entity semantics for character, relationship and greeting fact dependencies", () => {

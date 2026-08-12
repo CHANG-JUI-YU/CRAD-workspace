@@ -2,7 +2,7 @@ import { mkdir, open, rename, stat } from "node:fs/promises";
 import path from "node:path";
 import type { ArtifactKind, ArtifactRecord, ProjectState } from "../project-state.js";
 import { canonicalJson, CoreError } from "../core-utilities.js";
-import { parseArtifactValue } from "../project-projection.js";
+import { currentArtifactsFromRecords, parseArtifactValue } from "../project-projection.js";
 import type { RepositoryFile, RepositoryWriteSet } from "./project-repository.js";
 
 export interface PublishMaterializationPaths {
@@ -219,17 +219,6 @@ function controlMaterializedFiles(state: ProjectState): RepositoryFile[] {
   ];
 }
 
-function artifactSignature(artifact: ArtifactRecord): string {
-  return canonicalJson({ id: artifact.id, key: artifact.key, revision: artifact.revision, content_hash: artifact.content_hash, status: artifact.status, dependency_fingerprint: artifact.dependency_fingerprint });
-}
-
-function artifactCharacterIdForMaterialization(artifact: ArtifactRecord): string | undefined {
-  const value = parseArtifactValue(artifact);
-  const document = value.document as Record<string, unknown> | undefined;
-  const characterId = typeof document?.id === "string" ? document.id : typeof value.character_id === "string" ? value.character_id : undefined;
-  return characterId ?? (artifact.kind === "zhuji" || artifact.kind === "palette" || artifact.kind === "wardrobe" ? artifact.name.split("/")[0]?.trim() : undefined);
-}
-
 function artifactPathForState(root: string, state: ProjectState, artifact: ArtifactRecord): string {
   const folders = characterFolderById(state.artifacts);
   const worldCounts = new Map<string, number>();
@@ -250,32 +239,40 @@ function materializedArtifactPath(root: string, state: ProjectState, artifact: A
   return artifactPathForState(root, state, artifact);
 }
 
-function affectedArtifactIds(previous: ProjectState, current: ProjectState): Set<string> {
-  const ids = new Set<string>();
-  const previousById = new Map(previous.artifacts.map((artifact) => [artifact.id, artifact]));
-  const currentById = new Map(current.artifacts.map((artifact) => [artifact.id, artifact]));
-  for (const [id, artifact] of currentById) {
-    const previousArtifact = previousById.get(id);
-    if (previousArtifact === undefined || artifactSignature(artifact) !== artifactSignature(previousArtifact)) ids.add(id);
-  }
-  for (const id of previousById.keys()) if (!currentById.has(id)) ids.add(id);
+function currentWinnerByKey(state: ProjectState): Map<string, ArtifactRecord> {
+  return new Map(currentArtifactsFromRecords(state.artifacts).map((artifact) => [artifact.key, artifact]));
+}
 
-  const previousFolders = characterFolderById(previous.artifacts);
-  const currentFolders = characterFolderById(current.artifacts);
-  const affectedCharacters = new Set<string>();
-  for (const id of new Set([...previousFolders.keys(), ...currentFolders.keys()])) if (previousFolders.get(id) !== currentFolders.get(id)) affectedCharacters.add(id);
-  const previousWorldCounts = new Map<string, number>();
-  const currentWorldCounts = new Map<string, number>();
-  for (const artifact of previous.artifacts) if (artifact.kind === "world_lore") previousWorldCounts.set(artifact.name, (previousWorldCounts.get(artifact.name) ?? 0) + 1);
-  for (const artifact of current.artifacts) if (artifact.kind === "world_lore") currentWorldCounts.set(artifact.name, (currentWorldCounts.get(artifact.name) ?? 0) + 1);
-  const affectedWorldNames = new Set<string>();
-  for (const name of new Set([...previousWorldCounts.keys(), ...currentWorldCounts.keys()])) if (previousWorldCounts.get(name) !== currentWorldCounts.get(name)) affectedWorldNames.add(name);
-  for (const artifact of [...previous.artifacts, ...current.artifacts]) {
-    const characterId = artifactCharacterIdForMaterialization(artifact);
-    if (characterId !== undefined && affectedCharacters.has(characterId)) ids.add(artifact.id);
-    if (artifact.kind === "world_lore" && affectedWorldNames.has(artifact.name)) ids.add(artifact.id);
+function winnerMaterializationSignature(root: string, state: ProjectState, artifact: ArtifactRecord | undefined): string {
+  return canonicalJson(artifact === undefined
+    ? null
+    : {
+      id: artifact.id,
+      revision: artifact.revision,
+      path: materializedArtifactPath(root, state, artifact),
+    });
+}
+
+/**
+ * Compare the materialized winner for each logical artifact key. Historical
+ * revisions are intentionally ignored: only the previous and current winner
+ * can own a public path. This makes removing B from A -> B restore A.
+ */
+function affectedArtifactKeys(previous: ProjectState, current: ProjectState, root: string): Set<string> {
+  const previousWinners = currentWinnerByKey(previous);
+  const currentWinners = currentWinnerByKey(current);
+  const keys = new Set([...previousWinners.keys(), ...currentWinners.keys()]);
+  return new Set([...keys].filter((key) => winnerMaterializationSignature(root, previous, previousWinners.get(key))
+    !== winnerMaterializationSignature(root, current, currentWinners.get(key))));
+}
+
+function materializedArtifactsByPath(root: string, state: ProjectState, key: string): Map<string, ArtifactRecord> {
+  const files = new Map<string, ArtifactRecord>();
+  for (const artifact of state.artifacts) {
+    if (artifact.key !== key || !isPublicArtifactKind(artifact.kind)) continue;
+    files.set(materializedArtifactPath(root, state, artifact), artifact);
   }
-  return ids;
+  return files;
 }
 
 function changedControlFiles(previous: ProjectState, current: ProjectState): RepositoryFile[] {
@@ -321,26 +318,19 @@ export async function incrementalMaterializationWriteSet(
 ): Promise<RepositoryWriteSet> {
   const files = changedControlFiles(previous, current);
   const remove = new Set<string>();
-  const changed = affectedArtifactIds(previous, current);
-  const previousById = new Map(previous.artifacts.map((artifact) => [artifact.id, artifact]));
-  const currentById = new Map(current.artifacts.map((artifact) => [artifact.id, artifact]));
-  const changedWardrobeKeys = new Set<string>();
-  for (const id of changed) {
-    const artifact = currentById.get(id) ?? previousById.get(id);
-    if (artifact?.kind === "wardrobe") changedWardrobeKeys.add(artifact.key);
-  }
-  for (const artifact of [...previous.artifacts, ...current.artifacts]) {
-    if (artifact.kind === "wardrobe" && changedWardrobeKeys.has(artifact.key)) changed.add(artifact.id);
-  }
+  const changedKeys = affectedArtifactKeys(previous, current, root);
   const currentPaths = new Set<string>();
-  for (const id of changed) {
-    const oldArtifact = previousById.get(id);
-    const newArtifact = currentById.get(id);
-    if (oldArtifact !== undefined && isPublicArtifactKind(oldArtifact.kind)) remove.add(materializedArtifactPath(root, previous, oldArtifact));
-    if (newArtifact !== undefined && isPublicArtifactKind(newArtifact.kind)) {
-      const target = materializedArtifactPath(root, current, newArtifact);
+  for (const key of changedKeys) {
+    const previousFiles = materializedArtifactsByPath(root, previous, key);
+    const currentFiles = materializedArtifactsByPath(root, current, key);
+    for (const target of previousFiles.keys()) {
+      if (!currentFiles.has(target)) remove.add(target);
+    }
+    for (const [target, artifact] of currentFiles) {
       currentPaths.add(target);
-      files.push({ path: target, content: newArtifact.content.endsWith("\n") ? newArtifact.content : `${newArtifact.content}\n` });
+      const previousArtifact = previousFiles.get(target);
+      if (previousArtifact?.id === artifact.id && previousArtifact.revision === artifact.revision) continue;
+      files.push({ path: target, content: artifact.content.endsWith("\n") ? artifact.content : `${artifact.content}\n` });
     }
   }
   const previousPublish = previous.publishes.at(-1);
