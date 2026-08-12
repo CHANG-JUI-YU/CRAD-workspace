@@ -362,6 +362,7 @@ export function dashboard(): string {
           <h2 id="artifact-heading">Artifact 工作台</h2>
           <p class="muted">一個 key 一列目前版本；可展開查看原始／格式化內容、與前一版差異，並送審或下載。</p>
         </div>
+        <button id="load-artifacts" type="button">載入 Artifact</button>
       </div>
       <div id="artifact-message" class="panel-message" aria-live="polite">尚未取得 artifact 資料。</div>
       <div id="artifact-list" class="artifact-list"></div>
@@ -374,6 +375,7 @@ export function dashboard(): string {
     <section class="panel" aria-labelledby="quality-heading">
       <div class="panel-heading">
         <h2 id="quality-heading">品質門檻</h2>
+        <button id="load-issues" type="button">載入 Issues</button>
       </div>
       <label for="quality-level">Quality level</label>
       <select id="quality-level">
@@ -416,6 +418,7 @@ export function dashboard(): string {
           <h2 id="source-fact-heading">來源與事實</h2>
           <p class="muted">候選來源、已入庫來源與知識事實的目前狀態。</p>
         </div>
+        <button id="load-source-facts" type="button">載入來源與事實</button>
       </div>
       <div id="source-fact-message" class="panel-message" aria-live="polite">尚未取得來源與事實資料。</div>
       <div id="candidate-list" class="candidate-list"></div>
@@ -454,6 +457,7 @@ export function dashboard(): string {
             <option value="terminal">已完成／已取消</option>
           </select>
         </label>
+        <button id="load-operations" type="button">載入 Operations</button>
       </div>
       <div id="operation-message" class="panel-message" aria-live="polite">尚未取得 operation 資料。</div>
       <div id="operation-list" class="operation-list"></div>
@@ -1377,11 +1381,26 @@ export function dashboard(): string {
       function renderArtifactList(snapshot) {
         var target = byId("artifact-list");
         target.textContent = "";
+        var artifactItems = Array.isArray(snapshot.items) ? snapshot.items : (Array.isArray(snapshot.artifacts) ? snapshot.artifacts : []);
         var groups = Array.isArray(snapshot.artifact_groups) ? snapshot.artifact_groups : [];
+        if (groups.length === 0 && artifactItems.length > 0) {
+          for (var itemIndex = 0; itemIndex < artifactItems.length; itemIndex += 1) {
+            var item = artifactItems[itemIndex];
+            if (!isRecord(item)) continue;
+            var existing = groups.find(function (candidate) { return isRecord(candidate) && candidate.key === item.key; });
+            if (existing) {
+              if (!Array.isArray(existing.revisions)) existing.revisions = [];
+              existing.revisions.push(item);
+              existing.current = item;
+            } else {
+              groups.push({ key: item.key, current: item, revisions: [item] });
+            }
+          }
+        }
         if (groups.length === 0) {
           byId("artifact-message").textContent = "目前沒有 artifact。";
         } else {
-          byId("artifact-message").textContent = "共 " + groups.length + " 個 artifact key（" + (Array.isArray(snapshot.artifacts) ? snapshot.artifacts.length : 0) + " 個 revision）。";
+          byId("artifact-message").textContent = "共 " + groups.length + " 個 artifact key（" + (typeof snapshot.total === "number" ? snapshot.total : artifactItems.length) + " 個 revision）。";
         }
         var reviews = Array.isArray(snapshot.reviews) ? snapshot.reviews : [];
         for (var i = 0; i < groups.length; i += 1) {
@@ -1451,6 +1470,25 @@ export function dashboard(): string {
           detail.hidden = !detail.hidden;
           return;
         }
+        var artifactId = firstString(artifact, ["id"]);
+        if (!hasOwn(artifact, "content") && artifactId) {
+          var loading = document.createElement("div");
+          loading.className = "artifact-detail artifact-raw";
+          loading.textContent = "Loading artifact detail…";
+          row.append(loading);
+          requestJson("/workspace/dashboard/artifacts/" + encodeURIComponent(artifactId)).then(function (fullArtifact) {
+            loading.textContent = "";
+            var heading = document.createElement("div");
+            heading.className = "detail-heading";
+            heading.textContent = "Artifact detail";
+            var pre = document.createElement("pre");
+            pre.textContent = artifactDisplayContent(fullArtifact);
+            loading.append(heading, pre);
+          }).catch(function (error) {
+            loading.textContent = errorText(error);
+          });
+          return;
+        }
         var container = document.createElement("div");
         container.className = "artifact-detail artifact-raw";
         var heading = document.createElement("div");
@@ -1463,10 +1501,60 @@ export function dashboard(): string {
         container.hidden = false;
       }
 
+      function renderArtifactDiff(container, current, previous) {
+        var heading = document.createElement("div");
+        heading.className = "detail-heading";
+        heading.textContent = "Artifact diff";
+        if (!isRecord(previous)) {
+          heading.textContent = "No previous artifact revision.";
+          container.append(heading);
+          return;
+        }
+        heading.textContent = "Diff " + String(firstString(previous, ["revision"]) || "?").slice(0, 8) + " → " + String(firstString(current, ["revision"]) || "?").slice(0, 8);
+        var lines = lineDiff(firstString(previous, ["content"]) || "", firstString(current, ["content"]) || "");
+        var pre = document.createElement("pre");
+        pre.className = "diff-view";
+        for (var i = 0; i < lines.length; i += 1) {
+          var lineNode = document.createElement("div");
+          lineNode.textContent = lines[i].text;
+          if (lines[i].type === "added") lineNode.className = "diff-added";
+          else if (lines[i].type === "removed") lineNode.className = "diff-removed";
+          pre.append(lineNode);
+        }
+        container.append(heading, pre);
+      }
+
       function toggleArtifactDiff(row, current, revisions) {
         var detail = findRowDetail(row, "artifact-diff");
         if (detail !== null) {
           detail.hidden = !detail.hidden;
+          return;
+        }
+        if (!hasOwn(current, "content") || revisions.length <= 1 || !hasOwn(revisions[revisions.length - 2], "content")) {
+          var loading = document.createElement("div");
+          loading.className = "artifact-detail artifact-diff";
+          loading.textContent = "Loading artifact history…";
+          row.append(loading);
+          var currentId = firstString(current, ["id"]);
+          var key = firstString(current, ["key"]) || currentId || "";
+          requestJson("/workspace/dashboard/artifacts/" + encodeURIComponent(key) + "/history?limit=200").then(function (history) {
+            var items = Array.isArray(history.items) ? history.items : [];
+            var previous = items.length > 1 ? items[items.length - 2] : undefined;
+            var currentItem = items.length > 0 ? items[items.length - 1] : current;
+            var requests = [];
+            if (isRecord(currentItem) && !hasOwn(currentItem, "content") && firstString(currentItem, ["id"])) {
+              requests.push(requestJson("/workspace/dashboard/artifacts/" + encodeURIComponent(firstString(currentItem, ["id"]))).then(function (value) { currentItem = value; }));
+            }
+            if (isRecord(previous) && !hasOwn(previous, "content") && firstString(previous, ["id"])) {
+              requests.push(requestJson("/workspace/dashboard/artifacts/" + encodeURIComponent(firstString(previous, ["id"]))).then(function (value) { previous = value; }));
+            }
+            return Promise.all(requests).then(function () {
+              loading.textContent = "";
+              renderArtifactDiff(loading, currentItem, previous);
+            });
+          }).catch(function (error) {
+            loading.textContent = errorText(error);
+          });
           return;
         }
         var container = document.createElement("div");
@@ -1552,6 +1640,12 @@ export function dashboard(): string {
       }
 
       function downloadArtifact(artifact) {
+        if (!hasOwn(artifact, "content") && firstString(artifact, ["id"])) {
+          requestJson("/workspace/dashboard/artifacts/" + encodeURIComponent(firstString(artifact, ["id"]))).then(downloadArtifact).catch(function (error) {
+            setAreaError("artifact-message", error);
+          });
+          return;
+        }
         var content = firstString(artifact, ["content"]);
         if (content === "") {
           byId("artifact-message").textContent = "此 artifact 沒有可下載的內容。";
@@ -2377,15 +2471,79 @@ export function dashboard(): string {
         }
       }
 
+      async function loadArtifactData() {
+        try {
+          var pages = await Promise.all([
+            requestJson("/workspace/dashboard/artifacts?limit=50"),
+            requestJson("/workspace/dashboard/reviews?limit=200")
+          ]);
+          var artifactPage = pages[0];
+          var reviewPage = pages[1];
+          renderArtifactList({
+            items: Array.isArray(artifactPage.items) ? artifactPage.items : [],
+            total: artifactPage.total,
+            reviews: Array.isArray(reviewPage.items) ? reviewPage.items : []
+          });
+          return artifactPage;
+        } catch (error) {
+          setAreaError("artifact-message", error);
+          throw error;
+        }
+      }
+
+      async function loadIssueData() {
+        try {
+          var payload = await requestJson("/workspace/dashboard/issues?limit=100");
+          renderIssueList({ issues: Array.isArray(payload.items) ? payload.items : [] });
+          return payload;
+        } catch (error) {
+          setAreaError("quality-message", error);
+          throw error;
+        }
+      }
+
+      async function loadSourceFactData() {
+        try {
+          var pages = await Promise.all([
+            requestJson("/workspace/dashboard/candidates?limit=50"),
+            requestJson("/workspace/dashboard/sources?limit=50"),
+            requestJson("/workspace/dashboard/facts?limit=100"),
+            requestJson("/workspace/dashboard/fact-review/runs?limit=20")
+          ]);
+          var runs = Array.isArray(pages[3].items) ? pages[3].items : [];
+          if (runs.length > 0 && firstString(runs[runs.length - 1], ["id"])) {
+            var runDetail = await requestJson("/workspace/dashboard/fact-review/runs/" + encodeURIComponent(firstString(runs[runs.length - 1], ["id"])));
+            runs[runs.length - 1] = runDetail;
+          }
+          renderSourceFact({
+            candidates: Array.isArray(pages[0].items) ? pages[0].items : [],
+            sources: Array.isArray(pages[1].items) ? pages[1].items : [],
+            facts: Array.isArray(pages[2].items) ? pages[2].items : [],
+            review_runs: runs
+          });
+          return pages;
+        } catch (error) {
+          setAreaError("source-fact-message", error);
+          throw error;
+        }
+      }
+
+      async function loadOperationData() {
+        try {
+          var payload = await requestJson("/workspace/dashboard/operations?limit=100");
+          renderOperationList(Array.isArray(payload.items) ? payload.items : []);
+          return payload;
+        } catch (error) {
+          setAreaError("operation-message", error);
+          throw error;
+        }
+      }
+
       async function loadDashboardData() {
         try {
           var payload = await requestJson("/workspace/dashboard/data");
           renderPrecheckMatrix(payload.prechecks);
-          renderArtifactList(payload);
-          renderOperationList(payload.operations);
           renderQuality(payload);
-          renderIssueList(payload);
-          renderSourceFact(payload);
           renderImageList(payload.images, payload.roster, payload.primary_character_id);
           var staleBanner = byId("image-stale-banner");
           if (payload.images_stale === true) {
@@ -2394,7 +2552,10 @@ export function dashboard(): string {
           } else {
             staleBanner.hidden = true;
           }
-          renderRepairInspection(payload.repair);
+          byId("artifact-message").textContent = "首頁摘要已載入；按下按鈕取得 artifact 明細。";
+          byId("source-fact-message").textContent = "首頁摘要已載入；按下按鈕取得來源與事實。";
+          byId("operation-message").textContent = "首頁摘要已載入；按下按鈕取得 operation。";
+          byId("quality-message").textContent = "首頁摘要已載入；按下按鈕取得 issue。";
           return payload;
         } catch (error) {
           setAreaError("prechecks-message", error);
@@ -2457,6 +2618,18 @@ export function dashboard(): string {
 
       byId("operation-filter").addEventListener("change", function () {
         renderOperationList(cachedOperations);
+      });
+      byId("load-artifacts").addEventListener("click", function () {
+        void runTask("載入 Artifact", loadArtifactData);
+      });
+      byId("load-issues").addEventListener("click", function () {
+        void runTask("載入 Issues", loadIssueData);
+      });
+      byId("load-source-facts").addEventListener("click", function () {
+        void runTask("載入來源與事實", loadSourceFactData);
+      });
+      byId("load-operations").addEventListener("click", function () {
+        void runTask("載入 Operations", loadOperationData);
       });
       byId("check-readiness").addEventListener("click", function () {
         void runTask("Publish 就緒檢查", async function () {

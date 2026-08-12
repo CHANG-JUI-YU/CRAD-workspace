@@ -3,7 +3,7 @@ import { TextDecoder } from "node:util";
 import { HttpSourceFetcher } from "@st-workspace/adapters";
 import { CoreError, FileAttachmentStore, FileProjectRepository, internalId, templateProposalJsonSchema, type AdaptationDecision, type IssueSeverity, type RequestResult, type SourceAttachment, z, zhujiProposalJsonSchema } from "@st-workspace/core";
 import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, decodeAttachments, factReviewBatchInputSchema, imageInputSchema, imageRemoveInputSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
-import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
+import { AgentAdapter, AgentRouter, parseDashboardQuery, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
 import { dashboard } from "./dashboard.js";
 import { structuredError } from "./errors.js";
 
@@ -272,6 +272,25 @@ function compact<T extends Record<string, unknown>>(value: T): T {
   return result as T;
 }
 
+function dashboardQuery(url: URL) {
+  const raw: { cursor?: string; limit?: string; filter?: string } = {};
+  const cursor = url.searchParams.get("cursor");
+  const limit = url.searchParams.get("limit");
+  const filter = url.searchParams.get("filter");
+  if (cursor !== null) raw.cursor = cursor;
+  if (limit !== null) raw.limit = limit;
+  if (filter !== null) raw.filter = filter;
+  return parseDashboardQuery(raw);
+}
+
+function dashboardPathId(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new CoreError("DASHBOARD_PATH_INVALID", "Dashboard resource id is invalid", true);
+  }
+}
+
 function visibleAgents(agentAdapter: AgentAdapter): { default_agent: string; agents: ReturnType<AgentAdapter["list"]> } {
   return { default_agent: "director", agents: agentAdapter.list() };
 }
@@ -319,8 +338,95 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         if (options.projectManager !== undefined && !options.projectManager.sessionSelected()) {
           json(response, 200, { selected: false, projects: await options.projectManager.listProjects() });
         } else {
-          json(response, 200, await (await getRuntime()).dashboardSnapshot());
+          json(response, 200, await (await getRuntime()).dashboardSummary());
         }
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/artifacts") {
+        json(response, 200, await (await getRuntime()).dashboardArtifacts(dashboardQuery(url)));
+        return;
+      }
+      const artifactDetailMatch = request.method === "GET" ? /^\/workspace\/dashboard\/artifacts\/([^/]+)$/u.exec(url.pathname) : null;
+      if (artifactDetailMatch !== null) {
+        const artifact = await (await getRuntime()).dashboardArtifact(dashboardPathId(artifactDetailMatch[1] ?? ""), url.searchParams.get("revision") ?? undefined);
+        if (artifact === undefined) {
+          json(response, 404, { code: "DASHBOARD_ARTIFACT_NOT_FOUND", message: "Artifact not found" });
+        } else {
+          json(response, 200, artifact);
+        }
+        return;
+      }
+      const artifactHistoryMatch = request.method === "GET" ? /^\/workspace\/dashboard\/artifacts\/([^/]+)\/history$/u.exec(url.pathname) : null;
+      if (artifactHistoryMatch !== null) {
+        json(response, 200, await (await getRuntime()).dashboardArtifactHistory(dashboardPathId(artifactHistoryMatch[1] ?? ""), dashboardQuery(url)));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/facts") {
+        json(response, 200, await (await getRuntime()).dashboardFacts(dashboardQuery(url)));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/sources") {
+        json(response, 200, await (await getRuntime()).dashboardSources(dashboardQuery(url)));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/candidates") {
+        json(response, 200, await (await getRuntime()).dashboardCandidates(dashboardQuery(url)));
+        return;
+      }
+      const sourceDetailMatch = request.method === "GET" ? /^\/workspace\/dashboard\/sources\/([^/]+)$/u.exec(url.pathname) : null;
+      if (sourceDetailMatch !== null) {
+        const source = await (await getRuntime()).dashboardSource(dashboardPathId(sourceDetailMatch[1] ?? ""));
+        if (source === undefined) json(response, 404, { code: "DASHBOARD_SOURCE_NOT_FOUND", message: "Source not found" });
+        else json(response, 200, source);
+        return;
+      }
+      const candidateDetailMatch = request.method === "GET" ? /^\/workspace\/dashboard\/candidates\/([^/]+)$/u.exec(url.pathname) : null;
+      if (candidateDetailMatch !== null) {
+        const candidate = await (await getRuntime()).dashboardCandidate(dashboardPathId(candidateDetailMatch[1] ?? ""));
+        if (candidate === undefined) json(response, 404, { code: "DASHBOARD_CANDIDATE_NOT_FOUND", message: "Candidate not found" });
+        else json(response, 200, candidate);
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/operations") {
+        json(response, 200, await (await getRuntime()).dashboardOperations(dashboardQuery(url)));
+        return;
+      }
+      const operationDetailMatch = request.method === "GET" ? /^\/workspace\/dashboard\/operations\/([^/]+)$/u.exec(url.pathname) : null;
+      if (operationDetailMatch !== null) {
+        const operation = await (await getRuntime()).dashboardOperation(dashboardPathId(operationDetailMatch[1] ?? ""));
+        if (operation === undefined) json(response, 404, { code: "DASHBOARD_OPERATION_NOT_FOUND", message: "Operation not found" });
+        else json(response, 200, operation);
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/audit") {
+        json(response, 200, await (await getRuntime()).dashboardAudit(dashboardQuery(url)));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/issues") {
+        json(response, 200, await (await getRuntime()).dashboardIssues(dashboardQuery(url)));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/reviews") {
+        json(response, 200, await (await getRuntime()).dashboardReviews(dashboardQuery(url)));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/fact-review/runs") {
+        json(response, 200, await (await getRuntime()).dashboardReviewRuns(dashboardQuery(url)));
+        return;
+      }
+      const reviewRunDetailMatch = request.method === "GET" ? /^\/workspace\/dashboard\/fact-review\/runs\/([^/]+)$/u.exec(url.pathname) : null;
+      if (reviewRunDetailMatch !== null) {
+        const run = await (await getRuntime()).dashboardReviewRun(dashboardPathId(reviewRunDetailMatch[1] ?? ""));
+        if (run === undefined) json(response, 404, { code: "DASHBOARD_REVIEW_RUN_NOT_FOUND", message: "Fact review run not found" });
+        else json(response, 200, run);
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/publishes") {
+        json(response, 200, await (await getRuntime()).dashboardPublishes(dashboardQuery(url)));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/builds") {
+        json(response, 200, await (await getRuntime()).dashboardBuilds(dashboardQuery(url)));
         return;
       }
       if (request.method === "GET" && url.pathname === "/workspace/publish/preview") {

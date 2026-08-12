@@ -87,6 +87,104 @@ import {
   type KnowledgeExecutionResult,
 } from "@st-workspace/domain";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
+import {
+  artifactQueryFromDashboardQuery,
+  auditQueryFromDashboardQuery,
+  buildQueryFromDashboardQuery,
+  dashboardArtifactDetail,
+  dashboardCandidateDetail,
+  dashboardOperationDetail,
+  dashboardReviewRunDetail,
+  dashboardSourceDetail,
+  factQueryFromDashboardQuery,
+  issueQueryFromDashboardQuery,
+  operationQueryFromDashboardQuery,
+  queryDashboardArtifactHistory,
+  queryDashboardArtifacts,
+  queryDashboardAudit,
+  queryDashboardBuilds,
+  queryDashboardCandidates,
+  queryDashboardFacts,
+  queryDashboardIssues,
+  queryDashboardOperations,
+  queryDashboardPublishes,
+  queryDashboardReviews,
+  queryDashboardReviewRuns,
+  queryDashboardSources,
+  readDashboardSummary,
+  reviewQueryFromDashboardQuery,
+  reviewRunQueryFromDashboardQuery,
+  sourceQueryFromDashboardQuery,
+  publishQueryFromDashboardQuery,
+  type DashboardArtifactDetail,
+  type DashboardArtifactListItem,
+  type DashboardAuditView,
+  type DashboardBuildView,
+  type DashboardCandidateView,
+  type DashboardFactView as DashboardReadFactView,
+  type DashboardIssueView as DashboardReadIssueView,
+  type DashboardOperationDetail,
+  type DashboardOperationView as DashboardReadOperationView,
+  type DashboardPage,
+  type DashboardPublishView,
+  type DashboardReviewRunDetail,
+  type DashboardReviewRunView,
+  type DashboardReviewView,
+  type DashboardSourceView,
+  type DashboardSummary,
+  type DashboardQuery,
+} from "./dashboard-read-model.js";
+
+export {
+  artifactQueryFromDashboardQuery,
+  auditQueryFromDashboardQuery,
+  buildDashboardSummary,
+  buildQueryFromDashboardQuery,
+  dashboardArtifactDetail,
+  dashboardCandidateDetail,
+  dashboardOperationDetail,
+  dashboardReviewRunDetail,
+  dashboardSourceDetail,
+  dashboardQuerySchema,
+  factQueryFromDashboardQuery,
+  issueQueryFromDashboardQuery,
+  operationQueryFromDashboardQuery,
+  page,
+  parseDashboardQuery,
+  publishQueryFromDashboardQuery,
+  queryDashboardArtifactHistory,
+  queryDashboardArtifacts,
+  queryDashboardAudit,
+  queryDashboardBuilds,
+  queryDashboardCandidates,
+  queryDashboardFacts,
+  queryDashboardIssues,
+  queryDashboardOperations,
+  queryDashboardPublishes,
+  queryDashboardReviews,
+  queryDashboardReviewRuns,
+  queryDashboardSources,
+  readDashboardSummary,
+  reviewQueryFromDashboardQuery,
+  reviewRunQueryFromDashboardQuery,
+  sourceQueryFromDashboardQuery,
+} from "./dashboard-read-model.js";
+export type {
+  DashboardArtifactDetail,
+  DashboardArtifactListItem,
+  DashboardAuditView,
+  DashboardBuildView,
+  DashboardCandidateView,
+  DashboardOperationDetail,
+  DashboardPage,
+  DashboardPublishView,
+  DashboardReviewRunDetail,
+  DashboardReviewRunView,
+  DashboardReviewView,
+  DashboardSourceView,
+  DashboardSummary,
+  DashboardQuery,
+} from "./dashboard-read-model.js";
 
 function now(): string {
   return new Date().toISOString();
@@ -2922,6 +3020,100 @@ export class WorkspaceRuntime {
     };
   }
 
+  /**
+   * Compact dashboard home read model. Large collections are intentionally
+   * excluded; callers should use the resource-specific query methods below.
+   */
+  async dashboardSummary(): Promise<DashboardSummary> {
+    return readDashboardSummary(this.repository);
+  }
+
+  async dashboardArtifacts(query?: DashboardQuery): Promise<DashboardPage<DashboardArtifactListItem>> {
+    const state = await this.repository.read();
+    return queryDashboardArtifacts(state, query === undefined ? {} : artifactQueryFromDashboardQuery(query));
+  }
+
+  async dashboardArtifact(id: string, revision?: string): Promise<DashboardArtifactDetail | undefined> {
+    const state = await this.repository.read();
+    return dashboardArtifactDetail(state, id, revision);
+  }
+
+  async dashboardArtifactHistory(keyOrId: string, query?: DashboardQuery): Promise<DashboardPage<DashboardArtifactListItem>> {
+    const state = await this.repository.read();
+    return queryDashboardArtifactHistory(state, keyOrId, query);
+  }
+
+  async dashboardFacts(query?: DashboardQuery): Promise<DashboardPage<DashboardReadFactView>> {
+    const state = await this.repository.read();
+    return queryDashboardFacts(state, query === undefined ? {} : factQueryFromDashboardQuery(query));
+  }
+
+  async dashboardSources(query?: DashboardQuery): Promise<DashboardPage<DashboardSourceView>> {
+    const state = await this.repository.read();
+    return queryDashboardSources(state, query === undefined ? {} : sourceQueryFromDashboardQuery(query));
+  }
+
+  async dashboardCandidates(query?: DashboardQuery): Promise<DashboardPage<DashboardCandidateView>> {
+    const state = await this.repository.read();
+    return queryDashboardCandidates(state, query === undefined ? {} : sourceQueryFromDashboardQuery(query));
+  }
+
+  async dashboardSource(id: string): Promise<DashboardSourceView | undefined> {
+    const state = await this.repository.read();
+    return dashboardSourceDetail(state, id);
+  }
+
+  async dashboardCandidate(id: string): Promise<DashboardCandidateView | undefined> {
+    const state = await this.repository.read();
+    return dashboardCandidateDetail(state, id);
+  }
+
+  async dashboardOperations(query?: DashboardQuery): Promise<DashboardPage<DashboardReadOperationView>> {
+    const state = await this.repository.read();
+    return queryDashboardOperations(state, query === undefined ? {} : operationQueryFromDashboardQuery(query));
+  }
+
+  async dashboardOperation(id: string): Promise<DashboardOperationDetail | undefined> {
+    const state = await this.repository.read();
+    return dashboardOperationDetail(state, id);
+  }
+
+  async dashboardAudit(query?: DashboardQuery): Promise<DashboardPage<DashboardAuditView>> {
+    const state = await this.repository.read();
+    return queryDashboardAudit(state, query === undefined ? {} : auditQueryFromDashboardQuery(query));
+  }
+
+  async dashboardIssues(query?: DashboardQuery): Promise<DashboardPage<DashboardReadIssueView>> {
+    const state = await this.repository.read();
+    return queryDashboardIssues(state, query === undefined ? {} : issueQueryFromDashboardQuery(query));
+  }
+
+  async dashboardReviews(query?: DashboardQuery): Promise<DashboardPage<DashboardReviewView>> {
+    const state = await this.repository.read();
+    return queryDashboardReviews(state, query === undefined ? {} : reviewQueryFromDashboardQuery(query));
+  }
+
+  async dashboardReviewRuns(query?: DashboardQuery): Promise<DashboardPage<DashboardReviewRunView>> {
+    const state = await this.repository.read();
+    return queryDashboardReviewRuns(state, query === undefined ? {} : reviewRunQueryFromDashboardQuery(query));
+  }
+
+  async dashboardReviewRun(id: string): Promise<DashboardReviewRunDetail | undefined> {
+    const state = await this.repository.read();
+    return dashboardReviewRunDetail(state, id);
+  }
+
+  async dashboardPublishes(query?: DashboardQuery): Promise<DashboardPage<DashboardPublishView>> {
+    const state = await this.repository.read();
+    return queryDashboardPublishes(state, query === undefined ? {} : publishQueryFromDashboardQuery(query));
+  }
+
+  async dashboardBuilds(query?: DashboardQuery): Promise<DashboardPage<DashboardBuildView>> {
+    const state = await this.repository.read();
+    return queryDashboardBuilds(state, query === undefined ? {} : buildQueryFromDashboardQuery(query));
+  }
+
+  /** @deprecated Use dashboardSummary and the resource query methods. */
   async dashboardSnapshot(): Promise<DashboardSnapshot> {
     const state = await this.repository.read();
     const repair = await this.repository.inspectRepair();

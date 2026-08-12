@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deflateSync } from "node:zlib";
-import { MemoryProjectRepository } from "@st-workspace/core";
+import { contentHash, MemoryProjectRepository, type ArtifactRecord } from "@st-workspace/core";
 import { encodePngChunk, pngSignature } from "@st-workspace/adapters-png";
 import { WorkspaceRuntime } from "@st-workspace/runtime";
 import { createWorkspaceServer } from "../src/index.js";
@@ -117,12 +117,28 @@ describe("local Dashboard", () => {
     try {
       const data = await (await fetch(`${base}/workspace/dashboard/data`)).json();
       expect(data.project).toMatchObject({ project_id: "dashboard-endpoints" });
-      expect(Array.isArray(data.artifacts)).toBe(true);
-      expect(Array.isArray(data.artifact_groups)).toBe(true);
-      expect(Array.isArray(data.operations)).toBe(true);
-      expect(Array.isArray(data.reviews)).toBe(true);
-      expect(Array.isArray(data.issues)).toBe(true);
-      expect(data.repair).toMatchObject({ plan_hash: expect.any(String), items: [] });
+      expect(data.counts).toMatchObject({ artifacts: 0, facts: 0, operations: 0, audit_events: 0 });
+      expect(data.repair).toMatchObject({ plan_hash: expect.any(String), item_count: 0 });
+      expect(data.artifacts).toBeUndefined();
+      expect(data.facts).toBeUndefined();
+      for (const endpoint of [
+        "/workspace/dashboard/artifacts?limit=2",
+        "/workspace/dashboard/facts?limit=2",
+        "/workspace/dashboard/sources?limit=2",
+        "/workspace/dashboard/candidates?limit=2",
+        "/workspace/dashboard/operations?limit=2",
+        "/workspace/dashboard/audit?limit=2",
+        "/workspace/dashboard/issues?limit=2",
+        "/workspace/dashboard/reviews?limit=2",
+        "/workspace/dashboard/fact-review/runs?limit=2",
+        "/workspace/dashboard/publishes?limit=2",
+        "/workspace/dashboard/builds?limit=2",
+      ]) {
+        const page = await (await fetch(`${base}${endpoint}`)).json();
+        expect(Array.isArray(page.items)).toBe(true);
+        expect(typeof page.total).toBe("number");
+        expect(typeof page.limit).toBe("number");
+      }
       const readiness = await (await fetch(`${base}/workspace/publish/preview`)).json();
       expect(typeof readiness.ok).toBe("boolean");
       expect(Array.isArray(readiness.diagnostics)).toBe(true);
@@ -148,6 +164,49 @@ describe("local Dashboard", () => {
       });
       expect(missing.status).toBe(400);
       expect((await missing.json()).code).toBe("OPERATION_NOT_FOUND");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  });
+
+  it("pages dashboard resources and keeps artifact content behind detail/history", async () => {
+    const repository = new MemoryProjectRepository("dashboard-read-model");
+    const timestamp = new Date().toISOString();
+    const content = "private artifact content";
+    const record: ArtifactRecord = {
+      id: "artifact-read-model",
+      key: "character:alpha",
+      kind: "character",
+      name: "Alpha",
+      content,
+      media_type: "text/plain",
+      content_hash: contentHash(content),
+      revision: contentHash("revision"),
+      status: "draft",
+      created_at: timestamp,
+      updated_at: timestamp,
+      created_by: "test",
+      operation_id: "seed",
+    };
+    await repository.commit(0, (state) => ({ ...state, artifacts: [record] }));
+    const server = createWorkspaceServer({ runtime: new WorkspaceRuntime(repository), actor: "dashboard-test", autoStartWorker: false });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("server did not bind");
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      const list = await (await fetch(`${base}/workspace/dashboard/artifacts?limit=1`)).json();
+      expect(list.items).toHaveLength(1);
+      expect(list.items[0]).not.toHaveProperty("content");
+      const detail = await (await fetch(`${base}/workspace/dashboard/artifacts/${record.id}`)).json();
+      expect(detail).toMatchObject({ id: record.id, content });
+      const history = await (await fetch(`${base}/workspace/dashboard/artifacts/${encodeURIComponent(record.key)}/history?limit=1`)).json();
+      expect(history.items).toHaveLength(1);
+      expect(history.items[0]).not.toHaveProperty("content");
+      const filtered = await (await fetch(`${base}/workspace/dashboard/artifacts?limit=1&filter=${encodeURIComponent(JSON.stringify({ kind: "character" }))}`)).json();
+      expect(filtered.items).toHaveLength(1);
+      const invalid = await fetch(`${base}/workspace/dashboard/artifacts?limit=0`);
+      expect(invalid.status).toBe(400);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
