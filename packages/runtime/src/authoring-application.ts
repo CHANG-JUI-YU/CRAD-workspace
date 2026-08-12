@@ -12,6 +12,7 @@ import {
   type AuthoringKnowledgeContext,
   type FactRecord,
   type FactReviewContext,
+  type ExecutionContext,
   type ProjectRepository,
   type ProjectState,
   type SourceAdaptationIntent,
@@ -34,7 +35,7 @@ function stringValues(value: unknown): string[] {
 export interface AuthoringApplicationDeps {
   repository: ProjectRepository;
   knowledge: {
-    factReviewContext(): Promise<FactReviewContext>;
+    factReviewContext(options?: { reviewer_identity?: string }): Promise<FactReviewContext>;
   };
 }
 
@@ -90,7 +91,7 @@ export async function zhujiContext(deps: AuthoringApplicationDeps, characterId?:
   return { schema: zhujiProposalJsonSchema as Record<string, unknown>, context: buildZhujiTemplateContext(existing, knowledge) };
 }
 
-export async function templateContext(deps: AuthoringApplicationDeps, kind: TemplateKind): Promise<{ schema: Record<string, unknown>; context: ReturnType<typeof buildTemplateContext> }> {
+export async function templateContext(deps: AuthoringApplicationDeps, kind: TemplateKind, executionAgent?: ExecutionContext["executionAgent"]): Promise<{ schema: Record<string, unknown>; context: ReturnType<typeof buildTemplateContext> }> {
   const state = await deps.repository.read();
   const existing = state.artifacts.flatMap<TemplateInstance>((artifact): TemplateInstance[] => {
     if (kind === "wardrobe" && artifact.kind === "wardrobe") {
@@ -110,7 +111,9 @@ export async function templateContext(deps: AuthoringApplicationDeps, kind: Temp
       return [];
     }
   });
-  const factReview = kind === "fact_review" ? await deps.knowledge.factReviewContext() : undefined;
+  const factReview = kind === "fact_review"
+    ? await deps.knowledge.factReviewContext(executionAgent === undefined ? {} : { reviewer_identity: executionAgent.id })
+    : undefined;
   const firstInstance = existing[0];
   const rawValue = firstInstance?.value as { character_id?: unknown; document?: { id?: unknown } } | undefined;
   const instanceCharacterId = typeof rawValue?.character_id === "string"

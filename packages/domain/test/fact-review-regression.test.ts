@@ -379,4 +379,50 @@ describe("BUG4-03/06 fact review correctness regressions", () => {
     const jFact = after.facts.find((item) => item.id === "fact-j1")!;
     expect(next.candidate_revisions?.["occ-j1"]).toBe(factCandidateRevision(jFact, []));
   });
+
+  it("K: assigns one open run to stable, disjoint reviewer shards", async () => {
+    const repository = new MemoryProjectRepository("fact-review-shards");
+    const facts = Array.from({ length: 90 }, (_, index) => candidateFact(
+      `fact-shard-${index}`,
+      `occ-shard-${index}`,
+      `Character ${index} has trait ${index}.`,
+      { subject: `Character ${index}`, predicate: "has", value: `trait ${index}`, classification: "trait", coverage: ["personality"] },
+    ));
+    await repository.commit(0, (state) => ({ ...state, facts, operations: [operation("op-shards", "review")] }));
+    const service = new KnowledgeService(repository);
+    await service.beginFactReviewRun("op-shards", "fact-reviewer-1");
+
+    const pages = await Promise.all([
+      service.factReviewContext({ reviewer_identity: "fact-reviewer-1", limit: 200 }),
+      service.factReviewContext({ reviewer_identity: "fact-reviewer-2", limit: 200 }),
+      service.factReviewContext({ reviewer_identity: "fact-reviewer-3", limit: 200 }),
+    ]);
+    const sets = pages.map((page) => new Set(page.candidates.map((candidate) => candidate.candidate_occurrence_id)));
+    expect(sets.every((set) => set.size > 0)).toBe(true);
+    expect(new Set([...sets[0]!, ...sets[1]!, ...sets[2]!]).size).toBe(90);
+    expect([...sets[0]!].filter((id) => sets[1]!.has(id) || sets[2]!.has(id))).toHaveLength(0);
+    expect([...sets[1]!].filter((id) => sets[2]!.has(id))).toHaveLength(0);
+    expect(new Set((await service.factReviewContext({ reviewer_identity: "fact-reviewer-2", limit: 200 })).candidates.map((candidate) => candidate.candidate_occurrence_id))).toEqual(sets[1]);
+    expect((await service.factReviewContext({ limit: 200 })).candidates).toHaveLength(90);
+  });
+
+  it("L: retries a CAS race and skips a candidate adjudicated by another reviewer", async () => {
+    const repository = new MemoryProjectRepository("fact-review-race");
+    const fact = candidateFact("fact-race", "occ-race", "Yukino is calm.", { subject: "Yukino", predicate: "is", value: "calm", classification: "trait", coverage: ["personality"] });
+    await repository.commit(0, (state) => ({ ...state, facts: [fact], operations: [operation("op-race", "review")] }));
+    const firstService = new KnowledgeService(repository);
+    const secondService = new KnowledgeService(repository);
+    const run = await firstService.beginFactReviewRun("op-race", "fact-reviewer-1");
+    const decision = { candidate_occurrence_id: fact.candidate_occurrence_id, claim: fact.statement, decision: "reject" as const, reason: "Not supported.", evidence: [] };
+    const results = await Promise.all([
+      firstService.applyReviewBatch("op-race", [decision], "reviewer-1", "fact-reviewer-1", run.id),
+      secondService.applyReviewBatch("op-race", [decision], "reviewer-2", "fact-reviewer-2", run.id),
+    ]);
+    expect(results.map((result) => result.applied).sort()).toEqual([0, 1]);
+    expect(results.map((result) => result.skipped).sort()).toEqual([0, 1]);
+    expect(results.every((result) => /applied=\d+, skipped=\d+, conflict=0/u.test(result.summary))).toBe(true);
+    const after = await repository.read();
+    expect(after.fact_review_decisions).toHaveLength(1);
+    expect(after.audit.filter((event) => event.event === "fact.review.batch.applied")).toHaveLength(1);
+  });
 });

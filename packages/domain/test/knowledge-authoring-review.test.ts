@@ -138,7 +138,8 @@ describe("knowledge, authoring and review services", () => {
     expect(after.fact_review_runs.find((item) => item.id === run.id)?.status).toBe("completed");
 
     await repository.commit((await repository.read()).revision, (state) => ({ ...state, operations: [...state.operations, operation("op-review-duplicate-strict", "review")] }));
-    await expect(service.applyReviewBatch("op-review-duplicate-strict", [decision], "fact-reviewer-2", "fact-reviewer-2", run.id)).rejects.toMatchObject({ code: "FACT_REVIEW_RUN_CLOSED" });
+    const skipped = await service.applyReviewBatch("op-review-duplicate-strict", [decision], "fact-reviewer-2", "fact-reviewer-2", run.id);
+    expect(skipped).toMatchObject({ applied: 0, skipped: 1, conflicts: 0, status: "completed" });
   });
 
   it("blocks an accepted decision when quote-level evidence is missing", async () => {

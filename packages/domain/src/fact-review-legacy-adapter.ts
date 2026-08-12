@@ -20,6 +20,9 @@ function updateOperation(operation: OperationRecord, patch: Partial<OperationRec
 
 export interface LegacyFactReviewExecutionResult {
   fact_ids: string[];
+  applied: number;
+  skipped: number;
+  conflicts: number;
   status: "completed" | "needs_input";
   summary: string;
 }
@@ -93,5 +96,5 @@ export async function applyLegacyFactReview(
     fact_review_passes: [...current.fact_review_passes, passRecord],
     fact_review_decisions: [...current.fact_review_decisions, ...legacyDecisionRecords],
   }));
-  return { fact_ids: targetIds, status: "completed", summary };
+  return { fact_ids: targetIds, applied: targetIds.length, skipped: 0, conflicts: decisions.filter((decision) => decision.decision === "conflict").length, status: "completed", summary };
 }

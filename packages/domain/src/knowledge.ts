@@ -66,6 +66,9 @@ export const KNOWLEDGE_EXTRACTOR_REVISION = PIPELINE_EXTRACTOR_REVISION;
 
 export interface FactReviewExecutionResult {
   fact_ids: string[];
+  applied: number;
+  skipped: number;
+  conflicts: number;
   status: "completed" | "needs_input";
   summary: string;
 }
@@ -692,7 +695,7 @@ export class KnowledgeService {
     return run;
   }
 
-  async factReviewContext(options: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification } = {}): Promise<{
+  async factReviewContext(options: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification; reviewer_identity?: string } = {}): Promise<{
     run?: FactReviewRunRecord;
     projection_revision?: string;
     candidates: Array<{ candidate_occurrence_id: string; fact_id: string; statement: string; subject?: string; predicate?: string; value?: string; classification?: FactClassification; entity_refs?: string[]; coverage?: string[]; status: FactRecord["status"]; source_ids: string[]; evidence: string[]; evidence_refs?: FactEvidenceReference[]; evidence_context?: FactReviewEvidenceContext[]; candidate_revision: string; last_decision?: FactReviewDecisionRecord["decision"]; last_reviewer_identity?: string }>;
@@ -752,6 +755,18 @@ export class KnowledgeService {
     reviewRunId?: string,
     expectedProjectionRevision?: string,
   ): Promise<FactReviewExecutionResult> {
+    return this.applyReviewBatchAttempt(operationId, decisions, actorInput, reviewerIdentity, reviewRunId, expectedProjectionRevision, 0);
+  }
+
+  private async applyReviewBatchAttempt(
+    operationId: string,
+    decisions: FactDecision[],
+    actorInput: ExecutionActorInput,
+    reviewerIdentity: string,
+    reviewRunId: string | undefined,
+    expectedProjectionRevision: string | undefined,
+    attempt: number,
+  ): Promise<FactReviewExecutionResult> {
     const { auditActor: actor, context: execution } = resolveExecutionActors(actorInput);
     await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
@@ -765,14 +780,28 @@ export class KnowledgeService {
       : initial.fact_review_runs.find((candidate) => candidate.id === reviewRunId);
     if (run === undefined) {
       run = await this.beginFactReviewRun(operationId, execution ?? reviewerIdentity, undefined, actor);
-      return this.applyReviewBatch(operationId, decisions, actorInput, reviewerIdentity, run.id, expectedProjectionRevision);
+      return this.applyReviewBatchAttempt(operationId, decisions, actorInput, reviewerIdentity, run.id, expectedProjectionRevision, attempt);
     }
-    if (run.status === "completed" || run.status === "superseded") throw new CoreError("FACT_REVIEW_RUN_CLOSED", `Fact review run ${run.id} is no longer open.`, true);
+    if (decisions.length === 0) throw new CoreError("FACT_REVIEW_BATCH_EMPTY", "At least one fact review decision is required.", true);
+    if (run.status === "completed" || run.status === "superseded") {
+      const alreadySettled = decisions.every((decision) => {
+        const occurrenceId = decision.candidate_occurrence_id
+          ?? initial.facts.find((fact) => fact.id === decision.fact_id)?.candidate_occurrence_id
+          ?? decision.fact_id;
+        if (occurrenceId === undefined) return false;
+        const previous = pipelineLatestDecisionForOccurrence(initial.fact_review_decisions, run!.id, occurrenceId);
+        return previous?.decision === "accepted" || previous?.decision === "rejected";
+      });
+      if (alreadySettled) {
+        const summary = `Fact review run ${run.id}: applied=0, skipped=${decisions.length}, conflict=0. skipped ${decisions.length} already-adjudicated candidates.`;
+        return { fact_ids: [], applied: 0, skipped: decisions.length, conflicts: 0, status: "completed", summary };
+      }
+      throw new CoreError("FACT_REVIEW_RUN_CLOSED", `Fact review run ${run.id} is no longer open.`, true);
+    }
     const actualProjectionRevision = reviewProjectionRevision(initial, run.id);
     if (expectedProjectionRevision !== undefined && expectedProjectionRevision !== actualProjectionRevision) {
       throw new CoreError("FACT_PROJECTION_STALE", `Fact review projection is stale; expected ${expectedProjectionRevision}, found ${actualProjectionRevision}.`, true);
     }
-    if (decisions.length === 0) throw new CoreError("FACT_REVIEW_BATCH_EMPTY", "At least one fact review decision is required.", true);
     const targetIds: string[] = [];
     const records: FactReviewDecisionRecord[] = [];
     const updates = new Map<string, { decision: FactDecision; evidence: FactEvidenceReference[]; record: FactReviewDecisionRecord; entity_refs: string[]; coverage: string[] }>();
@@ -853,12 +882,30 @@ export class KnowledgeService {
       records.push(record);
       updates.set(target.id, { decision, evidence, record, entity_refs: effectiveEntityRefs, coverage: effectiveCoverage });
     }
-    const summary = skippedCount > 0
-      ? `Adjudicated ${targetIds.length} fact candidates in review run ${run.id}; skipped ${skippedCount} already-adjudicated candidates.`
-      : `Adjudicated ${targetIds.length} fact candidates in review run ${run.id}.`;
+    const conflictCount = records.filter((record) => record.decision === "conflict").length;
+    const summary = `Fact review run ${run.id}: applied=${records.length}, skipped=${skippedCount}, conflict=${conflictCount}.${skippedCount > 0 ? ` skipped ${skippedCount} already-adjudicated candidates.` : ""}`;
+    if (records.length === 0) {
+      await this.repository.commit(initial.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
+          ...current,
+          operations: current.operations.map((item) => item.id === operationId
+            ? updateOperation(item, { status: "completed", result_summary: summary })
+            : item),
+        };
+      });
+      return { fact_ids: [], applied: 0, skipped: skippedCount, conflicts: 0, status: "completed", summary };
+    }
+    const initiallyUndecided = new Set(records
+      .filter((record) => pipelineLatestDecisionForOccurrence(initial.fact_review_decisions, run!.id, record.candidate_occurrence_id) === undefined)
+      .map((record) => record.candidate_occurrence_id));
     try {
       await this.repository.commit(initial.revision, (current) => {
         assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        const concurrentlyDecided = reviewerIdentity === "director" || run!.status === "blocked" ? undefined : records.find((record) => initiallyUndecided.has(record.candidate_occurrence_id) && pipelineLatestDecisionForOccurrence(current.fact_review_decisions, run!.id, record.candidate_occurrence_id) !== undefined);
+        if (concurrentlyDecided !== undefined) {
+          throw new CoreError("FACT_REVIEW_CONCURRENT_UPDATE", `Candidate ${concurrentlyDecided.candidate_occurrence_id} was adjudicated by another reviewer.`, true);
+        }
         const decisionsForRun = [...current.fact_review_decisions, ...records];
         const latestByOccurrence = new Map<string, FactReviewDecisionRecord>();
         for (const item of decisionsForRun) {
@@ -905,18 +952,21 @@ export class KnowledgeService {
             : item),
           audit: [...current.audit, {
             id: internalId("audit"), operation_id: operationId, event: "fact.review.batch.applied", actor, occurred_at: now(), project_revision: current.revision + 1,
-            details: { review_run_id: run!.id, reviewer_identity: reviewerIdentity, agent_id: reviewerIdentity, candidate_occurrence_ids: records.map((record) => record.candidate_occurrence_id), decisions: records.map((record) => ({ id: record.id, fact_id: record.fact_id, decision: record.decision, reason: record.reason })), expected_projection_revision: actualProjectionRevision },
+            details: { review_run_id: run!.id, reviewer_identity: reviewerIdentity, agent_id: reviewerIdentity, candidate_occurrence_ids: records.map((record) => record.candidate_occurrence_id), decisions: records.map((record) => ({ id: record.id, fact_id: record.fact_id, decision: record.decision, reason: record.reason })), applied: records.length, skipped: skippedCount, conflict: conflictCount, expected_projection_revision: actualProjectionRevision },
           }],
         };
       });
     } catch (error) {
-      if (error instanceof CoreError && error.code === "REVISION_CONFLICT") {
+      if (error instanceof CoreError && (error.code === "REVISION_CONFLICT" || error.code === "FACT_REVIEW_CONCURRENT_UPDATE")) {
+        if (attempt < 2) {
+          return this.applyReviewBatchAttempt(operationId, decisions, actorInput, reviewerIdentity, run.id, undefined, attempt + 1);
+        }
         throw new CoreError("FACT_PROJECTION_STALE", "Another reviewer updated the fact projection; reload unreviewed candidates and retry.", true);
       }
       throw error;
     }
     const needsInput = records.some((record) => record.decision === "needs_evidence" || record.decision === "conflict");
-    return { fact_ids: targetIds, status: needsInput ? "needs_input" : "completed", summary };
+    return { fact_ids: targetIds, applied: records.length, skipped: skippedCount, conflicts: conflictCount, status: needsInput ? "needs_input" : "completed", summary };
   }
 
   /** Director-only resolution entry that may overwrite conflict decisions. */

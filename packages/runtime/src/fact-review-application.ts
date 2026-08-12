@@ -11,7 +11,7 @@ export interface FactReviewApplicationDeps {
 
 export async function factReviewContext(
   deps: FactReviewApplicationDeps,
-  options?: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification },
+  options?: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification; reviewer_identity?: string },
 ): Promise<FactReviewContext> {
   return deps.knowledge.factReviewContext(options);
 }

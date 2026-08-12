@@ -19,6 +19,8 @@ export interface FactReviewContextOptions {
   limit?: number;
   source_id?: string;
   classification?: FactClassification;
+  /** Internal execution identity. Strict reviewer agents receive a stable shard. */
+  reviewer_identity?: string;
 }
 
 export interface FactReviewCandidateView {
@@ -56,6 +58,7 @@ interface FactReviewCursorPayload {
   set: string;
   source?: string;
   classification?: string;
+  reviewer?: string;
   after?: string;
 }
 
@@ -74,6 +77,7 @@ function decodeFactReviewCursor(raw: string): FactReviewCursorPayload | undefine
     if (record.run !== undefined && typeof record.run !== "string") return undefined;
     if (record.source !== undefined && typeof record.source !== "string") return undefined;
     if (record.classification !== undefined && typeof record.classification !== "string") return undefined;
+    if (record.reviewer !== undefined && typeof record.reviewer !== "string") return undefined;
     if (record.after !== undefined && typeof record.after !== "string") return undefined;
     return {
       v: FACT_REVIEW_CURSOR_VERSION,
@@ -81,11 +85,21 @@ function decodeFactReviewCursor(raw: string): FactReviewCursorPayload | undefine
       ...(record.run === undefined ? {} : { run: record.run }),
       ...(record.source === undefined ? {} : { source: record.source }),
       ...(record.classification === undefined ? {} : { classification: record.classification }),
+      ...(record.reviewer === undefined ? {} : { reviewer: record.reviewer }),
       ...(record.after === undefined ? {} : { after: record.after }),
     };
   } catch {
     return undefined;
   }
+}
+
+function reviewerShard(reviewerIdentity: string | undefined): number | undefined {
+  const match = reviewerIdentity?.match(/^fact-reviewer-([123])$/u);
+  return match?.[1] === undefined ? undefined : Number(match[1]) - 1;
+}
+
+function occurrenceShard(occurrenceId: string): number {
+  return Number.parseInt(contentHash(occurrenceId).slice(0, 8), 16) % 3;
 }
 
 function hasTerminalDecision(state: ProjectState, run: FactReviewRunRecord, occurrenceId: string): boolean {
@@ -206,7 +220,9 @@ export function buildFactReviewContext(state: ProjectState, options: FactReviewC
   if (run !== undefined && unresolvedRevisionMismatch(state, run).length > 0) {
     throw new CoreError("FACT_REVIEW_RUN_STALE", `Review run ${run.id} no longer matches the current fact candidates; start a new review run.`, true);
   }
-  const occurrenceBase = run?.candidate_occurrence_ids ?? state.facts.filter((fact) => fact.status === "candidate").map(candidateOccurrenceForFact).sort();
+  const occurrenceShardId = reviewerShard(options.reviewer_identity);
+  const occurrenceBase = (run?.candidate_occurrence_ids ?? state.facts.filter((fact) => fact.status === "candidate").map(candidateOccurrenceForFact).sort())
+    .filter((occurrenceId) => occurrenceShardId === undefined || occurrenceShard(occurrenceId) === occurrenceShardId);
   const cursor = options.cursor === undefined ? undefined : decodeFactReviewCursor(options.cursor);
   if (options.cursor !== undefined && cursor === undefined) {
     throw new CoreError("FACT_REVIEW_CURSOR_INVALID", "The review cursor is not a valid opaque cursor; discard it and start from the first page.", true);
@@ -218,7 +234,7 @@ export function buildFactReviewContext(state: ProjectState, options: FactReviewC
     if (cursor.set !== (run?.candidate_set_revision ?? "none")) {
       throw new CoreError("FACT_REVIEW_CURSOR_STALE", "The review cursor was issued against a different candidate set; discard it and start from the first page.", true);
     }
-    if (cursor.source !== options.source_id || cursor.classification !== options.classification) {
+    if (cursor.source !== options.source_id || cursor.classification !== options.classification || cursor.reviewer !== options.reviewer_identity) {
       throw new CoreError("FACT_REVIEW_CURSOR_INVALID", "The review cursor does not match the requested filters; discard it and start from the first page.", true);
     }
   }
@@ -280,6 +296,7 @@ export function buildFactReviewContext(state: ProjectState, options: FactReviewC
       set: run?.candidate_set_revision ?? "none",
       ...(options.source_id === undefined ? {} : { source: options.source_id }),
       ...(options.classification === undefined ? {} : { classification: options.classification }),
+      ...(options.reviewer_identity === undefined ? {} : { reviewer: options.reviewer_identity }),
       ...(lastScanned === undefined ? {} : { after: lastScanned }),
     }),
   };

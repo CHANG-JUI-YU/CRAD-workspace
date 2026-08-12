@@ -1199,7 +1199,7 @@ export class WorkspaceRuntime {
       if (runId !== undefined) {
         try {
           applied = await this.markedStep(operation.id, "fact.review.batch.applied", async () => {
-            const reviewProjection = (await this.knowledge.factReviewContext()).projection_revision;
+            const reviewProjection = (await this.knowledge.factReviewContext({ reviewer_identity: proposalAgent })).projection_revision;
             return this.knowledge.applyReviewBatch(operation.id, proposal.decisions, execution, proposalAgent, runId, reviewProjection);
           }, execution);
         } catch (error) {
@@ -1504,8 +1504,8 @@ export class WorkspaceRuntime {
       : this.knowledge.refresh(operation.id, operation.request, execution);
   }
 
-  async templateContext(kind: TemplateKind): Promise<{ schema: Record<string, unknown>; context: ReturnType<typeof buildTemplateContext> }> {
-    return templateContextQuery({ repository: this.repository, knowledge: this.knowledge }, kind);
+  async templateContext(kind: TemplateKind, executionAgent?: ExecutionContext["executionAgent"]): Promise<{ schema: Record<string, unknown>; context: ReturnType<typeof buildTemplateContext> }> {
+    return templateContextQuery({ repository: this.repository, knowledge: this.knowledge }, kind, executionAgent);
   }
 
   async authoringKnowledgeContext(): Promise<AuthoringKnowledgeContext> {
@@ -1614,7 +1614,7 @@ export class WorkspaceRuntime {
       domainCompleted = applied.facts;
     } else if (parsed.data.kind === "fact_review") {
       const run = await this.knowledge.beginFactReviewRun(operation.id, execution);
-      const reviewProjection = (await this.knowledge.factReviewContext()).projection_revision;
+      const reviewProjection = (await this.knowledge.factReviewContext({ reviewer_identity: resolution.agent_id })).projection_revision;
       const applied = await this.knowledge.applyReviewBatch(operation.id, parsed.data.decisions, execution, resolution.agent_id, run.id, reviewProjection);
       domainSummary = applied.summary;
       domainCompleted = applied.fact_ids;
@@ -2326,7 +2326,7 @@ export class WorkspaceRuntime {
     return repairRunQuery({ repository: this.repository }, planHash);
   }
 
-  async factReviewContext(options?: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification }): Promise<FactReviewContext> {
+  async factReviewContext(options?: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification; reviewer_identity?: string }): Promise<FactReviewContext> {
     return factReviewContextQuery({ repository: this.repository, knowledge: this.knowledge }, options);
   }
 
