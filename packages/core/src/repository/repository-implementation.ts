@@ -120,7 +120,9 @@ export class MemoryProjectRepository implements ProjectRepository {
       }
       const resolved = await work(cloneState(this.state));
       const next = validateState(resolved.state);
+      const blobWrites = normalizeBlobWrites(resolved.writeSet);
       next.revision = this.state.revision + 1;
+      for (const [hash, content] of blobWrites) await this.blobs.put(hash, content);
       this.state = cloneState(next);
       result = { revision: next.revision, state: cloneState(next), value: resolved.value };
     });
@@ -531,6 +533,7 @@ export class FileProjectRepository implements ProjectRepository {
     const staging = path.join(this.projectDirectory, ".workspace", `.staging-${transactionId}`);
     const transactionDirectory = path.join(this.projectDirectory, ".workspace", "transactions", transactionId);
     const journalPath = path.join(transactionDirectory, "journal.jsonl");
+    const blobWrites = normalizeBlobWrites(writeSet);
     const files = new Map<string, Uint8Array | string>();
     files.set(normalizeRepositoryPath(path.relative(this.projectDirectory, this.stateFile)), `${canonicalJson(state)}\n`);
     const needsInitialMaterialization = previousState === undefined || !(await pathExists(this.stateFile));
@@ -540,7 +543,7 @@ export class FileProjectRepository implements ProjectRepository {
       ? needsInitialMaterialization
         ? { files: await this.materializedFiles(state), remove: [] as readonly string[] }
         : await incrementalMaterializationWriteSet(previousState!, state, this.projectDirectory, {
-          readBlob: (hash) => this.blobs.get(hash),
+          readBlob: async (hash) => blobWrites.get(hash) ?? this.blobs.get(hash),
           publish_paths: {
             ...(previousPublishPaths === undefined ? {} : { previous: previousPublishPaths }),
             ...(currentPublishPaths === undefined ? {} : { current: currentPublishPaths }),
@@ -549,6 +552,7 @@ export class FileProjectRepository implements ProjectRepository {
       : { files: [], remove: [] as readonly string[] };
     for (const file of materializedWriteSet.files ?? []) files.set(normalizeRepositoryPath(file.path), file.content);
     for (const file of writeSet.files ?? []) files.set(normalizeRepositoryPath(file.path), file.content);
+    for (const [hash, content] of blobWrites) files.set(blobTargetPath(hash), content);
 
     const entries: RepositoryTransactionJournalEntry[] = [];
     let entryIndex = 0;
@@ -1065,6 +1069,26 @@ function publishMaterializationPaths(state: ProjectState): { json?: string; png?
       ? { png: latest.export_png_path ?? publishedCardPngExportPath(state.project_name, state.project_id, state.artifacts) }
       : {}),
   };
+}
+
+function blobTargetPath(hash: string): string {
+  return normalizeRepositoryPath(`.workspace/blobs/${hash}`);
+}
+
+function normalizeBlobWrites(writeSet?: RepositoryWriteSet): Map<string, Uint8Array> {
+  const writes = new Map<string, Uint8Array>();
+  for (const blob of writeSet?.blobs ?? []) {
+    const content = Buffer.from(blob.content);
+    if (contentHash(content) !== blob.hash) {
+      throw new CoreError("BLOB_HASH_MISMATCH", `Blob content does not match content hash ${blob.hash}`, true, { hash: blob.hash });
+    }
+    const previous = writes.get(blob.hash);
+    if (previous !== undefined && !Buffer.from(previous).equals(content)) {
+      throw new CoreError("BLOB_WRITE_CONFLICT", `Transaction contains conflicting writes for blob ${blob.hash}`, true, { hash: blob.hash });
+    }
+    writes.set(blob.hash, content);
+  }
+  return writes;
 }
 
 class RepositoryCrashInjection extends Error {

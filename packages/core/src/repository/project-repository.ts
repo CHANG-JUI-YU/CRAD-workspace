@@ -45,8 +45,15 @@ export interface RepositoryFile {
   content: Uint8Array | string;
 }
 
+/** A content-addressed blob that is installed with the surrounding repository transaction. */
+export interface RepositoryBlobWrite {
+  hash: string;
+  content: Uint8Array;
+}
+
 export interface RepositoryWriteSet {
   files?: readonly RepositoryFile[];
+  blobs?: readonly RepositoryBlobWrite[];
   remove?: readonly string[];
 }
 

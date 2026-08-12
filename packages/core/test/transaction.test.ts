@@ -2,7 +2,37 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { contentHash, FileProjectRepository } from "../src/index.js";
+import { contentHash, FileProjectRepository, MemoryProjectRepository } from "../src/index.js";
+
+function blob(content: string): { hash: string; content: Uint8Array } {
+  const bytes = Buffer.from(content, "utf8");
+  return { hash: contentHash(bytes), content: bytes };
+}
+
+describe("memory repository transactional blob writes", () => {
+  it("commits state and content-addressed blobs together", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    const payload = blob("memory blob");
+    const result = await repository.commit(0, (state) => ({ ...state, project_name: "committed" }), { blobs: [payload] });
+
+    expect(result.revision).toBe(1);
+    expect((await repository.read()).project_name).toBe("committed");
+    await expect(repository.readBlob(payload.hash)).resolves.toEqual(payload.content);
+  });
+
+  it("validates blob hashes before changing state or storing a blob", async () => {
+    const repository = new MemoryProjectRepository("demo");
+    const payload = blob("invalid memory blob");
+    await expect(repository.commit(0, (state) => ({ ...state, project_name: "must not commit" }), {
+      blobs: [{ ...payload, hash: contentHash("different") }],
+    })).rejects.toMatchObject({ code: "BLOB_HASH_MISMATCH" });
+
+    const state = await repository.read();
+    expect(state.revision).toBe(0);
+    expect(state.project_name).toBeUndefined();
+    await expect(repository.readBlob(payload.hash)).resolves.toBeUndefined();
+  });
+});
 
 describe("file repository transaction and CAS", () => {
   const wait = async (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -36,6 +66,108 @@ describe("file repository transaction and CAS", () => {
       expect(results.filter((value) => value === "ok")).toHaveLength(1);
       expect(results.filter((value) => value === "REVISION_CONFLICT")).toHaveLength(1);
       expect((await first.read()).revision).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stages and commits blobs with state in one file transaction", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-blob-transaction-"));
+    try {
+      const repository = new FileProjectRepository(root, "demo", { layout: "project", materialize: true });
+      const payload = blob("file blob");
+      const result = await repository.commit(0, (state) => ({ ...state, project_name: "committed" }), { blobs: [payload] });
+
+      expect(result.revision).toBe(1);
+      await expect(repository.readBlob(payload.hash)).resolves.toEqual(payload.content);
+      await expect(readFile(path.join(root, "demo", ".workspace", "blobs", payload.hash))).resolves.toEqual(payload.content);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not install a blob when the CAS revision is stale", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-blob-cas-"));
+    try {
+      const first = new FileProjectRepository(root, "demo", { layout: "project" });
+      const second = new FileProjectRepository(root, "demo", { layout: "project" });
+      const initial = await first.read();
+      const payload = blob("stale blob");
+      await first.commit(initial.revision, (state) => ({ ...state, project_name: "first" }));
+
+      await expect(second.commit(initial.revision, (state) => ({ ...state, project_name: "second" }), { blobs: [payload] }))
+        .rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+      await expect(second.readBlob(payload.hash)).resolves.toBeUndefined();
+      await expect(readFile(path.join(root, "demo", ".workspace", "blobs", payload.hash))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["before_install", "after_install"] as const)("rolls back a blob after a %s crash", async (point) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), `st-workspace-v3-blob-${point}-`));
+    try {
+      const initialRepository = new FileProjectRepository(root, "demo", { layout: "project", materialize: true });
+      await initialRepository.read();
+      const payload = blob(`crash ${point}`);
+      const crashingRepository = new FileProjectRepository(root, "demo", {
+        layout: "project",
+        materialize: true,
+        failure_injection: { point, mode: "crash", relative_path: `.workspace/blobs/${payload.hash}` },
+      });
+
+      await expect(crashingRepository.commit(0, (state) => ({ ...state, project_name: "must roll back" }), { blobs: [payload] }))
+        .rejects.toThrow("Injected repository crash");
+      const recoveredRepository = new FileProjectRepository(root, "demo", { layout: "project", materialize: true });
+      const recovered = await recoveredRepository.read();
+      expect(recovered.revision).toBe(0);
+      expect(recovered.project_name).toBeUndefined();
+      await expect(recoveredRepository.readBlob(payload.hash)).resolves.toBeUndefined();
+      await expect(readFile(path.join(root, "demo", ".workspace", "blobs", payload.hash))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("finalizes a committed blob after a cleanup crash", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-blob-finalize-"));
+    try {
+      const initialRepository = new FileProjectRepository(root, "demo", { layout: "project", materialize: true });
+      await initialRepository.read();
+      const payload = blob("finalize blob");
+      const crashingRepository = new FileProjectRepository(root, "demo", {
+        layout: "project",
+        materialize: true,
+        failure_injection: { point: "before_cleanup", mode: "crash" },
+      });
+
+      await expect(crashingRepository.commit(0, (state) => ({ ...state, project_name: "committed" }), { blobs: [payload] }))
+        .rejects.toThrow("Injected repository crash");
+      const recoveredRepository = new FileProjectRepository(root, "demo", { layout: "project", materialize: true });
+      const recovered = await recoveredRepository.read();
+      expect(recovered.revision).toBe(1);
+      expect(recovered.project_name).toBe("committed");
+      await expect(recoveredRepository.readBlob(payload.hash)).resolves.toEqual(payload.content);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("restores an existing shared blob after a failed replacement", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-blob-shared-"));
+    try {
+      const initialRepository = new FileProjectRepository(root, "demo", { layout: "project" });
+      await initialRepository.read();
+      const payload = blob("shared blob");
+      await initialRepository.writeBlob(payload.hash, payload.content);
+
+      const repository = new FileProjectRepository(root, "demo", {
+        layout: "project",
+        failure_injection: { point: "before_install", mode: "error", relative_path: `.workspace/blobs/${payload.hash}` },
+      });
+      await expect(repository.commit(0, (state) => ({ ...state, project_name: "must roll back" }), { blobs: [payload] }))
+        .rejects.toMatchObject({ code: "INJECTED_FAILURE" });
+      await expect(repository.readBlob(payload.hash)).resolves.toEqual(payload.content);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
