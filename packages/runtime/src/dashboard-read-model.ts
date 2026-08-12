@@ -190,6 +190,7 @@ export interface DashboardFactView {
   predicate?: string;
   value?: string;
   classification?: string;
+  entity_refs?: string[];
   coverage?: string[];
   source_ids: string[];
   review_run_id?: string;
@@ -489,6 +490,7 @@ function mapFact(state: ProjectState, fact: FactRecord): DashboardFactView {
     ...(fact.predicate === undefined ? {} : { predicate: fact.predicate }),
     ...(fact.value === undefined ? {} : { value: fact.value }),
     ...(fact.classification === undefined ? {} : { classification: fact.classification }),
+    ...(fact.entity_refs === undefined ? {} : { entity_refs: fact.entity_refs }),
     ...(fact.coverage === undefined ? {} : { coverage: fact.coverage }),
     source_ids: fact.source_ids,
     ...(fact.review_run_id === undefined ? {} : { review_run_id: fact.review_run_id }),

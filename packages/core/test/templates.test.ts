@@ -188,6 +188,31 @@ describe("structured template contracts", () => {
     expect(JSON.stringify(templateJsonSchemaFor("plugin"))).not.toMatch(/revision|file_path|bytes_base64/iu);
   });
 
+  it("accepts typed fact entity refs and only canonical coverage inputs", () => {
+    const valid = factCurationProposalValueSchema.safeParse({
+      kind: "fact_curation",
+      claims: [{
+        subject: "雪乃",
+        predicate: "has_trait",
+        value: "calm",
+        classification: "trait",
+        confidence: 0.9,
+        entity_refs: ["雪乃"],
+        coverage: ["personality"],
+        evidence: [{ source: "official", quote: "雪乃很冷靜。", source_revision_id: "revision-1" }],
+      }],
+    });
+    expect(valid.success).toBe(true);
+    expect(factCurationProposalValueSchema.safeParse({
+      kind: "fact_curation",
+      claims: [{ subject: "雪乃", predicate: "has_trait", value: "calm", classification: "trait", coverage: ["雪乃"], evidence: [{ source: "official" }] }],
+    }).success).toBe(false);
+    expect(factCurationProposalValueSchema.safeParse({
+      kind: "fact_curation",
+      claims: [{ subject: "雪乃", predicate: "has_trait", value: "calm", classification: "trait", coverage: ["not-a-dimension"], evidence: [{ source: "official" }] }],
+    }).success).toBe(false);
+  });
+
   it("includes examples and fixed schema in context", () => {
     const context = buildTemplateContext("palette", [{ kind: "palette", name: "demo/basic_information", value: { kind: "palette" } }]);
     expect(context.contract_version).toBe(1);

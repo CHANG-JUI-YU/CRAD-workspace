@@ -2,6 +2,7 @@ import { z } from "zod";
 import { structuredZhujiModuleSchema, zhujiProposalValueSchema } from "./zhuji.js";
 import { AUTHORING_KNOWLEDGE_RULES, type AuthoringKnowledgeContext } from "./authoring-context.js";
 import { wardrobeProposalValueSchema, type WardrobeProposal } from "./wardrobe.js";
+import { FACT_COVERAGE_DIMENSIONS, LEGACY_FACT_COVERAGE_DIMENSIONS } from "./fact-taxonomy.js";
 
 /**
  * Public, model-facing contracts for every migrated Agent/Skill.
@@ -370,7 +371,7 @@ export const sourceResearchProposalValueSchema = z
   .strict();
 
 export const factEvidenceSchema = z
-  .object({ source: text, quote: text.optional(), locator: text.optional() })
+  .object({ source: text, quote: text.optional(), locator: text.optional(), source_revision_id: text.optional() })
   .strict();
 export const factEvidenceReferenceSchema = z
   .object({
@@ -393,7 +394,8 @@ export const factClaimSchema = z
     value: text,
     classification: z.enum(["identity", "trait", "event", "relationship", "world", "other"]),
     confidence: z.number().min(0).max(1),
-    coverage: z.array(text).default([]),
+    entity_refs: z.array(text).optional(),
+    coverage: z.array(z.enum([...FACT_COVERAGE_DIMENSIONS, ...LEGACY_FACT_COVERAGE_DIMENSIONS] as [string, ...string[]])).default([]),
     evidence: z.array(factEvidenceSchema).min(1),
   })
   .strict();
@@ -410,7 +412,8 @@ export const factDecisionSchema = z
     reason: text,
     evidence: z.array(factEvidenceSchema).default([]),
     evidence_refs: z.array(factEvidenceReferenceSchema).default([]),
-    coverage: z.array(text).default([]),
+    entity_refs: z.array(text).optional(),
+    coverage: z.array(z.enum([...FACT_COVERAGE_DIMENSIONS, ...LEGACY_FACT_COVERAGE_DIMENSIONS] as [string, ...string[]])).default([]),
   })
   .strict()
   .superRefine((value, ctx) => {

@@ -17,6 +17,7 @@ import {
   type ProjectRepository,
   type SourceRecord,
 } from "@st-workspace/core";
+import { computeProjectProjection, createEntityMatcher } from "@st-workspace/core";
 import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 import {
   KNOWLEDGE_EXTRACTOR_REVISION as PIPELINE_EXTRACTOR_REVISION,
@@ -33,6 +34,7 @@ import {
   evidenceRevision,
   evidenceText as pipelineEvidenceText,
   factCandidateRevision as pipelineFactCandidateRevision,
+  normalizeFactEntityRefs,
   strictEvidenceReferences as pipelineStrictEvidenceReferences,
 } from "./fact-policy.js";
 import {
@@ -339,6 +341,52 @@ function factFromSentence(source: SourceRecord, statement: string, actor: string
 
 export class KnowledgeService {
   constructor(private readonly repository: ProjectRepository) {}
+
+  /**
+   * Source-adaptation natural requests only prepare clean chunks. Semantic
+   * fact creation is reserved for typed fact_curation claims.
+   */
+  async prepareSourceAdaptationChunks(operationId: string, request: string, actorInput: ExecutionActorInput): Promise<KnowledgeExecutionResult> {
+    const { executionAgent: actor, auditActor, context: execution } = resolveExecutionActors(actorInput);
+    await assertExecutionLease(this.repository, execution);
+    const initial = await this.repository.read();
+    const operation = initial.operations.find((item) => item.id === operationId);
+    if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
+    let committedChunks: string[] = [];
+    let committedSummary = "";
+    await this.repository.commit(initial.revision, (current) => {
+      assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+      const knownSourceIds = new Set(current.knowledge_chunks.map((chunk) => chunk.source_id));
+      const sources = current.sources.filter((source) => !knownSourceIds.has(source.id));
+      const chunks = sources.flatMap((source) => chunkSource(source, KNOWLEDGE_EXTRACTOR_REVISION));
+      committedChunks = chunks.map((chunk) => chunk.id);
+      committedSummary = chunks.length > 0
+        ? `Prepared ${chunks.length} cleaned knowledge chunks; submit a typed fact_curation proposal to create fact candidates.`
+        : "Clean knowledge chunks are already prepared; submit a typed fact_curation proposal to create fact candidates.";
+      return {
+        ...current,
+        knowledge_chunks: [...current.knowledge_chunks, ...chunks],
+        operations: current.operations.map((item) => item.id === operationId
+          ? updateOperation(item, {
+            status: "needs_input",
+            question: "已準備乾淨來源分片。下一步請 Fact Curator 讀取 chunks 並提交 typed fact_curation；自然語言要求不會自動建立事實。",
+            progress: [...item.progress, ...chunks.map((chunk) => ({ item_id: chunk.id, status: "completed" as const, message: "Clean source chunk prepared.", source_id: chunk.source_id }))],
+            result_summary: committedSummary,
+          })
+          : item),
+        audit: [...current.audit, {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "knowledge.chunks.prepared",
+          actor: auditActor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: { request, source_ids: sources.map((source) => source.id), chunk_count: chunks.length, fact_count: 0, agent_id: actor },
+        }],
+      };
+    });
+    return { chunks: committedChunks, facts: [], status: "needs_input", summary: committedSummary };
+  }
 
   async refresh(operationId: string, request: string, actorInput: ExecutionActorInput): Promise<KnowledgeExecutionResult> {
     const { executionAgent: actor, auditActor, context: execution } = resolveExecutionActors(actorInput);
@@ -726,7 +774,9 @@ export class KnowledgeService {
     if (decisions.length === 0) throw new CoreError("FACT_REVIEW_BATCH_EMPTY", "At least one fact review decision is required.", true);
     const targetIds: string[] = [];
     const records: FactReviewDecisionRecord[] = [];
-    const updates = new Map<string, { decision: FactDecision; evidence: FactEvidenceReference[]; record: FactReviewDecisionRecord; coverage: string[] }>();
+    const updates = new Map<string, { decision: FactDecision; evidence: FactEvidenceReference[]; record: FactReviewDecisionRecord; entity_refs: string[]; coverage: string[] }>();
+    const matcher = createEntityMatcher(initial);
+    const strictFactPolicy = initial.interview.flow === "source_adaptation" || computeProjectProjection(initial).intent.is_source_adaptation || matcher.entities.length > 0;
     let skippedCount = 0;
     const acceptedPool = initial.facts.filter((fact) => fact.status === "accepted");
     for (const decision of decisions) {
@@ -761,9 +811,10 @@ export class KnowledgeService {
       const evidence = decision.decision === "accept" || decision.evidence.length > 0 || structuredEvidenceCount > 0
         ? strictEvidenceReferences(decision, target, initial.sources, initial.knowledge_chunks, decision.decision === "accept")
         : [];
-      const effectiveCoverage = [...new Set([...(target.coverage ?? []), ...(decision.coverage ?? [])])];
-      const effectiveFact: FactRecord = effectiveCoverage.length > 0 ? { ...target, coverage: effectiveCoverage } : target;
-      if (decision.decision === "accept") assertStrictFactQuality(effectiveFact);
+      const effectiveEntityRefs = normalizeFactEntityRefs(initial, decision.entity_refs ?? target.entity_refs ?? [], target.subject, target.classification);
+      const effectiveCoverage = (decision.coverage ?? []).length > 0 ? [...new Set(decision.coverage ?? [])] : [...(target.coverage ?? [])];
+      const effectiveFact: FactRecord = { ...target, entity_refs: effectiveEntityRefs, coverage: effectiveCoverage };
+      if (decision.decision === "accept") assertPipelineFactQuality(effectiveFact, { matcher, strictEntity: strictFactPolicy, strictCoverage: strictFactPolicy, strictQuality: strictFactPolicy });
       let finalStatus: FactReviewDecisionStatus = status;
       let finalReason = decision.reason;
       if (status === "accepted" && reviewerIdentity !== "director") {
@@ -790,6 +841,7 @@ export class KnowledgeService {
         fact_id: target.id,
         reviewer_identity: reviewerIdentity,
         decision: finalStatus,
+        entity_refs: effectiveEntityRefs,
         reason: finalReason,
         evidence,
         candidate_revision: currentCandidateRevision,
@@ -798,7 +850,7 @@ export class KnowledgeService {
         created_at: now(),
       };
       records.push(record);
-      updates.set(target.id, { decision, evidence, record, coverage: effectiveCoverage });
+      updates.set(target.id, { decision, evidence, record, entity_refs: effectiveEntityRefs, coverage: effectiveCoverage });
     }
     const summary = skippedCount > 0
       ? `Adjudicated ${targetIds.length} fact candidates in review run ${run.id}; skipped ${skippedCount} already-adjudicated candidates.`
@@ -828,6 +880,7 @@ export class KnowledgeService {
             const nextFact: FactRecord = {
               ...fact,
               status: update.record.decision === "accepted" ? "accepted" : update.record.decision === "rejected" ? "rejected" : update.record.decision === "conflict" ? "conflict" : "candidate",
+              entity_refs: update.entity_refs,
               evidence: [...new Set([...fact.evidence, ...addedEvidence])],
               ...(update.evidence.length > 0 ? { evidence_refs: [...(fact.evidence_refs ?? []), ...update.evidence] } : {}),
               ...(update.coverage.length > 0 ? { coverage: update.coverage } : {}),

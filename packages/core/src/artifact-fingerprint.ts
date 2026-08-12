@@ -53,6 +53,7 @@ function factSlice(state: ProjectState, predicate: (fact: FactRecord) => boolean
     predicate: fact.predicate,
     value: fact.value,
     classification: fact.classification,
+    entity_refs: fact.entity_refs,
     coverage: fact.coverage,
   })).sort((left, right) => left.id.localeCompare(right.id));
 }
@@ -80,14 +81,14 @@ export function artifactDependencyFingerprint(state: ProjectState, artifact: Art
     payload.blueprint = parseArtifact(artifact);
   } else if (artifact.kind === "character" || artifact.kind === "zhuji" || artifact.kind === "palette" || artifact.kind === "wardrobe") {
     payload.blueprint = blueprintCharacterSlice(blueprint, characterId);
-    payload.facts = factSlice(state, (fact) => fact.subject === characterId || (characterId !== undefined && fact.coverage?.includes(characterId) === true));
+    payload.facts = factSlice(state, (fact) => fact.subject === characterId || fact.entity_refs?.includes(characterId ?? "") === true || (characterId !== undefined && fact.coverage?.includes(characterId) === true));
     payload.character_id = characterId;
   } else if (artifact.kind === "world_lore") {
     payload.world = parseArtifact(artifact)?.document ?? parseArtifact(artifact)?.entries;
     payload.facts = factSlice(state, (fact) => fact.classification === "world" || fact.coverage?.includes("world_context") === true);
   } else if (artifact.kind === "relationship") {
     payload.participants = participants;
-    payload.facts = factSlice(state, (fact) => fact.classification === "relationship" && (fact.subject === undefined || participants.includes(fact.subject)));
+    payload.facts = factSlice(state, (fact) => fact.classification === "relationship" && (fact.subject === undefined || participants.includes(fact.subject) || (fact.entity_refs ?? []).some((id) => participants.includes(id))));
   } else if (artifact.kind === "greeting") {
     const primary = stringValue(record(blueprint?.primary_character)?.id) ?? stringValue(blueprint?.primary_character_id);
     payload.primary_character_id = primary;

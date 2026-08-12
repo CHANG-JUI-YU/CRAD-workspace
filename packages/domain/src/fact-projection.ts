@@ -4,8 +4,8 @@ import { evidenceRevision } from "./fact-policy.js";
 export function candidateOccurrenceForFact(fact: FactRecord): string {
   return fact.candidate_occurrence_id ?? fact.id;
 }
-export function factKey(fact: Pick<FactRecord, "statement" | "subject" | "predicate" | "value">): string {
-  const structured = [fact.subject, fact.predicate, fact.value].filter((value): value is string => value !== undefined).join("|");
+export function factKey(fact: Pick<FactRecord, "statement" | "subject" | "predicate" | "value"> & Partial<Pick<FactRecord, "entity_refs">>): string {
+  const structured = [fact.subject, fact.predicate, fact.value, ...(fact.entity_refs ?? [])].filter((value): value is string => value !== undefined).join("|");
   return structured.length > 0 ? structured.toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "") : fact.statement.toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
 }
 

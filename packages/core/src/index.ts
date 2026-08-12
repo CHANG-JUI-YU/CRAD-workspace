@@ -10,6 +10,8 @@ export { z } from "zod";
 
 export * from "./core-utilities.js";
 export * from "./project-state.js";
+export * from "./fact-taxonomy.js";
+export * from "./entity-matcher.js";
 export * from "./operations.js";
 export * from "./project-projection.js";
 export * from "./relationship-graph.js";

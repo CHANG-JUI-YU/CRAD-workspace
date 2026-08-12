@@ -79,6 +79,7 @@ import {
   buildRequiredArtifactManifest,
   assertExecutionLeaseForOperation,
   extractSourceUrl,
+  validateCurationClaims,
   reviewRunProjectionRevision,
   type IssueUpdateInput,
   type SourceSelectionDecision,
@@ -1441,8 +1442,8 @@ export class WorkspaceRuntime {
     const kind = operation.kind;
     if (kind === "knowledge") {
       const state = await this.repository.read();
-      if (this.hasAuditMarker(operation.id, "knowledge.refreshed", state)) return responseFromOperation(await this.completeReplayedOperation(operation, execution));
-      const result = await this.knowledge.refresh(operation.id, operation.request, execution);
+      if (this.hasAuditMarker(operation.id, "knowledge.refreshed", state) || this.hasAuditMarker(operation.id, "knowledge.chunks.prepared", state)) return responseFromOperation(await this.completeReplayedOperation(operation, execution));
+      const result = await this.executeKnowledgeRequest(operation, execution);
       const latest = await this.repository.read();
       const finalOperation = latest.operations.find((item) => item.id === operation.id);
       return { operation_id: operation.id, status: result.status, summary: result.summary, completed: [...result.chunks, ...result.facts], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
@@ -1496,6 +1497,13 @@ export class WorkspaceRuntime {
     return zhujiContextQuery({ repository: this.repository, knowledge: this.knowledge }, characterId);
   }
 
+  private async executeKnowledgeRequest(operation: OperationRecord, execution: ExecutionContext): Promise<KnowledgeExecutionResult> {
+    const state = await this.repository.read();
+    return isSourceAdaptationProject(state)
+      ? this.knowledge.prepareSourceAdaptationChunks(operation.id, operation.request, execution)
+      : this.knowledge.refresh(operation.id, operation.request, execution);
+  }
+
   async templateContext(kind: TemplateKind): Promise<{ schema: Record<string, unknown>; context: ReturnType<typeof buildTemplateContext> }> {
     return templateContextQuery({ repository: this.repository, knowledge: this.knowledge }, kind);
   }
@@ -1527,6 +1535,7 @@ export class WorkspaceRuntime {
     if (factFindings.length > 0) {
       throw new CoreError("FACT_REFERENCE_INVALID", "Fact provenance validation failed.", true, factFindings);
     }
+    if (parsed.data.kind === "fact_curation") validateCurationClaims(knowledgeState, parsed.data.claims);
     if (parsed.data.kind === "palette") {
       await this.ensureBlueprintAuthoringReady("palette", parsed.data.character_id, parsed.data.module.module);
     }
@@ -2109,7 +2118,7 @@ export class WorkspaceRuntime {
         };
       });
       if (kind === "knowledge") {
-        const result = await this.knowledge.refresh(operation.id, trimmed, execution);
+        const result = await this.executeKnowledgeRequest(operation, execution);
         const latest = await this.repository.read();
         const finalOperation = latest.operations.find((item) => item.id === operation.id);
         return { operation_id: operation.id, status: result.status, summary: result.summary, completed: [...result.chunks, ...result.facts], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }) };
@@ -2501,7 +2510,8 @@ export class WorkspaceRuntime {
     }
     if (kind === "unknown") {
       if (pending.kind === "knowledge") {
-        const result = await this.knowledge.refresh(pending.id, trimmed, execution);
+        const pendingOperation = (await this.repository.read()).operations.find((item) => item.id === pending.id) ?? pending;
+        const result = await this.executeKnowledgeRequest({ ...pendingOperation, request: trimmed }, execution);
         const latest = await this.repository.read();
         const finalOperation = latest.operations.find((item) => item.id === pending.id);
         return { operation_id: pending.id, status: result.status, summary: result.summary, completed: [...result.chunks, ...result.facts], blocked: [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }) };

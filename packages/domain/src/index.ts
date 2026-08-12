@@ -20,6 +20,7 @@ export { BuildService, type BuildExecutionResult } from "./build.js";
 export { ConversionService, type ConversionExecutionResult } from "./conversion.js";
 export { ImportService, type ImportExecutionResult } from "./import.js";
 export { KnowledgeService, reviewRunProjectionRevision, type FactReviewExecutionResult, type FactReviewRunExecutionResult, type KnowledgeExecutionResult } from "./knowledge.js";
+export { validateCurationClaims } from "./fact-curation-service.js";
 export { ReviewService, type IssueUpdateAction, type IssueUpdateInput, type IssueUpdateResult, type ReviewExecutionResult } from "./review.js";
 export { validateWorkflow, type WorkflowDiagnostic, type WorkflowGatePhase, type WorkflowGateResult } from "./workflow-gate.js";
 export { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput, type ResolvedExecutionActors } from "./execution-context.js";

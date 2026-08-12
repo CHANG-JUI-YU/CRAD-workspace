@@ -66,6 +66,7 @@ const factSchema = z.object({
   predicate: z.string().min(1).optional(),
   value: z.string().min(1).optional(),
   classification: z.enum(["identity", "trait", "event", "relationship", "world", "other"]).optional(),
+  entity_refs: z.array(z.string().min(1)).default([]),
   coverage: z.array(z.string().min(1)).optional(),
   status: z.enum(["candidate", "accepted", "rejected", "conflict"]),
   confidence: z.number().min(0).max(1),
@@ -130,6 +131,7 @@ const factReviewDecisionRecordSchema = z.object({
   fact_id: z.string().min(1).optional(),
   reviewer_identity: z.string().min(1),
   decision: z.enum(["accepted", "rejected", "needs_evidence", "conflict"]),
+  entity_refs: z.array(z.string().min(1)).default([]),
   reason: z.string().min(1),
   evidence: z.array(z.object({
     id: z.string().min(1).optional(),

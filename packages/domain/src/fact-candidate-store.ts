@@ -16,7 +16,7 @@ export function candidateOccurrenceId(sourceId: string, sourceRevision: string, 
 
 export function claimOccurrenceId(claim: FactClaim, sources: readonly SourceRecord[]): string {
   const sourceRevisions = claim.evidence.flatMap((evidence) => sources.filter((source) => sourceMatches(source, evidence.source)).map((source) => ({ id: source.id, revision: source.revision })));
-  return `candidate_occurrence-${contentHash(canonicalJson({ claim: { subject: claim.subject, predicate: claim.predicate, value: claim.value, classification: claim.classification }, source_revisions: sourceRevisions })).slice(0, 32)}`;
+  return `candidate_occurrence-${contentHash(canonicalJson({ claim: { subject: claim.subject, predicate: claim.predicate, value: claim.value, classification: claim.classification, entity_refs: claim.entity_refs, coverage: claim.coverage }, source_revisions: sourceRevisions })).slice(0, 32)}`;
 }
 
 export function factFromSentence(source: SourceRecord, statement: string, actor: string, ordinal: number, curationRunId?: string): FactRecord {
@@ -53,6 +53,7 @@ export function claimToFact(claim: FactClaim, sourceRecords: readonly SourceReco
     predicate: claim.predicate,
     value: claim.value,
     classification: claim.classification,
+    ...(claim.entity_refs === undefined ? {} : { entity_refs: [...claim.entity_refs] }),
     coverage: claim.coverage,
     status: "candidate",
     confidence: claim.confidence,

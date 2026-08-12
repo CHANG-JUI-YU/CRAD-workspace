@@ -28,6 +28,7 @@ export interface FactReviewCandidateView {
   predicate?: string;
   value?: string;
   classification?: FactClassification;
+  entity_refs?: string[];
   coverage?: string[];
   status: FactRecord["status"];
   source_ids: string[];
@@ -166,6 +167,7 @@ export function buildFactReviewContext(state: ProjectState, options: FactReviewC
       ...(fact.predicate === undefined ? {} : { predicate: fact.predicate }),
       ...(fact.value === undefined ? {} : { value: fact.value }),
       ...(fact.classification === undefined ? {} : { classification: fact.classification }),
+      ...(fact.entity_refs === undefined ? {} : { entity_refs: fact.entity_refs }),
       ...(fact.coverage === undefined ? {} : { coverage: fact.coverage }),
       status: fact.status,
       source_ids: fact.source_ids,

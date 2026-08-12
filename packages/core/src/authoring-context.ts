@@ -49,6 +49,7 @@ export interface FactReviewCandidateContext {
   predicate?: string;
   value?: string;
   classification?: string;
+  entity_refs?: string[];
   coverage?: string[];
   status: string;
   source_ids: string[];

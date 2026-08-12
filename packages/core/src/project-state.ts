@@ -205,6 +205,8 @@ export interface FactRecord {
   predicate?: string;
   value?: string;
   classification?: FactClassification;
+  /** Stable Blueprint roster ids; legacy states may omit this field. */
+  entity_refs?: string[];
   coverage?: string[];
   status: FactStatus;
   confidence: number;
@@ -279,6 +281,8 @@ export interface FactReviewDecisionRecord {
   fact_id?: string;
   reviewer_identity: string;
   decision: FactReviewDecisionStatus;
+  /** Stable Blueprint roster ids used by the accepted projection. */
+  entity_refs?: string[];
   reason: string;
   evidence: FactEvidenceReference[];
   candidate_revision: string;

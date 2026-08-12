@@ -145,6 +145,66 @@ describe("runtime template boundary", () => {
     expect(reviewed.completed).toContain(fact!.id);
   });
 
+  it("uses stable Blueprint entity ids for typed curation and permits world facts without a character", async () => {
+    const repository = new MemoryProjectRepository("typed-facts");
+    const timestamp = new Date().toISOString();
+    const sourceText = "雪乃很冷靜。學園世界是封閉的。";
+    const blueprintContent = JSON.stringify({
+      kind: "blueprint",
+      flow: "source_adaptation",
+      source_adaptation: { subject_name: "作品" },
+      primary_character_id: "character-1",
+      characters: [
+        { id: "character-1", label: "雪之下雪乃", aliases: ["雪乃"] },
+        { id: "character-2", label: "比企谷八幡", aliases: ["八幡"] },
+      ],
+    });
+    const blueprintHash = contentHash(blueprintContent);
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "source_adaptation" },
+      artifacts: [{ id: "blueprint-typed", key: "blueprint:typed-facts", kind: "blueprint", name: "project-blueprint", content: blueprintContent, media_type: "application/json", content_hash: blueprintHash, revision: blueprintHash, status: "draft", created_at: timestamp, updated_at: timestamp, created_by: "director", operation_id: "interview" }],
+      sources: [{ id: "source-typed", candidate_id: "candidate-typed", title: "official", canonical_text: sourceText, original_hash: contentHash(sourceText), revision: contentHash(sourceText), media_type: "text/plain", created_at: timestamp }],
+    }));
+    const runtime = new WorkspaceRuntime(repository);
+    await runtime.submitTemplateProposal({
+      kind: "fact_curation",
+      topic: "作品",
+      claims: [
+        { subject: "雪乃", predicate: "has_trait", value: "冷靜", classification: "trait", confidence: 0.9, entity_refs: ["雪乃"], coverage: ["personality"], evidence: [{ source: "official", quote: "雪乃很冷靜。" }] },
+        { subject: "學園世界", predicate: "has_property", value: "封閉", classification: "world", confidence: 0.9, coverage: ["world_context"], evidence: [{ source: "official", quote: "學園世界是封閉的。" }] },
+      ],
+      summary: "Typed source facts",
+    }, { actor: "fact-curator", attachments: [] });
+    const state = await repository.read();
+    expect(state.facts).toHaveLength(2);
+    expect(state.facts.find((fact) => fact.classification === "trait")?.entity_refs).toEqual(["character-1"]);
+    expect(state.facts.find((fact) => fact.classification === "world")?.entity_refs).toEqual([]);
+  });
+
+  it("does not create sentence facts for a natural source-adaptation knowledge request", async () => {
+    const repository = new MemoryProjectRepository("natural-typed-route");
+    const timestamp = new Date().toISOString();
+    const sourceText = "Yukino is calm. Hachiman is blunt.";
+    const blueprintContent = JSON.stringify({ kind: "blueprint", flow: "source_adaptation", characters: [{ id: "character-1", label: "Yukino", aliases: [] }] });
+    const blueprintHash = contentHash(blueprintContent);
+    await repository.commit(0, (state) => ({
+      ...state,
+      project_status: "ready",
+      interview: { ...state.interview, status: "complete", flow: "source_adaptation" },
+      artifacts: [{ id: "blueprint-natural", key: "blueprint:natural-typed-route", kind: "blueprint", name: "project-blueprint", content: blueprintContent, media_type: "application/json", content_hash: blueprintHash, revision: blueprintHash, status: "draft", created_at: timestamp, updated_at: timestamp, created_by: "director", operation_id: "interview" }],
+      sources: [{ id: "source-natural", candidate_id: "candidate-natural", title: "official", canonical_text: sourceText, original_hash: contentHash(sourceText), revision: contentHash(sourceText), media_type: "text/plain", created_at: timestamp }],
+    }));
+    const result = await new WorkspaceRuntime(repository).request("整理知識", { actor: "fact-curator", attachments: [] });
+    expect(result.status).toBe("needs_input");
+    expect(result.summary).toMatch(/typed fact_curation/iu);
+    const state = await repository.read();
+    expect(state.facts).toHaveLength(0);
+    expect(state.knowledge_chunks.length).toBeGreaterThan(0);
+    expect(state.operations.at(-1)?.question).toMatch(/typed fact_curation/iu);
+  });
+
   it("rotates the three trusted reviewer identities over one shared Review Run", async () => {
     const repository = new MemoryProjectRepository("reviewer-rotation");
     const text = "Yukino is direct. Yukino is observant.";
