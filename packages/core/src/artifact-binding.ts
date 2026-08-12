@@ -46,6 +46,7 @@ function legacySegment(artifact: ArtifactRecord): string | undefined {
     const suffix = moduleSuffixes.find((module) => decoded.endsWith(`-${module}`));
     if (suffix !== undefined) return decoded.slice(0, -(suffix.length + 1));
   }
+  if (artifact.kind === "wardrobe") return decoded.split("/")[0];
   return decoded;
 }
 
