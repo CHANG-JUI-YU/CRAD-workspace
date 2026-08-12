@@ -10,6 +10,7 @@ import {
   type FactClassification,
   type FactReviewDecisionStatus,
   type FactReviewDecisionRecord,
+  type FactReviewEvidenceContext,
   type FactReviewPassRecord,
   type FactReviewRunRecord,
   type KnowledgeChunk,
@@ -694,7 +695,7 @@ export class KnowledgeService {
   async factReviewContext(options: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification } = {}): Promise<{
     run?: FactReviewRunRecord;
     projection_revision?: string;
-    candidates: Array<{ candidate_occurrence_id: string; fact_id: string; statement: string; subject?: string; predicate?: string; value?: string; classification?: FactClassification; coverage?: string[]; status: FactRecord["status"]; source_ids: string[]; evidence: string[]; evidence_refs?: FactEvidenceReference[]; candidate_revision: string; last_decision?: FactReviewDecisionRecord["decision"]; last_reviewer_identity?: string }>;
+    candidates: Array<{ candidate_occurrence_id: string; fact_id: string; statement: string; subject?: string; predicate?: string; value?: string; classification?: FactClassification; entity_refs?: string[]; coverage?: string[]; status: FactRecord["status"]; source_ids: string[]; evidence: string[]; evidence_refs?: FactEvidenceReference[]; evidence_context?: FactReviewEvidenceContext[]; candidate_revision: string; last_decision?: FactReviewDecisionRecord["decision"]; last_reviewer_identity?: string }>;
     next_cursor?: string;
   }> {
     return buildFactReviewContext(await this.repository.read(), options ?? {} satisfies FactReviewContextOptions);

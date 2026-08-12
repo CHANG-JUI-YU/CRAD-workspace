@@ -7,6 +7,7 @@ import {
   type FactEvidenceReference,
   type FactRecord,
   type FactReviewDecisionRecord,
+  type FactReviewEvidenceContext,
   type FactReviewRunRecord,
   type ProjectState,
 } from "@st-workspace/core";
@@ -34,6 +35,7 @@ export interface FactReviewCandidateView {
   source_ids: string[];
   evidence: string[];
   evidence_refs?: FactEvidenceReference[];
+  evidence_context?: FactReviewEvidenceContext[];
   candidate_revision: string;
   last_decision?: FactReviewDecisionRecord["decision"];
   last_reviewer_identity?: string;
@@ -113,6 +115,92 @@ export function unresolvedRevisionMismatch(state: ProjectState, run: FactReviewR
   return mismatched;
 }
 
+function sourceUrl(state: ProjectState, sourceId: string): string | undefined {
+  const source = state.sources.find((candidate) => candidate.id === sourceId);
+  if (source === undefined) return undefined;
+  const candidate = state.candidates.find((item) => item.id === source.candidate_id);
+  return source.canonical_url ?? source.final_url ?? candidate?.canonical_url ?? candidate?.final_url ?? candidate?.url;
+}
+
+function headingText(line: string): string | undefined {
+  const value = line.trim();
+  if (value.length === 0) return undefined;
+  const markdown = value.match(/^#{1,6}\s+(.+)$/u);
+  if (markdown?.[1] !== undefined) return markdown[1].trim();
+  if (value.length > 120 || /[。！？!?；;:：,.，]/u.test(value)) return undefined;
+  if (/^(?:https?:\/\/|www\.)/iu.test(value)) return undefined;
+  return value;
+}
+
+function boundedSourceContext(state: ProjectState, sourceId: string, reference: FactEvidenceReference, fallbackQuote?: string): FactReviewEvidenceContext | undefined {
+  const source = state.sources.find((candidate) => candidate.id === sourceId);
+  if (source === undefined) return undefined;
+  const quote = reference.quote.trim() || fallbackQuote?.trim() || "";
+  const chunk = reference.chunk_id === undefined
+    ? state.knowledge_chunks.find((candidate) => candidate.source_id === source.id && quote.length > 0 && candidate.text.includes(quote))
+    : state.knowledge_chunks.find((candidate) => candidate.id === reference.chunk_id && candidate.source_id === source.id);
+  const sourceText = source.canonical_text;
+  const chunkStart = chunk === undefined ? -1 : sourceText.indexOf(chunk.text);
+  const quoteInChunk = chunk === undefined || chunkStart < 0 || quote.length === 0 ? -1 : chunk.text.indexOf(quote);
+  const quoteStart = quoteInChunk >= 0 ? chunkStart + quoteInChunk : quote.length === 0 ? -1 : sourceText.indexOf(quote);
+  const lines = sourceText.split("\n");
+  const starts: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    starts.push(offset);
+    offset += line.length + 1;
+  }
+  let lineIndex = -1;
+  if (quoteStart >= 0) {
+    for (let index = 0; index < starts.length; index += 1) {
+      if ((starts[index] ?? Number.POSITIVE_INFINITY) > quoteStart) break;
+      lineIndex = index;
+    }
+  }
+  const paragraphStart = lineIndex < 0 ? undefined : starts[lineIndex];
+  const paragraphEnd = lineIndex < 0 ? undefined : paragraphStart! + (lines[lineIndex]?.length ?? 0);
+  const previous = lineIndex > 0 ? lines.slice(0, lineIndex).reverse().find((line) => line.trim().length > 0)?.trim() : undefined;
+  const following = lineIndex >= 0 ? lines.slice(lineIndex + 1).find((line) => line.trim().length > 0)?.trim() : undefined;
+  let sectionHeading: string | undefined;
+  if (lineIndex >= 0) {
+    for (let index = lineIndex - 1; index >= 0; index -= 1) {
+      const heading = headingText(lines[index] ?? "");
+      if (heading !== undefined) { sectionHeading = heading; break; }
+    }
+  }
+  const url = sourceUrl(state, source.id);
+  return {
+    source_id: source.id,
+    source_title: source.title,
+    ...(url === undefined ? {} : { source_url: url }),
+    source_revision: source.revision,
+    ...(chunk === undefined ? {} : { chunk_id: chunk.id, chunk_hash: chunk.hash }),
+    ...(sectionHeading === undefined ? {} : { section_heading: sectionHeading }),
+    ...(paragraphStart === undefined || paragraphEnd === undefined ? {} : { paragraph: sourceText.slice(paragraphStart, paragraphEnd).trim() }),
+    ...(previous === undefined ? {} : { preceding_context: previous }),
+    ...(following === undefined ? {} : { following_context: following }),
+    ...(quoteStart < 0 ? {} : { evidence_span: { start: quoteStart, end: quoteStart + quote.length, quote } }),
+  };
+}
+
+function evidenceContextForFact(state: ProjectState, fact: FactRecord): FactReviewEvidenceContext[] {
+  const references = fact.evidence_refs ?? [];
+  const fallbackReferences = references.length > 0
+    ? references
+    : fact.source_ids.map((sourceId, index) => ({
+      source_id: sourceId,
+      source_revision_id: state.sources.find((source) => source.id === sourceId)?.revision ?? "unknown",
+      quote: fact.evidence[index] ?? fact.statement,
+    }));
+  const contexts = fallbackReferences.flatMap((reference) => {
+    const context = boundedSourceContext(state, reference.source_id, reference, fact.statement);
+    return context === undefined ? [] : [context];
+  });
+  const unique = new Map<string, FactReviewEvidenceContext>();
+  for (const context of contexts) unique.set(`${context.source_id}:${context.evidence_span?.start ?? -1}:${context.chunk_id ?? ""}`, context);
+  return [...unique.values()];
+}
+
 export function buildFactReviewContext(state: ProjectState, options: FactReviewContextOptions = {}): FactReviewContextPage {
   const run = [...state.fact_review_runs].reverse().find((candidate) => candidate.status === "open" || candidate.status === "blocked");
   if (run !== undefined && unresolvedRevisionMismatch(state, run).length > 0) {
@@ -159,6 +247,7 @@ export function buildFactReviewContext(state: ProjectState, options: FactReviewC
       const chunk = state.knowledge_chunks.find((candidate) => candidate.source_id === reference.source_id && candidate.text.includes(reference.quote));
       return chunk === undefined ? reference : { ...reference, chunk_id: chunk.id, chunk_hash: chunk.hash };
     });
+    const evidenceContext = evidenceContextForFact(state, fact);
     page.push({
       candidate_occurrence_id: occurrenceId,
       fact_id: fact.id,
@@ -173,6 +262,7 @@ export function buildFactReviewContext(state: ProjectState, options: FactReviewC
       source_ids: fact.source_ids,
       evidence: fact.evidence,
       ...(evidenceRefs.length === 0 ? {} : { evidence_refs: evidenceRefs }),
+      ...(evidenceContext.length === 0 ? {} : { evidence_context: evidenceContext }),
       candidate_revision: factCandidateRevision(fact, state.sources),
       ...(lastDecision === undefined ? {} : { last_decision: lastDecision.decision, last_reviewer_identity: lastDecision.reviewer_identity }),
     });

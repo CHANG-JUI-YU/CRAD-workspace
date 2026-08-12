@@ -55,9 +55,30 @@ export interface FactReviewCandidateContext {
   source_ids: string[];
   evidence: string[];
   evidence_refs?: FactEvidenceReference[];
+  /** Bounded source context for independently checking this candidate. */
+  evidence_context?: FactReviewEvidenceContext[];
   candidate_revision: string;
   last_decision?: "accepted" | "rejected" | "needs_evidence" | "conflict";
   last_reviewer_identity?: string;
+}
+
+export interface FactReviewEvidenceContext {
+  source_id: string;
+  source_title: string;
+  source_url?: string;
+  source_revision: string;
+  chunk_id?: string;
+  chunk_hash?: string;
+  section_heading?: string;
+  paragraph?: string;
+  preceding_context?: string;
+  following_context?: string;
+  evidence_span?: {
+    /** Offsets are relative to the source canonical text. */
+    start: number;
+    end: number;
+    quote: string;
+  };
 }
 
 export interface FactReviewContext {

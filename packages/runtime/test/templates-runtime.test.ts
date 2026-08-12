@@ -145,6 +145,37 @@ describe("runtime template boundary", () => {
     expect(reviewed.completed).toContain(fact!.id);
   });
 
+  it("does not inject the full unresolved fact register into fact review template context", async () => {
+    const repository = new MemoryProjectRepository("bounded-fact-review-context");
+    const facts = Array.from({ length: 300 }, (_, index): FactRecord => ({
+      id: `fact-${String(index).padStart(3, "0")}`,
+      candidate_occurrence_id: `occ-${String(index).padStart(3, "0")}`,
+      statement: `Candidate ${index} has a reviewable statement.`,
+      subject: `Candidate ${index}`,
+      predicate: "has",
+      value: "a reviewable statement",
+      classification: "trait",
+      coverage: ["personality"],
+      status: "candidate",
+      confidence: 0.5,
+      source_ids: [],
+      evidence: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      created_by: "fact-curator",
+    }));
+    await repository.commit(0, (state) => ({ ...state, facts }));
+    const runtime = new WorkspaceRuntime(repository);
+
+    const template = await runtime.templateContext("fact_review");
+    const knowledge = template.context.knowledge!;
+    expect(knowledge.accepted_facts).toEqual([]);
+    expect(knowledge.unresolved_facts).toEqual([]);
+    expect(knowledge.fact_review?.candidates).toHaveLength(50);
+    expect(knowledge.fact_review?.candidates.some((candidate) => candidate.fact_id === "fact-299")).toBe(false);
+    expect(JSON.stringify(template.context).length).toBeLessThan(100_000);
+  });
+
   it("uses stable Blueprint entity ids for typed curation and permits world facts without a character", async () => {
     const repository = new MemoryProjectRepository("typed-facts");
     const timestamp = new Date().toISOString();

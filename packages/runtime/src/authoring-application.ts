@@ -26,7 +26,7 @@ export interface AuthoringApplicationDeps {
   };
 }
 
-function buildAuthoringKnowledgeContext(state: ProjectState, options?: { character_id?: string; related_character_ids?: ReadonlyArray<string>; coverage?: ReadonlyArray<string> }): AuthoringKnowledgeContext {
+function buildAuthoringKnowledgeContext(state: ProjectState, options?: { character_id?: string; related_character_ids?: ReadonlyArray<string>; coverage?: ReadonlyArray<string>; include_facts?: boolean; include_sources?: boolean }): AuthoringKnowledgeContext {
   const blueprint = latestBlueprintSnapshot(state);
   const candidateById = new Map(state.candidates.map((candidate) => [candidate.id, candidate]));
   const characterId = options?.character_id;
@@ -43,14 +43,15 @@ function buildAuthoringKnowledgeContext(state: ProjectState, options?: { charact
     if (options?.coverage === undefined || options.coverage.length === 0) return true;
     return (fact.coverage ?? []).some((dimension) => options.coverage!.includes(dimension));
   };
-  const acceptedFacts = state.facts.filter((fact) => fact.status === "accepted" && factRelevant(fact) && coverageFiltered(fact));
-  const unresolvedFacts = state.facts.filter((fact) => fact.status !== "accepted" && factRelevant(fact) && coverageFiltered(fact));
+  const includeFacts = options?.include_facts !== false;
+  const acceptedFacts = includeFacts ? state.facts.filter((fact) => fact.status === "accepted" && factRelevant(fact) && coverageFiltered(fact)) : [];
+  const unresolvedFacts = includeFacts ? state.facts.filter((fact) => fact.status !== "accepted" && factRelevant(fact) && coverageFiltered(fact)) : [];
   return {
     ...(blueprint === undefined ? {} : { blueprint }),
     ...(objectValue(blueprint?.source_adaptation)?.subject_name === undefined ? {} : { source_adaptation: blueprint?.source_adaptation as SourceAdaptationIntent }),
     accepted_facts: acceptedFacts,
     unresolved_facts: unresolvedFacts,
-    sources: state.sources.map((source) => sourceContextFromRecord(source, candidateById.get(source.candidate_id))),
+    sources: options?.include_sources === false ? [] : state.sources.map((source) => sourceContextFromRecord(source, candidateById.get(source.candidate_id))),
     fact_register_revision: contentHash(canonicalJson(state.facts.map((fact) => ({ id: fact.id, status: fact.status, updated_at: fact.updated_at })))),
     adaptation_decisions: [...state.adaptation_decisions],
   };
@@ -104,7 +105,9 @@ export async function templateContext(deps: AuthoringApplicationDeps, kind: Temp
         ? firstInstance.name.split("/")[0]
         : undefined;
   const knowledge: AuthoringKnowledgeContext = {
-    ...buildAuthoringKnowledgeContext(state, kind === "fact_review" || instanceCharacterId === undefined ? undefined : { character_id: instanceCharacterId }),
+    ...buildAuthoringKnowledgeContext(state, kind === "fact_review"
+      ? { include_facts: false, include_sources: false }
+      : instanceCharacterId === undefined ? undefined : { character_id: instanceCharacterId }),
     ...(factReview === undefined ? {} : { fact_review: factReview as FactReviewContext }),
   };
   const context = buildTemplateContext(kind, existing, knowledge);

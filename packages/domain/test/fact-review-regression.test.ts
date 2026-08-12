@@ -85,6 +85,71 @@ describe("BUG4-03/06 fact review correctness regressions", () => {
     expect(new Set(seen).size).toBe(120);
   });
 
+  it("exposes bounded source metadata and local paragraph context for a candidate", async () => {
+    const text = [
+      "Series overview",
+      "Characters",
+      "Yukino is calm.",
+      "The club meets after school.",
+      "Production notes",
+    ].join("\n");
+    const source = {
+      ...sourceRecord("source-context", text),
+      title: "Official character page",
+      canonical_url: "https://example.test/characters/yukino",
+    };
+    const chunk: KnowledgeChunk = {
+      id: "chunk-context",
+      source_id: source.id,
+      ordinal: 0,
+      text,
+      hash: contentHash(text),
+      created_at: now,
+    };
+    const fact = candidateFact("fact-context", "occ-context", "Yukino is calm.", {
+      subject: "Yukino",
+      predicate: "is",
+      value: "calm",
+      classification: "trait",
+      entity_refs: ["character-1"],
+      coverage: ["personality"],
+      source_ids: [source.id],
+      evidence: ["Yukino is calm."],
+      evidence_refs: [{ source_id: source.id, source_revision_id: source.revision, chunk_id: chunk.id, chunk_hash: chunk.hash, quote: "Yukino is calm." }],
+    });
+    const repository = new MemoryProjectRepository("fact-context");
+    await repository.commit(0, (state) => ({
+      ...state,
+      sources: [source],
+      knowledge_chunks: [chunk],
+      facts: [fact],
+      operations: [operation("op-context", "review")],
+    }));
+    const service = new KnowledgeService(repository);
+    await service.beginFactReviewRun("op-context", "fact-reviewer-1");
+
+    const candidate = (await service.factReviewContext({ limit: 1 })).candidates[0]!;
+    const context = candidate.evidence_context?.[0];
+    expect(candidate.candidate_occurrence_id).toBe("occ-context");
+    expect(candidate.entity_refs).toEqual(["character-1"]);
+    expect(candidate.classification).toBe("trait");
+    expect(candidate.coverage).toEqual(["personality"]);
+    expect(context).toMatchObject({
+      source_id: source.id,
+      source_title: source.title,
+      source_url: source.canonical_url,
+      source_revision: source.revision,
+      chunk_id: chunk.id,
+      section_heading: "Characters",
+      paragraph: "Yukino is calm.",
+      preceding_context: "Characters",
+      following_context: "The club meets after school.",
+      evidence_span: { quote: "Yukino is calm." },
+    });
+    expect(context?.evidence_span?.end).toBeGreaterThan(context?.evidence_span?.start ?? -1);
+    expect(JSON.stringify(candidate)).not.toContain("Production notes\n");
+  });
+
   it("B: keeps needs_evidence and conflict candidates visible across pages", async () => {
     const repository = new MemoryProjectRepository("fact-mixed-decisions");
     const facts = [
