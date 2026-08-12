@@ -1,4 +1,4 @@
-import { artifactBinding, computeProjectProjection, contentHash, type ArtifactRecord, type ProjectState } from "@st-workspace/core";
+import { artifactBinding, computeProjectProjection, contentHash, createEntityMatcher, normalizeEntityReference, type ArtifactRecord, type ProjectState } from "@st-workspace/core";
 
 /**
  * Shared descriptor of required module keys per card mode. This is the single
@@ -178,10 +178,11 @@ function latestCharacterFor(artifacts: readonly ArtifactRecord[], characterId: s
   return bestScore === 0 ? undefined : best;
 }
 
-function greetingCoversPrimary(artifacts: readonly ArtifactRecord[], primaryCharacterId: string): { artifactIds: string[]; complete: boolean } {
+function greetingCoversPrimary(state: ProjectState, artifacts: readonly ArtifactRecord[], primaryCharacterId: string): { artifactIds: string[]; complete: boolean } {
   let complete = false;
   const artifactIds: string[] = [];
-  const target = normalized(primaryCharacterId);
+  const matcher = createEntityMatcher(state);
+  const target = matcher.resolve(primaryCharacterId)?.id ?? normalizeEntityReference(primaryCharacterId);
   for (const artifact of artifacts) {
     if (artifact.kind !== "greeting") continue;
     artifactIds.push(artifact.id);
@@ -192,7 +193,10 @@ function greetingCoversPrimary(artifacts: readonly ArtifactRecord[], primaryChar
     const covers = greetings.some((entry) => {
       const item = record(entry);
       const characterIds = Array.isArray(item?.character_ids) ? item.character_ids : [];
-      return characterIds.some((id) => typeof id === "string" && normalized(id) === target);
+      return characterIds.some((id) => {
+        if (typeof id !== "string") return false;
+        return matcher.resolve(id)?.id === target || (matcher.resolve(id) === undefined && normalizeEntityReference(id) === target);
+      });
     });
     if (covers) complete = true;
   }
@@ -251,7 +255,12 @@ export function buildRequiredArtifactManifest(
   const inScope = new Set<string>();
   const inScopeKeys = new Set<string>();
   const current = projection.currentArtifacts;
-  const publishPlan = projection.publishPlan(exportMode ?? "both");
+  const selectedModes = new Set(characters.flatMap((character) => {
+    const mode = text(character.mode);
+    return mode === "zhuji" || mode === "palette" ? [mode as CardMode] : [];
+  }));
+  const exportModes: ManifestCardModeSelection = exportMode ?? (selectedModes.size === 1 ? [...selectedModes][0]! : "both");
+  const publishPlan = projection.publishPlan(exportModes);
   const exactPlanIds = new Set(publishPlan.entries.map((entry) => entry.artifact_id));
   const exactArtifacts = current.filter((artifact) => exactPlanIds.has(artifact.id));
 
@@ -287,7 +296,7 @@ export function buildRequiredArtifactManifest(
         message: `Blueprint character ${characterId} must declare a valid mode: zhuji or palette. 請在 Blueprint 中為該角色補充 mode（zhuji 或 palette）後重新產生 Blueprint，再繼續打包與發布。`,
       });
     }
-    const includedInExport = exportMode === undefined || exportMode === mode;
+    const includedInExport = exportModes === "both" || exportModes === mode;
     const matched = latestCharacterFor(current, characterId, label);
     const displayName = matched?.document.display_name ?? label ?? characterId;
     const requiredModules = mode === "palette" ? PALETTE_REQUIRED_MODULES : ZHUJI_REQUIRED_MODULES;
@@ -355,7 +364,7 @@ export function buildRequiredArtifactManifest(
     });
   }
 
-  const greeting = greetingCoversPrimary(exactArtifacts, primaryCharacterId ?? "");
+  const greeting = greetingCoversPrimary(state, exactArtifacts, primaryCharacterId ?? "");
   const greetingRequired = characters.length > 0;
   addScope(greeting.artifactIds);
   if (greetingRequired && primaryCharacterId !== undefined && !greeting.complete) {
@@ -366,16 +375,14 @@ export function buildRequiredArtifactManifest(
     });
   }
 
-  const selectedModes = new Set(characterRequirements.flatMap((character) => character.mode === undefined ? [] : [character.mode]));
-  const exportModes: ManifestCardModeSelection = exportMode ?? (selectedModes.size === 1 ? [...selectedModes][0]! : "both");
   const includedCharacterIds = new Set(
     characterRequirements
-      .filter((character) => exportMode === undefined || exportMode === character.mode)
+      .filter((character) => exportModes === "both" || exportModes === character.mode)
       .map((character) => character.character_id)
   );
   for (const character of characterRequirements) {
     if (character.mode === undefined) continue;
-    const includedInExport = exportMode === undefined || exportMode === character.mode;
+    const includedInExport = exportModes === "both" || exportModes === character.mode;
     if (!includedInExport) continue;
     for (const artifact of exactArtifacts) {
       if (isModeModule(artifact, character.mode, character.character_id)) addScope([artifact.id]);

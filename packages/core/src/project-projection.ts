@@ -305,6 +305,7 @@ function publishPlanFromProjection(projection: ProjectProjection, modeSelection?
       if (effectiveMode === undefined || (effectiveMode !== "both" && effectiveMode !== artifact.kind)) return false;
     }
     if (!hasBlueprintRoster) return true;
+    if (binding.global) return true;
     if (binding.characterIds.length === 0) return binding.global;
     return binding.characterIds.every((characterId) => exportRosterIds.has(characterId));
   };

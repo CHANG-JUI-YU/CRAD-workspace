@@ -571,9 +571,9 @@ describe("workflow gates and editable publish", () => {
     expect(covered?.diagnostics.map((item) => item.code)).not.toContain("REQUIRED_GREETING_MISSING");
   });
 
-  it("matches greeting coverage only by exact normalized character id", async () => {
+  it("matches greeting coverage through the shared Blueprint entity matcher", async () => {
     const repository = new MemoryProjectRepository("greeting-exact");
-    const precheck = { id: "precheck-exact", schema_version: 1, project_id: "greeting-exact", operation_id: "interview", collaboration_mode: "assisted", candidate_blueprint: { project_id: "greeting-exact", characters: [{ id: "momoka", label: "Momoka", ordinal: 1, mode: "zhuji" }] }, candidate_blueprint_revision: contentHash("current"), checks: [{ subject_id: "momoka", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }], status: "recorded" as const, created_at: now, created_by: "director" };
+    const precheck = { id: "precheck-exact", schema_version: 1, project_id: "greeting-exact", operation_id: "interview", collaboration_mode: "assisted", candidate_blueprint: { project_id: "greeting-exact", characters: [{ id: "momoka", label: "Momoka", aliases: ["桃華"], ordinal: 1, mode: "zhuji" }] }, candidate_blueprint_revision: contentHash("current"), checks: [{ subject_id: "momoka", dimension: "character_core", uncertainty: "low", impact: "high", basis: "explicit", action: "preserve_explicit" }], status: "recorded" as const, created_at: now, created_by: "director" };
     const target = artifact("character-momoka", "character:momoka", "character", "momoka", character("momoka"));
     const fuzzy = artifact("greeting-fuzzy", "greeting:greetings", "greeting", "greetings", { document: { greetings: [{ character_ids: ["momoka-2"] }] } });
     await repository.commit(0, (state) => ({
@@ -587,7 +587,7 @@ describe("workflow gates and editable publish", () => {
     const manifest = buildRequiredArtifactManifest(await repository.read());
     expect(manifest?.greeting.complete).toBe(false);
     expect(manifest?.diagnostics.map((item) => item.code)).toContain("REQUIRED_GREETING_MISSING");
-    const normalizedContent = JSON.stringify({ document: { greetings: [{ character_ids: ["Momoka"] }] } });
+    const normalizedContent = JSON.stringify({ document: { greetings: [{ character_ids: ["桃華"] }] } });
     await repository.commit((await repository.read()).revision, (state) => ({
       ...state,
       artifacts: state.artifacts.map((item) => (item.id === "greeting-fuzzy" ? { ...item, content: normalizedContent, content_hash: contentHash(normalizedContent), revision: contentHash(normalizedContent) } : item)),
