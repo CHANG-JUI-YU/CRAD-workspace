@@ -31,6 +31,48 @@ describe("source vertical slice", () => {
     expect(final.audit.map((event) => event.event)).toEqual(expect.arrayContaining(["source.approved", "source.ingested"]));
   });
 
+  it("canonicalizes HTML through visible title, headings and paragraphs in document order", async () => {
+    const repository = new MemoryProjectRepository("html-source");
+    await repository.commit(0, (state) => ({
+      ...state,
+      candidates: [{ id: "candidate-html", title: "Official HTML", status: "approved", media_type: "text/html", content: `<!doctype html>
+        <html><head><title>Series title</title><style>.junk{display:none}</style><meta name="description" content="metadata" /></head>
+        <body><nav>Navigation must not become source text</nav><main><h1>Main heading</h1>
+        <p>First paragraph with <strong>inline emphasis</strong>.</p>
+        <div hidden>Hidden text must not become source text</div>
+        <div class="metadata">Metadata text must not become source text</div>
+        <script>window.junk = true;</script><p>Second paragraph.</p></main><footer>Footer junk</footer></body></html>` }],
+      operations: [{ id: "op-html", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+
+    const result = await new SourceService(repository).execute("op-html", { actor: "researcher", attachments: [] });
+
+    expect(result.status).toBe("completed");
+    const source = (await repository.read()).sources[0];
+    expect(source?.media_type).toBe("text/html");
+    expect(source?.canonical_text).toBe("Series title\nMain heading\nFirst paragraph with inline emphasis.\nSecond paragraph.");
+    expect(source?.canonical_text).not.toMatch(/Navigation|Hidden|Metadata|window\.junk|Footer|display:none/iu);
+  });
+
+  it("rejects HTML without visible body text and unsupported media types before source creation", async () => {
+    const repository = new MemoryProjectRepository("invalid-media-source");
+    await repository.commit(0, (state) => ({
+      ...state,
+      candidates: [
+        { id: "candidate-empty-html", title: "Empty HTML", status: "approved", media_type: "text/html", content: "<html><head><title>Only title</title></head><body><script>junk()</script></body></html>" },
+        { id: "candidate-pdf", title: "PDF", status: "approved", media_type: "application/pdf", content: "not a PDF" },
+      ],
+      operations: [{ id: "op-invalid-media", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+
+    const result = await new SourceService(repository).execute("op-invalid-media", { actor: "researcher", attachments: [] });
+    const state = await repository.read();
+
+    expect(result.status).toBe("needs_input");
+    expect(state.sources).toHaveLength(0);
+    expect(state.candidates.map((candidate) => candidate.failure?.code)).toEqual(["SOURCE_EMPTY", "SOURCE_MEDIA_TYPE_UNSUPPORTED"]);
+  });
+
   it("does not ingest an unselected pending candidate", async () => {
     const repository = new MemoryProjectRepository("demo");
     await repository.commit(0, (state) => ({
@@ -132,6 +174,110 @@ describe("source vertical slice", () => {
     const result = await new SourceService(repository).resume("op-url", "please add https://example.test/page", { actor: "researcher", attachments: [], fetcher: async () => ({ content: new TextEncoder().encode("remote text"), media_type: "text/plain" }) });
     expect(result.status).toBe("completed");
     expect((await repository.read()).candidates[0]?.url).toBe("https://example.test/page");
+  });
+
+  it("reuses a candidate for equivalent canonical URLs during registration", async () => {
+    const repository = new MemoryProjectRepository("canonical-candidate-url");
+    await repository.commit(0, (state) => ({
+      ...state,
+      operations: [{ id: "op-canonical-candidates", kind: "source", request: "search", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+
+    const result = await new SourceService(repository).registerCandidates("op-canonical-candidates", [
+      { title: "Page one", url: "https://EXAMPLE.test/page#section-one" },
+      { title: "Page one alias", url: "https://example.test/page#section-two" },
+    ], "researcher");
+
+    expect(result.completed).toHaveLength(2);
+    const state = await repository.read();
+    expect(state.candidates).toHaveLength(1);
+    expect(state.candidates[0]?.canonical_url).toBe("https://example.test/page");
+  });
+
+  it("deduplicates identical content across URLs while retaining final URL provenance", async () => {
+    const repository = new MemoryProjectRepository("source-identity-dedupe");
+    await repository.commit(0, (state) => ({
+      ...state,
+      candidates: [
+        { id: "candidate-one", title: "First page", url: "https://source.example/one", status: "approved" },
+        { id: "candidate-two", title: "Second page", url: "https://source.example/two", status: "approved" },
+      ],
+      operations: [{ id: "op-source-identity", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+
+    const result = await new SourceService(repository).execute("op-source-identity", {
+      actor: "researcher",
+      attachments: [],
+      fetcher: async () => ({
+        content: new TextEncoder().encode("the same canonical body"),
+        media_type: "text/plain",
+        final_url: "https://canonical.example/article",
+      }),
+    });
+
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    expect(state.sources).toHaveLength(1);
+    expect(state.sources[0]).toMatchObject({
+      canonical_url: "https://source.example/one",
+      final_url: "https://canonical.example/article",
+    });
+    expect(state.candidates.every((candidate) => candidate.status === "ingested")).toBe(true);
+    expect(state.audit.filter((event) => event.event === "source.ingested").map((event) => event.details.deduplicated)).toEqual([false, true]);
+  });
+
+  it("retains different revisions even when their canonical URL is the same", async () => {
+    const repository = new MemoryProjectRepository("source-revision-history");
+    await repository.commit(0, (state) => ({
+      ...state,
+      candidates: [
+        { id: "candidate-old", title: "Old revision", url: "https://example.test/article", status: "approved", content: "old revision" },
+        { id: "candidate-new", title: "New revision", url: "https://example.test/article", status: "approved", content: "new revision" },
+      ],
+      operations: [{ id: "op-source-revisions", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+
+    const result = await new SourceService(repository).execute("op-source-revisions", { actor: "researcher", attachments: [] });
+
+    expect(result.status).toBe("completed");
+    const state = await repository.read();
+    expect(state.sources).toHaveLength(2);
+    expect(new Set(state.sources.map((source) => source.revision)).size).toBe(2);
+    expect(state.sources.every((source) => source.canonical_url === "https://example.test/article")).toBe(true);
+  });
+
+  it("converges concurrent execution and replay of the same operation", async () => {
+    const repository = new MemoryProjectRepository("source-concurrent-replay");
+    await repository.commit(0, (state) => ({
+      ...state,
+      candidates: [{ id: "candidate-replay", title: "Replay page", url: "https://example.test/replay", status: "approved" }],
+      operations: [{ id: "op-source-replay", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }],
+    }));
+
+    let fetchCount = 0;
+    let releaseFetches!: () => void;
+    let resolveBothStarted!: () => void;
+    const bothStarted = new Promise<void>((resolve) => { resolveBothStarted = resolve; });
+    const fetchesReleased = new Promise<void>((resolve) => { releaseFetches = resolve; });
+    const fetcher = async () => {
+      fetchCount += 1;
+      if (fetchCount === 2) resolveBothStarted();
+      await fetchesReleased;
+      return { content: new TextEncoder().encode("replayed body"), media_type: "text/plain", final_url: "https://example.test/replay" };
+    };
+
+    const concurrent = Promise.all([
+      new SourceService(repository).execute("op-source-replay", { actor: "worker-a", attachments: [], fetcher }),
+      new SourceService(repository).execute("op-source-replay", { actor: "worker-b", attachments: [], fetcher }),
+    ]);
+    await bothStarted;
+    releaseFetches();
+    const results = await concurrent;
+
+    expect(results.every((item) => item.status === "completed")).toBe(true);
+    const state = await repository.read();
+    expect(state.sources).toHaveLength(1);
+    expect(state.candidates[0]?.status).toBe("ingested");
   });
 
   it("uses the matching attachment and records missing-content failures", async () => {

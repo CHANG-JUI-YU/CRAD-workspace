@@ -15,7 +15,8 @@
   },
   "dependencies": {
     "@st-workspace/core": "workspace:*",
-    "@st-workspace/compiler": "workspace:*"
+    "@st-workspace/compiler": "workspace:*",
+    "parse5": "8.0.1"
   },
   "devDependencies": {
     "@st-workspace/adapters-png": "workspace:*"

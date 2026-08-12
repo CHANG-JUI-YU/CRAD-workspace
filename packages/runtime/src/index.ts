@@ -78,6 +78,7 @@ import {
   validateWorkflow,
   buildRequiredArtifactManifest,
   assertExecutionLeaseForOperation,
+  extractSourceUrl,
   reviewRunProjectionRevision,
   type IssueUpdateInput,
   type SourceSelectionDecision,
@@ -2004,6 +2005,8 @@ export class WorkspaceRuntime {
     }
     const isSourceSearch = kind === "source" && /搜尋|找來源|research|search/iu.test(trimmed) && !/加入|匯入|保存|批准/iu.test(trimmed);
     const operationId = internalId("operation");
+    const syncLease: ExecutionLeaseContext = { owner: internalId("sync"), token: internalId("lease"), generation: 1 };
+    const syncLeaseExpiresAt = new Date(Date.now() + OPERATION_LEASE_MS).toISOString();
     const attachmentRefs = context.attachments.length > 0 ? await this.attachmentStore.save(operationId, context.attachments) : [];
     const operation: OperationRecord = {
       id: operationId,
@@ -2020,6 +2023,11 @@ export class WorkspaceRuntime {
         ...(attachmentRefs.length === 0 ? {} : { attachment_refs: attachmentRefs }),
       },
       ...(options.idempotency_key === undefined ? {} : { idempotency_key: options.idempotency_key }),
+      lease_owner: syncLease.owner,
+      lease_token: syncLease.token,
+      lease_expires_at: syncLeaseExpiresAt,
+      ...(syncLease.generation === undefined ? {} : { fencing_generation: syncLease.generation }),
+      attempt: 1,
       execution_snapshot: {
         execution_agent_id: resolution.agent_id,
         execution_agent_role: resolution.agent_role,
@@ -2042,22 +2050,24 @@ export class WorkspaceRuntime {
         details: { kind, request: trimmed, agent_id: resolution.agent_id },
       }],
     }));
-    const execution = this.executionContextFor(operation, context, { id: resolution.agent_id, role: resolution.agent_role });
+    const execution = this.executionContextFor(operation, context, { id: resolution.agent_id, role: resolution.agent_role }, { lease: syncLease });
+    try {
     if (kind === "source") {
-      await this.repository.commit(created.revision, (current) => ({
-        ...current,
-        operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "running", updated_at: now() } : item),
-      }));
+      await this.repository.commit(created.revision, (current) => {
+        executionLeaseGuard(current, operation.id, execution);
+        return {
+          ...current,
+          operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "running", updated_at: now() } : item),
+        };
+      });
       if (isSourceSearch) {
-        const execution = this.executionContextFor(operation, context, { id: resolution.agent_id, role: resolution.agent_role });
-        return this.executeSourceSearch(operation, context, trimmed, execution);
+        return await this.executeSourceSearch(operation, context, trimmed, execution);
       }
-      const sourceExecution = execution;
-      const executionContext = this.fetcher === undefined
-        ? { ...context, actor: sourceExecution.auditActor, execution: sourceExecution }
-        : { ...context, actor: sourceExecution.auditActor, fetcher: this.fetcher, execution: sourceExecution };
-      if (context.attachments.length > 0 || /https?:\/\//iu.test(trimmed)) {
-        const resumed = await this.sources.resume(operation.id, trimmed, executionContext);
+      if (context.attachments.length > 0 || extractSourceUrl(trimmed) !== undefined) {
+        const resumeContext = this.fetcher === undefined
+          ? { ...context, actor: execution.auditActor, execution }
+          : { ...context, actor: execution.auditActor, fetcher: this.fetcher, execution };
+        const resumed = await this.sources.resume(operation.id, trimmed, resumeContext);
         const latestResume = await this.repository.read();
         const finalResume = latestResume.operations.find((item) => item.id === operation.id);
         if (finalResume === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operation.id} does not exist`);
@@ -2066,23 +2076,38 @@ export class WorkspaceRuntime {
       const beforeExecute = await this.repository.read();
       const snapshotCandidate = beforeExecute.candidates.find((candidate) => candidate.status === "approved" && candidate.selection_snapshot !== undefined);
       const executeOperationId = snapshotCandidate?.selection_snapshot?.operation_id ?? operation.id;
+      const sourceExecution = executeOperationId === operation.id
+        ? execution
+        : (() => {
+          const { lease: _lease, ...withoutLease } = execution;
+          return { ...withoutLease, operationId: executeOperationId };
+        })();
+      const executionContext = this.fetcher === undefined
+        ? { ...context, actor: sourceExecution.auditActor, execution: sourceExecution }
+        : { ...context, actor: sourceExecution.auditActor, fetcher: this.fetcher, execution: sourceExecution };
       const result = await this.sources.execute(executeOperationId, executionContext);
       const latest = await this.repository.read();
       const finalOperation = latest.operations.find((item) => item.id === executeOperationId);
       if (finalOperation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${executeOperationId} does not exist`);
       if (executeOperationId !== operation.id) {
-        await this.repository.commit(latest.revision, (current) => ({
-          ...current,
-          operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "completed", updated_at: now() } : item),
-        }));
+        await this.repository.commit(latest.revision, (current) => {
+          executionLeaseGuard(current, operation.id, execution);
+          return {
+            ...current,
+            operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "completed", updated_at: now() } : item),
+          };
+        });
       }
       return { ...responseFromOperation(finalOperation), status: result.status, summary: result.summary, completed: result.completed, blocked: result.blocked };
     }
     if (kind === "knowledge" || kind === "authoring" || kind === "review") {
-      await this.repository.commit(created.revision, (current) => ({
-        ...current,
-        operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "running", updated_at: now() } : item),
-      }));
+      await this.repository.commit(created.revision, (current) => {
+        executionLeaseGuard(current, operation.id, execution);
+        return {
+          ...current,
+          operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "running", updated_at: now() } : item),
+        };
+      });
       if (kind === "knowledge") {
         const result = await this.knowledge.refresh(operation.id, trimmed, execution);
         const latest = await this.repository.read();
@@ -2124,10 +2149,13 @@ export class WorkspaceRuntime {
       }
     }
     if (kind === "build" || kind === "import") {
-      await this.repository.commit(created.revision, (current) => ({
-        ...current,
-        operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "running", updated_at: now() } : item),
-      }));
+      await this.repository.commit(created.revision, (current) => {
+        executionLeaseGuard(current, operation.id, execution);
+        return {
+          ...current,
+          operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "running", updated_at: now() } : item),
+        };
+      });
       if (kind === "build") {
         const result = await this.build.run(operation.id, trimmed, execution);
         const latest = await this.repository.read();
@@ -2154,12 +2182,15 @@ export class WorkspaceRuntime {
       };
     }
     const latest = await this.repository.read();
-    await this.repository.commit(latest.revision, (current) => ({
-      ...current,
-      operations: current.operations.map((item) => item.id === operation.id
-        ? { ...item, status: "needs_input", question: "請描述要執行的來源、知識、創作、審查或建置操作。", updated_at: now() }
-        : item),
-    }));
+    await this.repository.commit(latest.revision, (current) => {
+      executionLeaseGuard(current, operation.id, execution);
+      return {
+        ...current,
+        operations: current.operations.map((item) => item.id === operation.id
+          ? { ...item, status: "needs_input", question: "請描述要執行的來源、知識、創作、審查或建置操作。", updated_at: now() }
+          : item),
+      };
+    });
     return {
       operation_id: operation.id,
       status: "needs_input",
@@ -2168,6 +2199,9 @@ export class WorkspaceRuntime {
       blocked: [],
       question: "請描述要執行的來源、知識、創作、審查或建置操作。",
     };
+    } finally {
+      await this.releaseOperationLease(operation.id, syncLease.owner, syncLease.token);
+    }
   }
 
   async status(): Promise<RequestResult> {

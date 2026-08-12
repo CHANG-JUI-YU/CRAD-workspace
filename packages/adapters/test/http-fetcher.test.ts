@@ -59,6 +59,7 @@ describe("controlled HTTP source adapter", () => {
     const result = await okFetcher.fetch("https://example.test/path/source.txt");
     expect(new TextDecoder().decode(result.content)).toBe("ok");
     expect(result.media_type).toBe("text/plain");
+    expect(result.final_url).toBe("https://example.test/path/source.txt");
     expect(result.name).toBe("source.txt");
     const smallFetcher = new HttpSourceFetcher({ maxBytes: 10, lookup: publicLookup, fetchImpl: fetchStub(() => okResponse(new Uint8Array(20))) });
     await expect(smallFetcher.fetch("https://example.test/large")).rejects.toMatchObject({ code: "SOURCE_TOO_LARGE" });
@@ -167,6 +168,7 @@ describe("controlled HTTP source adapter", () => {
     });
     const result = await fetcher.fetch("https://example.test/start");
     expect(new TextDecoder().decode(result.content)).toBe("final");
+    expect(result.final_url).toBe("https://example.test/final.txt");
     expect(result.name).toBe("final.txt");
   });
 

@@ -91,6 +91,7 @@ export class HttpSourceFetcher {
         return {
           content,
           ...(mediaType === null ? {} : { media_type: mediaType }),
+          final_url: current.href,
           name: current.pathname.split("/").filter(Boolean).at(-1) ?? current.hostname,
         };
       }

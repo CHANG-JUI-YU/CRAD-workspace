@@ -5,6 +5,7 @@ import {
   beginInterview,
   createInterviewState,
   normalizeInterviewStateForDisplay,
+  parseCharacterRoster,
   workflow_answer_interview,
   type InterviewState,
 } from "../src/index.js";
@@ -14,6 +15,40 @@ function answer(state: InterviewState, value: string): InterviewState {
 }
 
 describe("project interview engine", () => {
+  it("keeps separators inside multilingual parentheses and quotes in a 12-character roster", () => {
+    const roster = parseCharacterRoster([
+      "雪之下雪乃（別名：雪乃, Yukino）",
+      "比企谷八幡 (Hachiman, 8man)",
+      "由比濱結衣「ゆい, Yui」",
+      "一色いろは『いろは, Iroha』",
+      "雪之下陽乃（陽乃，Haruno）",
+      "平塚靜 (Shizuka, teacher)",
+      "戶塚彩加「さいちゃん, Saichan」",
+      "川崎沙希（サキ, Saki）",
+      "材木座義輝 (Ken)",
+      "小町（Komachi, 妹）",
+      "相模南 “Minami, Sagami”",
+      "葉山隼人 [Hayato, Hayama]",
+    ].join("、"));
+
+    expect(roster).toHaveLength(12);
+    expect(roster.map((character) => character.label)).toEqual([
+      "雪之下雪乃（別名：雪乃, Yukino）",
+      "比企谷八幡 (Hachiman, 8man)",
+      "由比濱結衣「ゆい, Yui」",
+      "一色いろは『いろは, Iroha』",
+      "雪之下陽乃（陽乃，Haruno）",
+      "平塚靜 (Shizuka, teacher)",
+      "戶塚彩加「さいちゃん, Saichan」",
+      "川崎沙希（サキ, Saki）",
+      "材木座義輝 (Ken)",
+      "小町（Komachi, 妹）",
+      "相模南 “Minami, Sagami”",
+      "葉山隼人 [Hayato, Hayama]",
+    ]);
+    expect(roster.map((character) => character.id)).toEqual(Array.from({ length: 12 }, (_, index) => `character-${index + 1}`));
+  });
+
   it("keeps an invalid multi-character completion active and returns to the roster", () => {
     const state: InterviewState = {
       schema_version: 1,

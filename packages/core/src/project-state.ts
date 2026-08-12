@@ -149,11 +149,15 @@ export interface SourceCandidate {
   title: string;
   snippet?: string;
   url?: string;
+  canonical_url?: string;
+  final_url?: string;
   domain?: string;
   official?: boolean;
   status: CandidateStatus;
   content?: string;
   media_type?: string;
+  content_hash?: string;
+  source_revision?: string;
   extension?: string;
   approved_at?: string;
   selection_snapshot?: SourceSelectionSnapshot;
@@ -174,6 +178,8 @@ export interface SourceRecord {
   candidate_id: string;
   title: string;
   canonical_text: string;
+  canonical_url?: string;
+  final_url?: string;
   original_hash: string;
   revision: string;
   media_type: string;

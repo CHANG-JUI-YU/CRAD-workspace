@@ -314,11 +314,72 @@ const blueprintDirectionQuestion = (
 
 /** Parse a natural-language roster without making the user provide ids. */
 export const parseCharacterRoster = (answer: string): InterviewCharacterSubject[] => {
-  const labels = answer
-    .split(/[\r\n、，,；;|]+/u)
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0)
-    .filter((value, index, all) => all.indexOf(value) === index);
+  const pairedDelimiters: Readonly<Record<string, string>> = {
+    "(": ")",
+    "（": "）",
+    "[": "]",
+    "［": "］",
+    "{": "}",
+    "｛": "｝",
+    "「": "」",
+    "『": "』",
+    "【": "】",
+    "《": "》",
+    "〈": "〉",
+    "“": "”",
+    "‘": "’",
+    "«": "»",
+  };
+  const closingDelimiters = new Set(Object.values(pairedDelimiters));
+  const separators = new Set(["\r", "\n", "、", "，", ",", "；", ";", "|"]);
+  const labels: string[] = [];
+  const buffer: string[] = [];
+  const stack: string[] = [];
+  let escaped = false;
+  const flush = (): void => {
+    const label = buffer.join("").trim();
+    if (label.length > 0 && !labels.includes(label)) labels.push(label);
+    buffer.length = 0;
+  };
+
+  for (let index = 0; index < answer.length; index += 1) {
+    const character = answer[index]!;
+    const previous = index === 0 ? undefined : answer[index - 1];
+    const next = index + 1 < answer.length ? answer[index + 1] : undefined;
+    if (escaped) {
+      buffer.push(character);
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && (stack.at(-1) === "'" || stack.at(-1) === '"')) {
+      buffer.push(character);
+      escaped = true;
+      continue;
+    }
+    if ((character === "'" || character === '"') && !(character === "'" && /[\p{L}\p{N}]/u.test(previous ?? "") && /[\p{L}\p{N}]/u.test(next ?? ""))) {
+      if (stack.at(-1) === character) stack.pop();
+      else stack.push(character);
+      buffer.push(character);
+      continue;
+    }
+    const expectedClosing = pairedDelimiters[character];
+    if (expectedClosing !== undefined) {
+      stack.push(expectedClosing);
+      buffer.push(character);
+      continue;
+    }
+    if (closingDelimiters.has(character)) {
+      if (stack.at(-1) === character) stack.pop();
+      buffer.push(character);
+      continue;
+    }
+    if (stack.length === 0 && separators.has(character)) {
+      flush();
+      continue;
+    }
+    buffer.push(character);
+  }
+  flush();
   return labels.map((label, index) => ({ id: `character-${index + 1}`, label, ordinal: index + 1 }));
 };
 

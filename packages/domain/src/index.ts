@@ -11,6 +11,9 @@ import {
   type ExecutionContext,
 } from "@st-workspace/core";
 import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
+import { canonicalizeSource, canonicalizeSourceUrl, extractSourceUrl } from "./source-canonicalizer.js";
+
+export { canonicalizeSource, canonicalizeSourceUrl, extractSourceUrl } from "./source-canonicalizer.js";
 
 export { AuthoringService, type AuthoringExecutionResult, inferAuthoringKind } from "./authoring.js";
 export { BuildService, type BuildExecutionResult } from "./build.js";
@@ -38,6 +41,7 @@ export * from "./inputs.js";
 export interface FetchResult {
   content: Uint8Array;
   media_type?: string;
+  final_url?: string;
   name?: string;
 }
 
@@ -83,25 +87,6 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function decodeText(content: Uint8Array): string {
-  // A small number of NUL bytes can occur in otherwise recoverable web/text
-  // payloads. Treat the payload as binary only when NULs exceed one percent.
-  let nulCount = 0;
-  for (const byte of content) if (byte === 0) nulCount += 1;
-  if (content.length > 0 && nulCount * 100 > content.length) {
-    throw new CoreError("SOURCE_BINARY_UNSUPPORTED", "The source content contains binary bytes", true);
-  }
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(content);
-  } catch {
-    throw new CoreError("SOURCE_DECODE_FAILED", "The source content is not valid UTF-8", true);
-  }
-  text = text.replace(/^\uFEFF/u, "").replace(/\r\n?/gu, "\n").trim();
-  if (text.length === 0) throw new CoreError("SOURCE_EMPTY", "The source content is empty", true);
-  return text;
-}
-
 function attachmentFor(candidate: SourceCandidate, attachments: SourceAttachment[]): SourceAttachment | undefined {
   const title = candidate.title.toLocaleLowerCase();
   return attachments.find((attachment) => attachment.name.toLocaleLowerCase().includes(title))
@@ -133,6 +118,26 @@ function candidateDomain(candidate: Pick<SourceCandidate, "url" | "domain">): st
   try { return new URL(candidate.url).hostname.toLocaleLowerCase(); } catch { return undefined; }
 }
 
+function candidateCanonicalUrl(candidate: { url?: string | undefined; canonical_url?: string | undefined }): string | undefined {
+  return candidate.canonical_url ?? canonicalizeSourceUrl(candidate.url);
+}
+
+function reusableCandidateForOperation(candidates: readonly SourceCandidate[], candidate: { url?: string | undefined; canonical_url?: string | undefined }, operationId: string): SourceCandidate | undefined {
+  const canonical = candidateCanonicalUrl(candidate);
+  if (canonical === undefined) return undefined;
+  return [...candidates].reverse().find((existing) => {
+    if (candidateCanonicalUrl(existing) !== canonical) return false;
+    return existing.selection_snapshot?.operation_id === operationId || existing.status !== "ingested";
+  });
+}
+
+function sourceMatchesIdentity(source: SourceRecord, originalHash: string, revision: string): boolean {
+  // URL fields are retained for provenance; URL alone must not collapse a
+  // newer revision of the same page. Content hash or canonical revision is
+  // the dedupe identity, including across different URLs for the same body.
+  return source.original_hash === originalHash || source.revision === revision;
+}
+
 function domainAllowed(domain: string | undefined, allowed: string[]): boolean {
   if (allowed.length === 0) return true;
   if (domain === undefined) return false;
@@ -159,24 +164,46 @@ export class SourceService {
     const state = await this.repository.read();
     const operation = state.operations.find((item) => item.id === operationId);
     if (operation === undefined) throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist`);
-    const hasUrl = /https?:\/\/\S+/iu.test(request);
+    const requestedUrl = extractSourceUrl(request);
+    const hasUrl = requestedUrl !== undefined;
     if (context.attachments.length > 0 || hasUrl) {
-      const additions = context.attachments.length > 0
+      const additions: SourceCandidate[] = context.attachments.length > 0
         ? context.attachments.map((attachment) => ({ id: internalId("candidate"), title: attachment.name, status: "approved" as const }))
-        : [{ id: internalId("candidate"), title: request.match(/https?:\/\/\S+/iu)?.[0] ?? "來源", url: request.match(/https?:\/\/\S+/iu)?.[0], status: "approved" as const }];
-      const selectionSnapshot: SourceSelectionSnapshot = {
-        operation_id: operationId,
-        candidate_ids: additions.map((candidate) => candidate.id),
-        approved_candidate_ids: additions.map((candidate) => candidate.id),
-        rejected_candidate_ids: [],
-        selected_at: now(),
-        selected_by: executionAgent,
-      };
+        : [{ id: internalId("candidate"), title: requestedUrl ?? "來源", url: requestedUrl!, canonical_url: requestedUrl!, status: "approved" as const }];
       await this.repository.commit(state.revision, (current) => {
         assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        const selected: SourceCandidate[] = [];
+        const reused: SourceCandidate[] = [];
+        for (const addition of additions) {
+          const existing = reusableCandidateForOperation([...current.candidates, ...selected], addition, operationId);
+          if (existing !== undefined) {
+            reused.push(existing);
+            continue;
+          }
+          selected.push(addition);
+        }
+        const selectedCandidates = [...reused, ...selected];
+        const candidateIds = selectedCandidates.map((candidate) => candidate.id);
+        const selectionSnapshot: SourceSelectionSnapshot = {
+          operation_id: operationId,
+          candidate_ids: candidateIds,
+          approved_candidate_ids: candidateIds,
+          rejected_candidate_ids: [],
+          selected_at: now(),
+          selected_by: executionAgent,
+        };
+        const selectedById = new Map(selectedCandidates.map((candidate) => [candidate.id, candidate]));
         return {
         ...current,
-        candidates: [...current.candidates, ...additions.map((candidate) => ({ ...candidate, selection_snapshot: selectionSnapshot }))],
+        candidates: [
+          ...current.candidates.map((candidate) => {
+            if (!selectedById.has(candidate.id)) return candidate;
+            if (candidate.status === "ingested") return { ...candidate, selection_snapshot: selectionSnapshot };
+            const { failure: _failure, ...withoutFailure } = candidate;
+            return { ...withoutFailure, status: "approved" as const, selection_snapshot: selectionSnapshot };
+          }),
+          ...selected.map((candidate) => ({ ...candidate, selection_snapshot: selectionSnapshot })),
+        ],
         };
       });
     }
@@ -192,28 +219,46 @@ export class SourceService {
       return { completed: [], blocked: [], summary: "沒有找到候選來源。", status: "needs_input" };
     }
     const state = await this.repository.read();
-    const candidates = results.map((result) => ({
-      id: internalId("candidate"),
-      title: result.title,
-      ...(result.url === undefined ? {} : { url: result.url }),
-      ...(result.domain === undefined ? {} : { domain: result.domain }),
-      ...(result.official === undefined ? {} : { official: result.official }),
-      ...(result.snippet === undefined ? {} : { snippet: result.snippet }),
-      ...(result.content === undefined ? {} : { content: result.content }),
-      ...(result.media_type === undefined ? {} : { media_type: result.media_type }),
-      status: "pending" as const,
-    }));
+    const candidateInputs: SourceCandidate[] = results.map((result) => {
+      const canonicalUrl = canonicalizeSourceUrl(result.url);
+      return {
+        id: internalId("candidate"),
+        title: result.title,
+        ...(result.url === undefined ? {} : { url: result.url }),
+        ...(canonicalUrl === undefined ? {} : { canonical_url: canonicalUrl }),
+        ...(result.domain === undefined ? {} : { domain: result.domain }),
+        ...(result.official === undefined ? {} : { official: result.official }),
+        ...(result.snippet === undefined ? {} : { snippet: result.snippet }),
+        ...(result.content === undefined ? {} : { content: result.content }),
+        ...(result.media_type === undefined ? {} : { media_type: result.media_type }),
+        ...(result.content === undefined ? {} : { content_hash: contentHash(new TextEncoder().encode(result.content)) }),
+        status: "pending" as const,
+      };
+    });
+    let registeredCandidates: SourceCandidate[] = [];
     await this.repository.commit(state.revision, (current) => {
       assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+      const working = [...current.candidates];
+      const registered: SourceCandidate[] = [];
+      for (const candidate of candidateInputs) {
+        const existing = reusableCandidateForOperation(working, candidate, operationId);
+        if (existing !== undefined) {
+          registered.push(existing);
+          continue;
+        }
+        working.push(candidate);
+        registered.push(candidate);
+      }
+      registeredCandidates = registered;
       return {
       ...current,
       ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
-      candidates: [...current.candidates, ...candidates],
+      candidates: working,
       operations: current.operations.map((item) => item.id === operationId
         ? updateOperation(item, {
           status: "completed",
-          progress: candidates.map((candidate) => ({ item_id: candidate.id, status: "completed" as const, message: `候選來源已登錄：${candidate.title}` })),
-          result_summary: `已登錄 ${candidates.length} 個候選來源，等待加入或批准。`,
+          progress: registered.map((candidate) => ({ item_id: candidate.id, status: "completed" as const, message: `候選來源已登錄：${candidate.title}` })),
+          result_summary: `已登錄 ${registered.length} 個候選來源，等待加入或批准。`,
         })
         : item),
       audit: [...current.audit, {
@@ -223,14 +268,14 @@ export class SourceService {
         actor: auditActor,
         occurred_at: now(),
         project_revision: current.revision + 1,
-        details: { count: candidates.length, candidate_ids: candidates.map((candidate) => candidate.id) },
+        details: { count: registered.length, candidate_ids: registered.map((candidate) => candidate.id) },
       }],
       };
     });
     return {
-      completed: candidates.map((candidate) => candidate.id),
+      completed: registeredCandidates.map((candidate) => candidate.id),
       blocked: [],
-      summary: `已登錄 ${candidates.length} 個候選來源，等待加入或批准。`,
+      summary: `已登錄 ${registeredCandidates.length} 個候選來源，等待加入或批准。`,
       status: "completed",
     };
   }
@@ -376,9 +421,9 @@ export class SourceService {
         throw error;
       }
 
-      let text: string;
+      let canonical: ReturnType<typeof canonicalizeSource>;
       try {
-        text = decodeText(acquired.content);
+        canonical = canonicalizeSource(acquired.content, acquired.media_type ?? candidate.media_type);
       } catch (error) {
         const failure = error instanceof CoreError && isSourceError(error)
           ? error
@@ -388,14 +433,18 @@ export class SourceService {
         continue;
       }
 
+      const sourceCanonicalUrl = candidateCanonicalUrl(candidate);
+      const sourceFinalUrl = canonicalizeSourceUrl(acquired.final_url ?? candidate.final_url) ?? sourceCanonicalUrl;
       const source: SourceRecord = {
         id: internalId("source"),
         candidate_id: candidate.id,
         title: candidate.title,
-        canonical_text: text,
+        canonical_text: canonical.text,
+        ...(sourceCanonicalUrl === undefined ? {} : { canonical_url: sourceCanonicalUrl }),
+        ...(sourceFinalUrl === undefined ? {} : { final_url: sourceFinalUrl }),
         original_hash: contentHash(acquired.content),
-        revision: contentHash(text),
-        media_type: acquired.media_type ?? candidate.media_type ?? "text/plain",
+        revision: contentHash(canonical.text),
+        media_type: canonical.mediaType,
         ...(acquired.name === undefined ? {} : { original_name: acquired.name }),
         ...(candidate.selection_snapshot === undefined ? {} : { selection_snapshot: candidate.selection_snapshot }),
         created_at: now(),
@@ -444,18 +493,27 @@ export class SourceService {
             if ((targetCandidate.url !== undefined || targetCandidate.domain !== undefined) && !domainAllowed(candidateDomain(targetCandidate), currentDomains)) {
               throw new CoreError("SOURCE_DOMAIN_NOT_ALLOWED", `Source domain ${candidateDomain(targetCandidate) ?? "unknown"} is outside the approved domain policy.`, true);
             }
+            const sourceDuplicate = current.sources.find((existing) => sourceMatchesIdentity(existing, source.original_hash, source.revision));
+            const committedSourceId = sourceDuplicate?.id ?? source.id;
             ingestedInCommit = true;
             return {
               ...current,
-              sources: [...current.sources, source],
+              ...(sourceDuplicate === undefined ? { sources: [...current.sources, source] } : {}),
               candidates: current.candidates.map((item) => {
                 if (item.id !== candidate.id) return item;
                 const { failure: _failure, ...withoutFailure } = item;
-                return { ...withoutFailure, status: "ingested" as const };
+                return {
+                  ...withoutFailure,
+                  status: "ingested" as const,
+                  ...(source.canonical_url === undefined ? {} : { canonical_url: source.canonical_url }),
+                  ...(source.final_url === undefined ? {} : { final_url: source.final_url }),
+                  content_hash: source.original_hash,
+                  source_revision: source.revision,
+                };
               }),
               operations: current.operations.map((item) => item.id === operationId
                 ? updateOperation(item, {
-                  progress: [...item.progress, { item_id: candidate.id, status: "completed", message: "來源已正規化並入庫。", source_id: source.id }],
+                  progress: [...item.progress, { item_id: candidate.id, status: "completed", message: sourceDuplicate === undefined ? "來源已正規化並入庫。" : "來源版本已存在，已安全收斂至既有來源。", source_id: committedSourceId }],
                 })
                 : item),
               audit: [...current.audit, {
@@ -465,7 +523,7 @@ export class SourceService {
                 actor: auditActor,
                 occurred_at: now(),
                 project_revision: current.revision + 1,
-                details: { candidate_id: candidate.id, source_id: source.id, revision: source.revision },
+                details: { candidate_id: candidate.id, source_id: committedSourceId, revision: source.revision, deduplicated: sourceDuplicate !== undefined },
               }],
             };
           });
