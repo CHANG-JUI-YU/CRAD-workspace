@@ -89,6 +89,74 @@ describe("runtime template boundary", () => {
     expect(context.context.knowledge?.sources[0]).toMatchObject({ id: source.id, revision: source.revision });
   });
 
+  it("scopes authoring facts through stable ids, aliases and participants", async () => {
+    const repository = new MemoryProjectRepository("entity-scoped-authoring");
+    const timestamp = new Date().toISOString();
+    const blueprint = JSON.stringify({
+      kind: "blueprint",
+      flow: "source_adaptation",
+      characters: [
+        { id: "c02", label: "Alice", aliases: ["Alicia"] },
+        { id: "c03", label: "Bob", aliases: ["Bobby"] },
+        { id: "c04", label: "Carol", aliases: [] },
+      ],
+    });
+    const makeArtifact = (id: string, key: string, kind: "blueprint" | "character" | "relationship" | "greeting" | "world_lore", value: unknown) => {
+      const content = JSON.stringify(value);
+      const hash = contentHash(content);
+      return { id, key, kind, name: key, content, media_type: "application/json" as const, content_hash: hash, revision: hash, status: "draft" as const, created_at: timestamp, updated_at: timestamp, created_by: "creator", operation_id: "authoring" };
+    };
+    const fact = (id: string, subject: string | undefined, classification: FactRecord["classification"], coverage: string[], entity_refs?: string[], status: FactRecord["status"] = "accepted"): FactRecord => ({
+      id,
+      statement: `${id} statement`,
+      ...(subject === undefined ? {} : { subject }),
+      ...(entity_refs === undefined ? {} : { entity_refs }),
+      predicate: "has_property",
+      value: id,
+      classification,
+      coverage,
+      status,
+      confidence: 1,
+      source_ids: [],
+      evidence: [],
+      created_at: timestamp,
+      updated_at: timestamp,
+      created_by: "fact-reviewer-1",
+    });
+    await repository.commit(0, (state) => ({
+      ...state,
+      artifacts: [
+        makeArtifact("blueprint", "blueprint:project", "blueprint", JSON.parse(blueprint)),
+        makeArtifact("character", "character:c02", "character", { kind: "character", document: { id: "c02", display_name: "Alice" } }),
+        makeArtifact("relationship", "relationship:team", "relationship", { kind: "relationships", document: { character_ids: ["Alice", "Bob"] } }),
+        makeArtifact("greeting", "greeting:team", "greeting", { kind: "greetings", document: { greetings: [{ kind: "primary", content: "Hello", character_ids: ["Alicia"] }] } }),
+        makeArtifact("world", "world_lore:world", "world_lore", { kind: "world", entries: [] }),
+      ],
+      facts: [
+        fact("fact-entity-ref", "unrelated wording", "trait", ["personality"], ["c02"]),
+        fact("fact-legacy-alias", "Alicia", "trait", ["personality"]),
+        fact("fact-bob", "Bob", "trait", ["personality"]),
+        fact("fact-carol", "Carol", "trait", ["personality"]),
+        fact("fact-world", "the setting", "world", ["world_context"]),
+        fact("fact-unresolved", "Alice", "trait", ["personality"], undefined, "candidate"),
+      ],
+    }));
+    const runtime = new WorkspaceRuntime(repository);
+
+    const characterKnowledge = (await runtime.templateContext("character")).context.knowledge!;
+    expect(characterKnowledge.accepted_facts.map((item) => item.id)).toEqual(["fact-entity-ref", "fact-legacy-alias", "fact-world"]);
+    expect(characterKnowledge.unresolved_facts).toEqual([]);
+
+    const relationshipKnowledge = (await runtime.templateContext("relationships")).context.knowledge!;
+    expect(relationshipKnowledge.accepted_facts.map((item) => item.id)).toEqual(["fact-entity-ref", "fact-legacy-alias", "fact-bob"]);
+
+    const greetingKnowledge = (await runtime.templateContext("greetings")).context.knowledge!;
+    expect(greetingKnowledge.accepted_facts.map((item) => item.id)).toEqual(["fact-entity-ref", "fact-legacy-alias"]);
+
+    const worldKnowledge = (await runtime.templateContext("world")).context.knowledge!;
+    expect(worldKnowledge.accepted_facts.map((item) => item.id)).toEqual(["fact-world"]);
+  });
+
   it("rejects a template that references a non-accepted Fact before creating an artifact", async () => {
     const repository = new MemoryProjectRepository("demo");
     await repository.commit(0, (state) => ({ ...state, facts: [{ ...acceptedFact, id: "fact-pending", status: "candidate" as const }] }));

@@ -359,12 +359,12 @@ describe("workflow gates and editable publish", () => {
     expect(contradiction).toMatchObject({ severity: "error", fact_ids: ["fact-direct", "fact-calm"] });
   });
 
-  it("matches the source-adaptation coverage register through per-character subject aliases", async () => {
+  it("matches the source-adaptation coverage register through entity refs and legacy subject aliases", async () => {
     const repository = new MemoryProjectRepository("coverage-alias");
     const officialContent = "Yukino has_trait direct.";
     const sourceId = "source-alias";
     const chunkId = "chunk-alias";
-    const blueprint = artifact("blueprint-alias", "blueprint:alias", "blueprint", "Alias", { kind: "blueprint", flow: "source_adaptation", characters: [{ id: "demo", label: "Demo", ordinal: 1, mode: "zhuji" }], source_adaptation: { subject_name: "Yukino", subjects: [{ character_id: "demo", subject_name: "Yukino" }] } }, "director", "interview");
+    const blueprint = artifact("blueprint-alias", "blueprint:alias", "blueprint", "Alias", { kind: "blueprint", flow: "source_adaptation", characters: [{ id: "demo", label: "Demo", aliases: ["Yukino", "Alicia"], ordinal: 1, mode: "zhuji" }], source_adaptation: { subject_name: "Yukino", subjects: [{ character_id: "demo", subject_name: "Yukino" }] } }, "director", "interview");
     const characterArtifact = artifact("character-alias", "character:demo", "character", "Demo", { kind: "character", document: { schema_version: 1, id: "demo", display_name: "Demo", aliases: [], summary: "A student.", relationships: [], sections: [], fact_refs: [], provenance: [], extensions: {} } }, "director", "interview");
     const baseFacts: FactRecord[] = [{
       id: "fact-alias",
@@ -373,10 +373,11 @@ describe("workflow gates and editable publish", () => {
       review_run_id: "run-alias",
       decision_id: "decision-alias",
       statement: "Yukino has_trait direct.",
-      subject: "Yukino",
+      subject: "Alicia",
       predicate: "has_trait",
       value: "direct",
       classification: "trait",
+      entity_refs: ["demo"],
       coverage: ["identity", "personality", "speech", "habits", "background", "relationships", "appearance"],
       status: "accepted",
       confidence: 1,
@@ -407,10 +408,11 @@ describe("workflow gates and editable publish", () => {
     expect(validateWorkflow(await repository.read(), "publish")).toMatchObject({ ok: true, diagnostics: [] });
     await repository.commit((await repository.read()).revision, (state) => ({
       ...state,
-      facts: [{ ...state.facts[0]!, subject: "Someone Else", statement: "Someone Else has_trait direct." }],
+      facts: [{ ...state.facts[0]!, subject: "Someone Else", entity_refs: [], statement: "Someone Else has_trait direct." }],
     }));
     const result = validateWorkflow(await repository.read(), "publish");
     expect(result.diagnostics.map((item) => item.code)).toContain("FACT_COVERAGE_INCOMPLETE");
+    expect(result.diagnostics.find((item) => item.code === "FACT_COVERAGE_INCOMPLETE")?.message).toContain("demo/personality");
   });
 
   it("treats user-provided evidence as proven without source references", async () => {

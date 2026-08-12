@@ -3,6 +3,8 @@ import {
   buildZhujiTemplateContext,
   canonicalJson,
   contentHash,
+  createEntityMatcher,
+  factReferencesAnyEntity,
   parseWardrobeMarkdown,
   sourceContextFromRecord,
   templateJsonSchemaFor,
@@ -19,6 +21,16 @@ import {
 } from "@st-workspace/core";
 import { latestBlueprintSnapshot, objectValue } from "./interview-application.js";
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function stringValues(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
 export interface AuthoringApplicationDeps {
   repository: ProjectRepository;
   knowledge: {
@@ -26,18 +38,23 @@ export interface AuthoringApplicationDeps {
   };
 }
 
-function buildAuthoringKnowledgeContext(state: ProjectState, options?: { character_id?: string; related_character_ids?: ReadonlyArray<string>; coverage?: ReadonlyArray<string>; include_facts?: boolean; include_sources?: boolean }): AuthoringKnowledgeContext {
+function buildAuthoringKnowledgeContext(state: ProjectState, options?: { scope?: "character" | "relationship" | "greeting" | "world"; character_id?: string; related_character_ids?: ReadonlyArray<string>; coverage?: ReadonlyArray<string>; include_facts?: boolean; include_sources?: boolean }): AuthoringKnowledgeContext {
   const blueprint = latestBlueprintSnapshot(state);
   const candidateById = new Map(state.candidates.map((candidate) => [candidate.id, candidate]));
+  const matcher = createEntityMatcher(state);
   const characterId = options?.character_id;
+  const relatedCharacterIds = [...(options?.related_character_ids ?? [])];
   const factRelevant = (fact: FactRecord): boolean => {
-    if (characterId === undefined) return true;
-    const subject = fact.subject ?? "";
-    if (subject === characterId) return true;
-    if ((fact.coverage ?? []).includes(characterId)) return true;
-    if (fact.classification === "world") return true;
-    if ((options?.related_character_ids ?? []).includes(subject)) return true;
-    return false;
+    const isWorldFact = fact.classification === "world" || fact.coverage?.includes("world_context") === true;
+    if (options?.scope === "world") return isWorldFact;
+    if (options?.scope === "relationship" || options?.scope === "greeting") {
+      return factReferencesAnyEntity(fact, matcher, relatedCharacterIds);
+    }
+    if (characterId !== undefined) {
+      return isWorldFact || factReferencesAnyEntity(fact, matcher, [characterId]);
+    }
+    if (relatedCharacterIds.length > 0) return factReferencesAnyEntity(fact, matcher, relatedCharacterIds);
+    return true;
   };
   const coverageFiltered = (fact: FactRecord): boolean => {
     if (options?.coverage === undefined || options.coverage.length === 0) return true;
@@ -45,12 +62,11 @@ function buildAuthoringKnowledgeContext(state: ProjectState, options?: { charact
   };
   const includeFacts = options?.include_facts !== false;
   const acceptedFacts = includeFacts ? state.facts.filter((fact) => fact.status === "accepted" && factRelevant(fact) && coverageFiltered(fact)) : [];
-  const unresolvedFacts = includeFacts ? state.facts.filter((fact) => fact.status !== "accepted" && factRelevant(fact) && coverageFiltered(fact)) : [];
   return {
     ...(blueprint === undefined ? {} : { blueprint }),
     ...(objectValue(blueprint?.source_adaptation)?.subject_name === undefined ? {} : { source_adaptation: blueprint?.source_adaptation as SourceAdaptationIntent }),
     accepted_facts: acceptedFacts,
-    unresolved_facts: unresolvedFacts,
+    unresolved_facts: [],
     sources: options?.include_sources === false ? [] : state.sources.map((source) => sourceContextFromRecord(source, candidateById.get(source.candidate_id))),
     fact_register_revision: contentHash(canonicalJson(state.facts.map((fact) => ({ id: fact.id, status: fact.status, updated_at: fact.updated_at })))),
     adaptation_decisions: [...state.adaptation_decisions],
@@ -59,7 +75,7 @@ function buildAuthoringKnowledgeContext(state: ProjectState, options?: { charact
 
 export async function zhujiContext(deps: AuthoringApplicationDeps, characterId?: string): Promise<{ schema: Record<string, unknown>; context: ReturnType<typeof buildZhujiTemplateContext> }> {
   const state = await deps.repository.read();
-  const knowledge = buildAuthoringKnowledgeContext(state, characterId === undefined ? undefined : { character_id: characterId });
+  const knowledge = buildAuthoringKnowledgeContext(state, characterId === undefined ? undefined : { scope: "character", character_id: characterId });
   const existing = state.artifacts.flatMap((artifact) => {
     if (artifact.kind !== "zhuji") return [];
     try {
@@ -104,10 +120,26 @@ export async function templateContext(deps: AuthoringApplicationDeps, kind: Temp
       : typeof firstInstance?.name === "string" && firstInstance.name.includes("/")
         ? firstInstance.name.split("/")[0]
         : undefined;
+  const firstValue = record(firstInstance?.value);
+  const document = record(firstValue?.document);
+  const relatedCharacterIds = kind === "relationships"
+    ? stringValues(document?.character_ids)
+    : kind === "greetings"
+      ? (Array.isArray(document?.greetings) ? document.greetings.flatMap((greeting) => stringValues(record(greeting)?.character_ids)) : [])
+      : [];
+  const knowledgeOptions = kind === "fact_review"
+    ? { include_facts: false, include_sources: false }
+    : kind === "world"
+      ? { scope: "world" as const }
+      : kind === "relationships"
+        ? { scope: "relationship" as const, related_character_ids: relatedCharacterIds }
+        : kind === "greetings"
+          ? { scope: "greeting" as const, related_character_ids: relatedCharacterIds }
+          : instanceCharacterId === undefined
+            ? undefined
+            : { scope: "character" as const, character_id: instanceCharacterId };
   const knowledge: AuthoringKnowledgeContext = {
-    ...buildAuthoringKnowledgeContext(state, kind === "fact_review"
-      ? { include_facts: false, include_sources: false }
-      : instanceCharacterId === undefined ? undefined : { character_id: instanceCharacterId }),
+    ...buildAuthoringKnowledgeContext(state, knowledgeOptions),
     ...(factReview === undefined ? {} : { fact_review: factReview as FactReviewContext }),
   };
   const context = buildTemplateContext(kind, existing, knowledge);

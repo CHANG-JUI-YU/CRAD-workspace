@@ -1,4 +1,4 @@
-import { artifactDependencyFingerprint, computeProjectProjection, parseWardrobeMarkdown, relationshipPerspectiveEntries, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
+import { artifactDependencyFingerprint, computeProjectProjection, createEntityMatcher, factReferencesEntity, parseWardrobeMarkdown, relationshipPerspectiveEntries, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "./required-artifacts.js";
 import { contradictingAcceptedFacts } from "./knowledge.js";
 
@@ -419,17 +419,13 @@ function reportFacts(state: ProjectState, diagnostics: WorkflowDiagnostic[]): vo
     const subjects = intentProjection.roster;
     if (subjects.length > 0) {
       const acceptedFacts = accepted;
+      const matcher = createEntityMatcher(state);
       const requiredPrimary = ["identity", "personality", "speech", "habits", "background", "relationships"];
       const optionalPrimary = ["appearance", "goals", "abilities", "world_context"];
       const requiredSupporting = ["identity", "personality", "relationships"];
       const missingCoverage: string[] = [];
       subjects.forEach((subject) => {
-        const subjectFacts = acceptedFacts.filter((fact) => {
-          const factSubject = fact.subject ?? fact.statement;
-          return normalized(factSubject) === normalized(subject.id)
-            || normalized(factSubject) === normalized(subject.label)
-            || subject.aliases.some((alias) => normalized(factSubject) === normalized(alias));
-        });
+        const subjectFacts = acceptedFacts.filter((fact) => factReferencesEntity(fact, matcher, subject.id));
         const covered = new Set(subjectFacts.flatMap((fact) => (fact.coverage ?? []).map(normalized)));
         const required = subject.is_primary ? requiredPrimary : requiredSupporting;
         for (const dimension of required) if (!covered.has(normalized(dimension))) missingCoverage.push(`${subject.id}/${dimension}`);
@@ -438,7 +434,7 @@ function reportFacts(state: ProjectState, diagnostics: WorkflowDiagnostic[]): vo
       if (missingCoverage.length > 0) {
         add(diagnostics, {
           code: "FACT_COVERAGE_INCOMPLETE",
-          message: `Source-derived fact coverage is incomplete: ${missingCoverage.join(", ")}.`,
+          message: `Source-derived fact coverage is incomplete for roster entities: ${missingCoverage.join(", ")}.`,
           severity: "error",
           fact_ids: accepted.map((fact) => fact.id),
         });
