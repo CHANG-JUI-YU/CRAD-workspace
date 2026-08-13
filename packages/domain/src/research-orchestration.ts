@@ -138,6 +138,57 @@ export function groupMissingRequirementsIntoBundles(
   return bundles;
 }
 
+const RESEARCH_TERMINAL_STATUSES: ReadonlySet<ResearchTaskRecord["status"]> = new Set(["completed", "exhausted", "failed", "stale", "cancelled"]);
+const RESEARCH_ACTIVE_STATUSES: ReadonlySet<ResearchTaskRecord["status"]> = new Set(["claimed", "running"]);
+
+export function isResearchTaskTerminal(status: ResearchTaskRecord["status"]): boolean {
+  return RESEARCH_TERMINAL_STATUSES.has(status);
+}
+
+export function isResearchLeaseExpired(task: ResearchTaskRecord, referenceNowMs: number): boolean {
+  if (!RESEARCH_ACTIVE_STATUSES.has(task.status)) return false;
+  if (task.lease_owner === undefined || task.lease_expires_at === undefined) return true;
+  const parsed = Date.parse(task.lease_expires_at);
+  if (Number.isNaN(parsed)) return true;
+  return parsed <= referenceNowMs;
+}
+
+export function reclaimExpiredResearchTasks(state: ProjectState, referenceNowMs: number): { tasks: ResearchTaskRecord[]; reclaimed: number } {
+  let reclaimed = 0;
+  const tasks = state.coverage_research_tasks.map((task) => {
+    if (RESEARCH_ACTIVE_STATUSES.has(task.status) && isResearchLeaseExpired(task, referenceNowMs)) {
+      reclaimed += 1;
+      const { lease_owner: _leaseOwner, lease_expires_at: _leaseExpiresAt, ...rest } = task;
+      const reclaimedTask: ResearchTaskRecord = { ...rest, status: "queued", updated_at: now() };
+      return reclaimedTask;
+    }
+    return task;
+  });
+  return { tasks, reclaimed };
+}
+
+export function deriveResearchBatchStatus(batch: ResearchBatchRecord, tasks: readonly ResearchTaskRecord[]): ResearchBatchRecord["status"] {
+  const children = tasks.filter((task) => batch.task_ids.includes(task.id));
+  if (children.length === 0) return "completed";
+  if (children.some((task) => !isResearchTaskTerminal(task.status))) return "open";
+  if (children.some((task) => task.status === "failed")) return "failed";
+  if (children.some((task) => task.status === "stale")) return "stale";
+  if (children.every((task) => task.status === "cancelled")) return "cancelled";
+  if (children.every((task) => task.status === "completed")) return "completed";
+  return "exhausted";
+}
+
+export function applyDerivedResearchBatchStatus(state: ProjectState, batchId: string): ProjectState {
+  const batch = state.coverage_research_batches.find((candidate) => candidate.id === batchId);
+  if (batch === undefined) return state;
+  const derived = deriveResearchBatchStatus(batch, state.coverage_research_tasks);
+  if (derived === batch.status) return state;
+  return {
+    ...state,
+    coverage_research_batches: state.coverage_research_batches.map((candidate) => (candidate.id === batchId ? { ...candidate, status: derived } : candidate)),
+  };
+}
+
 export function createResearchBatchFromAssessment(
   state: ProjectState,
   assessmentId: string,
@@ -203,16 +254,20 @@ export function claimResearchTask(
   batchId: string,
   leaseOwner: string,
   leaseDurationMs = 300000,
+  referenceNowMs = Date.now(),
 ): { task: ResearchTaskRecord; state: ProjectState } | undefined {
-  const activeTasks = state.coverage_research_tasks.filter((t) => t.status === "claimed" || t.status === "running");
+  const { tasks: reclaimedTasks } = reclaimExpiredResearchTasks(state, referenceNowMs);
+  const activeTasks = reclaimedTasks.filter(
+    (task) => RESEARCH_ACTIVE_STATUSES.has(task.status) && !isResearchLeaseExpired(task, referenceNowMs),
+  );
   if (activeTasks.length >= 3) {
     throw new CoreError("COVERAGE_RESEARCH_REQUIRED", `Cannot claim task: maximum 3 active research claims reached.`, true);
   }
 
-  const queuedTask = state.coverage_research_tasks.find((t) => t.batch_id === batchId && t.status === "queued");
+  const queuedTask = reclaimedTasks.find((t) => t.batch_id === batchId && t.status === "queued");
   if (queuedTask === undefined) return undefined;
 
-  const expiresAt = new Date(Date.now() + leaseDurationMs).toISOString();
+  const expiresAt = new Date(referenceNowMs + leaseDurationMs).toISOString();
   const updatedTask: ResearchTaskRecord = {
     ...queuedTask,
     status: "claimed",
@@ -223,7 +278,7 @@ export function claimResearchTask(
     updated_at: now(),
   };
 
-  const tasks = state.coverage_research_tasks.map((t) => (t.id === updatedTask.id ? updatedTask : t));
+  const tasks = reclaimedTasks.map((t) => (t.id === updatedTask.id ? updatedTask : t));
   return { task: updatedTask, state: { ...state, coverage_research_tasks: tasks } };
 }
 
@@ -238,6 +293,7 @@ export function submitResearchTaskCandidates(
   leaseOwner: string,
   candidateInputs: ResearchCandidateInput[],
   executionInput: ExecutionActorInput,
+  referenceNowMs = Date.now(),
 ): { candidates: SourceCandidate[]; lineages: CoverageResearchLineageLink[]; state: ProjectState } {
   assertResearchCapability(executionInput, "submit_candidates");
 
@@ -246,7 +302,11 @@ export function submitResearchTaskCandidates(
     throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task "${taskId}" not found.`, true);
   }
 
-  if (task.status !== "claimed" && task.status !== "running" && task.status !== "completed") {
+  if (isResearchTaskTerminal(task.status)) {
+    throw new CoreError("COVERAGE_RESEARCH_TASK_TERMINAL", `Research task "${taskId}" is terminal (${task.status}) and cannot be modified.`, true);
+  }
+
+  if (task.status !== "claimed" && task.status !== "running") {
     throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task "${taskId}" is not in active state.`, true);
   }
 
@@ -254,11 +314,15 @@ export function submitResearchTaskCandidates(
     throw new CoreError("COVERAGE_RESEARCH_TASK_LEASE_LOST", `Research task "${taskId}" lease lost or generation mismatch.`, true);
   }
 
-  if (task.lease_expires_at && Date.parse(task.lease_expires_at) <= Date.now()) {
+  if (task.lease_expires_at === undefined || Number.isNaN(Date.parse(task.lease_expires_at)) || Date.parse(task.lease_expires_at) <= referenceNowMs) {
     throw new CoreError("COVERAGE_RESEARCH_TASK_LEASE_LOST", `Research task "${taskId}" lease expired.`, true);
   }
 
   const batch = state.coverage_research_batches.find((b) => b.id === task.batch_id);
+  if (batch === undefined || batch.status !== "open") {
+    throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task "${taskId}" parent batch no longer allows execution.`, true);
+  }
+
   const newCandidates: SourceCandidate[] = [];
   const newLineages: CoverageResearchLineageLink[] = [];
   const updatedCandidatesList = [...state.candidates];
@@ -296,17 +360,26 @@ export function submitResearchTaskCandidates(
       existingCandidate = fullCandidate;
     }
 
-    // Preserve lineage links for all targets
+    // Preserve lineage links for all targets, deduplicated by canonical identity
     const targets = input.target_requirement_ids ?? task.requirement_ids;
     for (const reqId of targets) {
       if (isCoverageRequirementId(reqId)) {
+        const characterScope = task.character_id ?? "";
+        const duplicateLineage = updatedLineagesList.some(
+          (existing) =>
+            existing.candidate_id === candidateId &&
+            existing.task_id === task.id &&
+            existing.requirement_id === reqId &&
+            (existing.character_id ?? "") === characterScope,
+        );
+        if (duplicateLineage) continue;
         const lineageId = internalId("lineage");
         const lineageLink: CoverageResearchLineageLink = {
           id: lineageId,
           ...(candidateId === undefined ? {} : { candidate_id: candidateId }),
           task_id: task.id,
           batch_id: task.batch_id,
-          assessment_id: batch?.assessment_id ?? "",
+          assessment_id: batch.assessment_id,
           requirement_id: reqId,
           ...(task.character_id === undefined ? {} : { character_id: task.character_id }),
           created_at: now(),
@@ -325,15 +398,17 @@ export function submitResearchTaskCandidates(
 
   const tasks = state.coverage_research_tasks.map((t) => (t.id === taskId ? updatedTask : t));
 
+  const updatedState: ProjectState = {
+    ...state,
+    candidates: updatedCandidatesList,
+    coverage_research_lineages: updatedLineagesList,
+    coverage_research_tasks: tasks,
+  };
+
   return {
     candidates: newCandidates,
     lineages: newLineages,
-    state: {
-      ...state,
-      candidates: updatedCandidatesList,
-      coverage_research_lineages: updatedLineagesList,
-      coverage_research_tasks: tasks,
-    },
+    state: applyDerivedResearchBatchStatus(updatedState, task.batch_id),
   };
 }
 
@@ -350,6 +425,7 @@ export function exhaustResearchTask(
   sourceFamilies: string[],
   exhaustedReason: string,
   executionInput: ExecutionActorInput,
+  referenceNowMs = Date.now(),
 ): { task: ResearchTaskRecord; state: ProjectState } {
   assertResearchCapability(executionInput, "exhaust_task");
 
@@ -358,8 +434,20 @@ export function exhaustResearchTask(
     throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task "${taskId}" not found.`, true);
   }
 
+  if (isResearchTaskTerminal(task.status)) {
+    throw new CoreError("COVERAGE_RESEARCH_TASK_TERMINAL", `Research task "${taskId}" is terminal (${task.status}) and cannot be modified.`, true);
+  }
+
+  if (task.status !== "claimed" && task.status !== "running") {
+    throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task "${taskId}" is not in active state.`, true);
+  }
+
   if (task.claim_generation !== claimGeneration || task.lease_owner !== leaseOwner) {
     throw new CoreError("COVERAGE_RESEARCH_TASK_LEASE_LOST", `Research task "${taskId}" lease lost or generation mismatch.`, true);
+  }
+
+  if (task.lease_expires_at === undefined || Number.isNaN(Date.parse(task.lease_expires_at)) || Date.parse(task.lease_expires_at) <= referenceNowMs) {
+    throw new CoreError("COVERAGE_RESEARCH_TASK_LEASE_LOST", `Research task "${taskId}" lease expired.`, true);
   }
 
   if (searchedQueries.length === 0) {
@@ -380,7 +468,7 @@ export function exhaustResearchTask(
   };
 
   const tasks = state.coverage_research_tasks.map((t) => (t.id === taskId ? updatedTask : t));
-  return { task: updatedTask, state: { ...state, coverage_research_tasks: tasks } };
+  return { task: updatedTask, state: applyDerivedResearchBatchStatus({ ...state, coverage_research_tasks: tasks }, task.batch_id) };
 }
 
 /**

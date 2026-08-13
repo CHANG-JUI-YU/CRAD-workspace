@@ -380,8 +380,8 @@ export function coverageAssessmentRevision(assessment: Omit<CoverageAssessment, 
   return contentHash(canonicalJson({ pass: assessment.pass, requirement_set_id: assessment.requirement_set_id, requirement_set_revision: assessment.requirement_set_revision, input_snapshot: assessment.input_snapshot, items: assessment.items, operation_id: assessment.operation_id }));
 }
 
-export type ResearchBatchStatus = "open" | "completed" | "exhausted" | "stale" | "cancelled";
-export const RESEARCH_BATCH_STATUSES = ["open", "completed", "exhausted", "stale", "cancelled"] as const;
+export type ResearchBatchStatus = "open" | "completed" | "exhausted" | "stale" | "failed" | "cancelled";
+export const RESEARCH_BATCH_STATUSES = ["open", "completed", "exhausted", "stale", "failed", "cancelled"] as const;
 
 export interface ResearchBatchRecord {
   id: string;

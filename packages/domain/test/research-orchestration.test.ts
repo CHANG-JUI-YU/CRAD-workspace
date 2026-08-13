@@ -113,20 +113,19 @@ describe("Research Orchestration (Batches 4-6)", () => {
     expect(result.lineages.length).toBe(1);
     expect(result.lineages[0]!.requirement_id).toBe("req.appearance");
 
-    // Deduplication check: submit identical candidate URL
+    // Terminal immutability: resubmitting a completed task is rejected
     const runningTask = result.state.coverage_research_tasks.find((t) => t.id === claimed.task.id)!;
-    const resubmit = submitResearchTaskCandidates(
+    expect(runningTask.status).toBe("completed");
+    expect(() => submitResearchTaskCandidates(
       result.state,
       runningTask.id,
       runningTask.claim_generation,
       runningTask.lease_owner!,
       candidateInputs,
       "researcher-1",
-    );
-
-    // Candidate count in state should remain 1 (deduplicated), but new lineage added
-    expect(resubmit.state.candidates.length).toBe(1);
-    expect(resubmit.state.coverage_research_lineages.length).toBe(2);
+    )).toThrowError(/is terminal \(completed\) and cannot be modified/iu);
+    expect(result.state.candidates.length).toBe(1);
+    expect(result.state.coverage_research_lineages.length).toBe(1);
   });
 
   it("should enforce capability check (Researcher cannot approve or fetch unapproved)", () => {
