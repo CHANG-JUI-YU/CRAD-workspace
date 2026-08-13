@@ -1,6 +1,7 @@
 import { artifactDependencyFingerprint, computeProjectProjection, createEntityMatcher, factReferencesEntity, parseWardrobeMarkdown, relationshipPerspectiveEntries, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "./required-artifacts.js";
 import { contradictingAcceptedFacts } from "./knowledge.js";
+import { buildCoverageSnapshot, requirementsResolved, sourceFactsReady } from "./coverage-assessment.js";
 
 export type WorkflowGatePhase = "draft" | "publish";
 
@@ -556,9 +557,64 @@ export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase, 
   reportSourceResearch(state, artifacts, diagnostics);
   reportMissingReferences(state, artifacts, diagnostics, manifest, planIds);
   reportFacts(state, diagnostics);
+  reportCoverageReadiness(state, diagnostics);
   reportBlueprintBindings(state, artifacts, diagnostics, plan);
   reportDependencyFingerprints(state, artifacts, diagnostics, plan);
   reportDerivedLinks(state, artifacts, diagnostics);
   reportBlockingIssues(state, content, diagnostics, manifest, planIds);
+  reportCoverageSnapshotFreshness(state, diagnostics);
   return { ok: diagnostics.length === 0, diagnostics };
+}
+
+function reportCoverageReadiness(state: ProjectState, diagnostics: WorkflowDiagnostic[]): void {
+  if (state.coverage_requirement_sets.length === 0) return;
+
+  const res = requirementsResolved(state);
+  if (!res.resolved) {
+    const missingStr = res.missing.map((m) => `${m.character_id ?? "world"}/${m.requirement_id}`).join(", ");
+    add(diagnostics, {
+      code: "COVERAGE_RESOLUTION_REQUIRED",
+      message: `Unresolved coverage requirements remain: ${missingStr}. Director/User resolution or source coverage is required.`,
+      severity: "error",
+    });
+  }
+
+  if (!sourceFactsReady(state)) {
+    add(diagnostics, {
+      code: "FACT_COVERAGE_INCOMPLETE",
+      message: "Source facts coverage or provenance readiness check failed.",
+      severity: "error",
+    });
+  }
+
+  const latestAssessment = state.coverage_assessments.at(-1);
+  if (latestAssessment !== undefined) {
+    for (const binding of state.coverage_authoring_bindings) {
+      if (binding.assessment_id !== latestAssessment.id || binding.assessment_revision !== latestAssessment.revision) {
+        add(diagnostics, {
+          code: "COVERAGE_AUTHORING_BINDING_STALE",
+          message: `Authoring binding ${binding.id} for artifact ${binding.artifact_id} was created against an outdated coverage assessment revision.`,
+          severity: "error",
+          artifact_ids: [binding.artifact_id],
+        });
+      }
+    }
+  }
+}
+
+function reportCoverageSnapshotFreshness(state: ProjectState, diagnostics: WorkflowDiagnostic[]): void {
+  const lastBuild = [...state.builds].reverse().find((b) => b.status === "previewed" || b.status === "built");
+  if (lastBuild?.coverage_snapshot === undefined) return;
+
+  const latestAssessment = state.coverage_assessments.at(-1);
+  if (latestAssessment === undefined) return;
+
+  const currentSnapshot = buildCoverageSnapshot(state, latestAssessment);
+  if (lastBuild.coverage_snapshot.snapshot_hash !== currentSnapshot.snapshot_hash) {
+    add(diagnostics, {
+      code: "COVERAGE_PUBLISH_SNAPSHOT_STALE",
+      message: `The previewed coverage snapshot hash (${lastBuild.coverage_snapshot.snapshot_hash.slice(0, 12)}) does not match current state (${currentSnapshot.snapshot_hash.slice(0, 12)}). Blueprint, facts, or resolutions changed after preview.`,
+      severity: "error",
+    });
+  }
 }

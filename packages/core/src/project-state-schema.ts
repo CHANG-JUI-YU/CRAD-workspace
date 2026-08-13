@@ -1,10 +1,13 @@
 import { z } from "zod";
 import { decodeOperationCommand } from "./operations.js";
 import {
+  authoringCoverageBindingSchema,
   coverageAssessmentSchema,
   coverageRequirementIdSchema,
   coverageRequirementSetSchema,
   coverageResearchLineageLinkSchema,
+  coverageResolutionSchema,
+  coverageSnapshotSchema,
   coverageUserDecisionSchema,
   researchBatchSchema,
   researchTaskSchema,
@@ -282,6 +285,7 @@ const buildSchema = z.object({
   diagnostics: z.array(z.string()),
   created_at: z.string().datetime({ offset: true }),
   quality_policy_snapshot: qualityPolicySnapshotSchema.optional(),
+  coverage_snapshot: coverageSnapshotSchema.optional(),
 }).strict();
 
 const blueprintPrecheckCheckSchema = z.object({
@@ -325,6 +329,7 @@ const publishSchema = z.object({
   export_json_path: z.string().min(1).optional(),
   export_png_path: z.string().min(1).optional(),
   created_at: z.string().datetime({ offset: true }),
+  coverage_snapshot: coverageSnapshotSchema.optional(),
 }).strict();
 
 const importSchema = z.object({
@@ -472,4 +477,6 @@ export const projectStateSchema = z.object({
   coverage_research_batches: z.array(researchBatchSchema).default([]),
   coverage_research_tasks: z.array(researchTaskSchema).default([]),
   coverage_research_lineages: z.array(coverageResearchLineageLinkSchema).default([]),
+  coverage_resolutions: z.array(coverageResolutionSchema).default([]),
+  coverage_authoring_bindings: z.array(authoringCoverageBindingSchema).default([]),
 }).strict();

@@ -1,4 +1,5 @@
 import {
+  authoringBindingHash,
   canonicalJson,
   contentHash,
   CoreError,
@@ -8,8 +9,10 @@ import {
   zhujiProposalValueSchema,
   type ArtifactKind,
   type ArtifactRecord,
+  type AuthoringCoverageBinding,
   type OperationRecord,
   type ProjectRepository,
+  type ProjectState,
   type TemplateProposalValue,
   type ZhujiProposalValue,
 } from "@st-workspace/core";
@@ -109,6 +112,41 @@ function templateArtifactKind(kind: TemplateProposalValue["kind"]): ArtifactKind
     director_routing: "director_routing",
   };
   return mapping[kind];
+}
+
+export function createCoverageBindingForArtifact(state: ProjectState, artifact: ArtifactRecord, actor: string): AuthoringCoverageBinding | undefined {
+  const assessment = state.coverage_assessments.at(-1);
+  if (assessment === undefined) return undefined;
+
+  const factProjectionRev = contentHash(
+    canonicalJson({
+      facts: state.facts.map((fact) => ({ id: fact.id, status: fact.status, fact_revision: fact.fact_revision ?? 0 })),
+    }),
+  );
+
+  const activeResolutions = state.coverage_resolutions.filter((r) => !state.coverage_resolutions.some((other) => other.supersedes === r.id));
+
+  const bindingObj = {
+    artifact_id: artifact.id,
+    artifact_revision: artifact.revision,
+    assessment_id: assessment.id,
+    assessment_revision: assessment.revision,
+    requirement_set_revision: assessment.requirement_set_revision,
+    fact_projection_revision: factProjectionRev,
+    ...(assessment.input_snapshot.fact_review_run_id === undefined ? {} : { fact_review_run_id: assessment.input_snapshot.fact_review_run_id }),
+    resolution_ids: activeResolutions.map((r) => r.id),
+    created_by: actor,
+  };
+
+  const hash = authoringBindingHash(bindingObj);
+
+  return {
+    id: internalId("authoring-binding"),
+    ...bindingObj,
+    input_snapshot_hash: hash,
+    created_by: actor,
+    created_at: now(),
+  };
 }
 
 function templateName(value: Exclude<TemplateProposalValue, { kind: "zhuji" }>): string {
@@ -385,10 +423,12 @@ export class AuthoringService {
             : item),
         };
       }
+      const binding = createCoverageBindingForArtifact(current, artifact, actor);
       return {
         ...current,
         ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
         artifacts: [...current.artifacts, artifact],
+        coverage_authoring_bindings: binding === undefined ? current.coverage_authoring_bindings : [...current.coverage_authoring_bindings, binding],
         operations: current.operations.map((item) => item.id === operationId
           ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: artifact.id, status: "completed", message: "artifact revision 已建立" }], result_summary: summary })
           : item),

@@ -100,7 +100,7 @@ export async function selectSourceCandidates(deps: SourceApplicationDeps, decisi
       details: { kind: "source_selection", candidate_ids: decisions.map((decision) => decision.candidate_id) },
     }],
   }));
-  const execution = executionContextFor(operation, context, { id: context.actor || "director", role: "orchestrator" });
+  const execution = executionContextFor(operation, context, { id: "director", role: "orchestrator" });
   const result = await deps.sources.selectCandidates(operation.id, decisions, execution);
   return {
     operation_id: operation.id,

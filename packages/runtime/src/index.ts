@@ -60,7 +60,6 @@ import {
   type ArtifactKind,
   type RepairInspection,
   type RepairReport,
-  type FactRecord,
   type FactClassification,
   type CoverageAssessment,
   type CoverageRequirementSet,
@@ -74,6 +73,7 @@ import {
   KnowledgeService,
   ReviewService,
   SourceService,
+  fetchApprovedSource,
   inferAuthoringKind,
   PALETTE_REQUIRED_MODULES,
   ZHUJI_REQUIRED_MODULES,
@@ -969,6 +969,11 @@ export class WorkspaceRuntime {
     return { operation_id: operationId, status: "cancelled", summary: "Operation cancelled." };
   }
 
+  async fetchApprovedSource(candidateId: string, content: string, actorInput = "director") {
+    const initial = await this.repository.read();
+    return fetchApprovedSource(initial, candidateId, content, actorInput);
+  }
+
   /* c8 ignore start -- recovery delegates to the same domain services covered by the runtime and worker tests. */
   private hasAuditMarker(operationId: string, event: string, state: ProjectState): boolean {
     return state.audit.some((item) => item.operation_id === operationId && item.event === event);
@@ -1408,7 +1413,8 @@ export class WorkspaceRuntime {
     if (!parsed.success) {
       return this.markNeedsInput(operation, "無法還原來源選擇操作，payload 格式無效或缺失，請重新提交候選來源選擇。");
     }
-    const result = await this.sources.selectCandidates(operation.id, parsed.data.decisions, execution);
+    const directorExecution = executionContextFromOperation(operation, { auditActor: "director", executionAgent: { id: "director", role: "orchestrator" } });
+    const result = await this.sources.selectCandidates(operation.id, parsed.data.decisions, directorExecution);
     return { operation_id: operation.id, status: result.status, summary: result.summary, completed: [...result.approved, ...result.rejected], blocked: [], agent_id: execution.executionAgent.id };
   }
 

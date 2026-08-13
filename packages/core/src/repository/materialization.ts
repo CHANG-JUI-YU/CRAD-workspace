@@ -221,6 +221,8 @@ function controlMaterializedFiles(state: ProjectState): RepositoryFile[] {
     { path: ".workspace/coverage-research-batches.json", content: canonicalJson({ research_batches: state.coverage_research_batches ?? [] }) + "\n" },
     { path: ".workspace/coverage-research-tasks.json", content: canonicalJson({ research_tasks: state.coverage_research_tasks ?? [] }) + "\n" },
     { path: ".workspace/coverage-research-lineages.json", content: canonicalJson({ research_lineages: state.coverage_research_lineages ?? [] }) + "\n" },
+    { path: ".workspace/coverage-resolutions.json", content: canonicalJson({ resolutions: state.coverage_resolutions ?? [] }) + "\n" },
+    { path: ".workspace/coverage-authoring-bindings.json", content: canonicalJson({ authoring_bindings: state.coverage_authoring_bindings ?? [] }) + "\n" },
   ];
 }
 

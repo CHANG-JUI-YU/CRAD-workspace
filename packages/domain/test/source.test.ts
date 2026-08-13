@@ -172,7 +172,7 @@ describe("source vertical slice", () => {
     const repository = new MemoryProjectRepository("demo");
     await repository.commit(0, (state) => ({ ...state, operations: [{ id: "op-url", kind: "source", request: "source", status: "running", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), progress: [] }] }));
     const result = await new SourceService(repository).resume("op-url", "please add https://example.test/page", { actor: "researcher", attachments: [], fetcher: async () => ({ content: new TextEncoder().encode("remote text"), media_type: "text/plain" }) });
-    expect(result.status).toBe("completed");
+    expect(result.status).toBe("needs_input");
     expect((await repository.read()).candidates[0]?.url).toBe("https://example.test/page");
   });
 

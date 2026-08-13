@@ -1,7 +1,18 @@
 import { createInterviewState, type InterviewState } from "./interview.js";
 import type { AdaptationDecision } from "./authoring-context.js";
 import { canonicalJson, contentHash, internalId, CoreError } from "./core-utilities.js";
-import { coverageRequirementIdForDimension, type CoverageAssessment, type CoverageRequirementSet, type CoverageResearchLineageLink, type CoverageUserDecisionRecord, type ResearchBatchRecord, type ResearchTaskRecord } from "./coverage.js";
+import {
+  coverageRequirementIdForDimension,
+  type AuthoringCoverageBinding,
+  type CoverageAssessment,
+  type CoverageRequirementSet,
+  type CoverageResearchLineageLink,
+  type CoverageResolution,
+  type CoverageSnapshot,
+  type CoverageUserDecisionRecord,
+  type ResearchBatchRecord,
+  type ResearchTaskRecord,
+} from "./coverage.js";
 import type { OperationCommand, OperationRecord, AuditEvent } from "./operations.js";
 
 export type OperationStatus =
@@ -376,6 +387,7 @@ export interface BuildRecord {
   diagnostics: string[];
   created_at: string;
   quality_policy_snapshot?: QualityPolicySnapshot;
+  coverage_snapshot?: CoverageSnapshot;
 }
 
 export interface PublishRecord {
@@ -390,6 +402,7 @@ export interface PublishRecord {
   export_json_path?: string;
   export_png_path?: string;
   created_at: string;
+  coverage_snapshot?: CoverageSnapshot;
 }
 
 export interface ImportRecord {
@@ -454,6 +467,8 @@ export interface ProjectState {
   coverage_research_batches: ResearchBatchRecord[];
   coverage_research_tasks: ResearchTaskRecord[];
   coverage_research_lineages: CoverageResearchLineageLink[];
+  coverage_resolutions: CoverageResolution[];
+  coverage_authoring_bindings: AuthoringCoverageBinding[];
 }
 
 export function createProjectState(projectId: string): ProjectState {
@@ -488,6 +503,8 @@ export function createProjectState(projectId: string): ProjectState {
     coverage_research_batches: [],
     coverage_research_tasks: [],
     coverage_research_lineages: [],
+    coverage_resolutions: [],
+    coverage_authoring_bindings: [],
   };
 }
 
@@ -558,6 +575,8 @@ export function migrateProjectStateV1ToV2(state: Record<string, unknown>): Recor
     coverage_research_batches: Array.isArray(state.coverage_research_batches) ? state.coverage_research_batches : [],
     coverage_research_tasks: Array.isArray(state.coverage_research_tasks) ? state.coverage_research_tasks : [],
     coverage_research_lineages: Array.isArray(state.coverage_research_lineages) ? state.coverage_research_lineages : [],
+    coverage_resolutions: Array.isArray(state.coverage_resolutions) ? state.coverage_resolutions : [],
+    coverage_authoring_bindings: Array.isArray(state.coverage_authoring_bindings) ? state.coverage_authoring_bindings : [],
   };
 }
 

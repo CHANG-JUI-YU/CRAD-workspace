@@ -482,3 +482,161 @@ export function researchBatchRevision(batch: Omit<ResearchBatchRecord, "created_
 export function researchTaskRevision(task: Omit<ResearchTaskRecord, "created_at" | "updated_at">): string {
   return contentHash(canonicalJson({ batch_id: task.batch_id, character_id: task.character_id, requirement_ids: task.requirement_ids, dimension_paths: task.dimension_paths, status: task.status, claim_generation: task.claim_generation, attempt: task.attempt }));
 }
+
+export type CoverageResolutionMode = "creative_completion" | "user_supplement";
+export const COVERAGE_RESOLUTION_MODES = ["creative_completion", "user_supplement"] as const;
+
+export type CoverageResolutionStatus = "authorized" | "pending" | "fulfilled";
+export const COVERAGE_RESOLUTION_STATUSES = ["authorized", "pending", "fulfilled"] as const;
+
+export interface CoverageResolution {
+  id: string;
+  character_id?: string;
+  requirement_id: string;
+  mode: CoverageResolutionMode;
+  status: CoverageResolutionStatus;
+  assessment_id: string;
+  assessment_revision: string;
+  requirement_set_revision: string;
+  rationale: string;
+  source_refs?: Array<{ source_id: string; revision: string }>;
+  fact_refs?: Array<{ fact_id: string; fact_revision: string; decision_id: string }>;
+  user_decision_id: string;
+  authorized_by: string;
+  operation_id: string;
+  supersedes?: string;
+  created_by: string;
+  created_at: string;
+}
+
+export const coverageResolutionSchema = z.object({
+  id: z.string().min(1),
+  character_id: z.string().min(1).optional(),
+  requirement_id: coverageRequirementIdSchema,
+  mode: z.enum(COVERAGE_RESOLUTION_MODES),
+  status: z.enum(COVERAGE_RESOLUTION_STATUSES),
+  assessment_id: z.string().min(1),
+  assessment_revision: z.string().min(1),
+  requirement_set_revision: z.string().min(1),
+  rationale: z.string().min(1),
+  source_refs: z.array(z.object({ source_id: z.string().min(1), revision: z.string().min(1) }).strict()).optional(),
+  fact_refs: z.array(z.object({ fact_id: z.string().min(1), fact_revision: z.string().min(1), decision_id: z.string().min(1) }).strict()).optional(),
+  user_decision_id: z.string().min(1),
+  authorized_by: z.string().min(1),
+  operation_id: z.string().min(1),
+  supersedes: z.string().min(1).optional(),
+  created_by: z.string().min(1),
+  created_at: z.string().datetime({ offset: true }),
+}).strict();
+
+export interface AuthoringCoverageBinding {
+  id: string;
+  artifact_id: string;
+  artifact_revision: string;
+  assessment_id: string;
+  assessment_revision: string;
+  requirement_set_revision: string;
+  fact_projection_revision: string;
+  fact_review_run_id?: string;
+  resolution_ids: string[];
+  input_snapshot_hash: string;
+  created_by: string;
+  created_at: string;
+}
+
+export const authoringCoverageBindingSchema = z.object({
+  id: z.string().min(1),
+  artifact_id: z.string().min(1),
+  artifact_revision: z.string().min(1),
+  assessment_id: z.string().min(1),
+  assessment_revision: z.string().min(1),
+  requirement_set_revision: z.string().min(1),
+  fact_projection_revision: z.string().min(1),
+  fact_review_run_id: z.string().min(1).optional(),
+  resolution_ids: z.array(z.string().min(1)),
+  input_snapshot_hash: z.string().min(1),
+  created_by: z.string().min(1),
+  created_at: z.string().datetime({ offset: true }),
+}).strict();
+
+export interface CoverageRequirementRef {
+  character_id?: string;
+  requirement_id: string;
+}
+
+export const coverageRequirementRefSchema = z.object({
+  character_id: z.string().min(1).optional(),
+  requirement_id: coverageRequirementIdSchema,
+}).strict();
+
+export interface CoverageSnapshot {
+  assessment_id: string;
+  assessment_revision: string;
+  requirement_set_id: string;
+  requirement_set_revision: string;
+  blueprint_revision: string;
+  fact_projection_revision: string;
+  fact_review_run_id?: string;
+  fact_review_projection_revision?: string;
+  source_revisions: Array<{ source_id: string; revision: string }>;
+  source_covered_requirements: CoverageRequirementRef[];
+  user_supplement_requirements: CoverageRequirementRef[];
+  creative_completion_requirements: CoverageRequirementRef[];
+  resolution_ids: string[];
+  authoring_binding_ids: string[];
+  snapshot_hash: string;
+}
+
+export const coverageSnapshotSchema = z.object({
+  assessment_id: z.string().min(1),
+  assessment_revision: z.string().min(1),
+  requirement_set_id: z.string().min(1),
+  requirement_set_revision: z.string().min(1),
+  blueprint_revision: z.string().min(1),
+  fact_projection_revision: z.string().min(1),
+  fact_review_run_id: z.string().min(1).optional(),
+  fact_review_projection_revision: z.string().min(1).optional(),
+  source_revisions: z.array(z.object({ source_id: z.string().min(1), revision: z.string().min(1) }).strict()),
+  source_covered_requirements: z.array(coverageRequirementRefSchema),
+  user_supplement_requirements: z.array(coverageRequirementRefSchema),
+  creative_completion_requirements: z.array(coverageRequirementRefSchema),
+  resolution_ids: z.array(z.string().min(1)),
+  authoring_binding_ids: z.array(z.string().min(1)),
+  snapshot_hash: z.string().min(1),
+}).strict();
+
+export function coverageSnapshotHash(snapshot: Omit<CoverageSnapshot, "snapshot_hash">): string {
+  return contentHash(
+    canonicalJson({
+      assessment_id: snapshot.assessment_id,
+      assessment_revision: snapshot.assessment_revision,
+      requirement_set_id: snapshot.requirement_set_id,
+      requirement_set_revision: snapshot.requirement_set_revision,
+      blueprint_revision: snapshot.blueprint_revision,
+      fact_projection_revision: snapshot.fact_projection_revision,
+      fact_review_run_id: snapshot.fact_review_run_id,
+      fact_review_projection_revision: snapshot.fact_review_projection_revision,
+      source_revisions: snapshot.source_revisions,
+      source_covered_requirements: snapshot.source_covered_requirements,
+      user_supplement_requirements: snapshot.user_supplement_requirements,
+      creative_completion_requirements: snapshot.creative_completion_requirements,
+      resolution_ids: snapshot.resolution_ids,
+      authoring_binding_ids: snapshot.authoring_binding_ids,
+    }),
+  );
+}
+
+export function authoringBindingHash(binding: Omit<AuthoringCoverageBinding, "id" | "input_snapshot_hash" | "created_at" | "created_by">): string {
+  return contentHash(
+    canonicalJson({
+      artifact_id: binding.artifact_id,
+      artifact_revision: binding.artifact_revision,
+      assessment_id: binding.assessment_id,
+      assessment_revision: binding.assessment_revision,
+      requirement_set_revision: binding.requirement_set_revision,
+      fact_projection_revision: binding.fact_projection_revision,
+      fact_review_run_id: binding.fact_review_run_id,
+      resolution_ids: binding.resolution_ids,
+    }),
+  );
+}

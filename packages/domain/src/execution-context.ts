@@ -9,18 +9,33 @@ export interface ResolvedExecutionActors {
 }
 
 /** Normalize the new context API while keeping the legacy string adapter thin. */
-export function resolveExecutionActors(input: ExecutionActorInput, legacyAuditActor?: string): ResolvedExecutionActors {
+export function resolveExecutionActors(input: ExecutionActorInput | Record<string, unknown>, legacyAuditActor?: string): ResolvedExecutionActors {
   if (typeof input === "string") {
+    const valid = input.trim().length > 0 ? input : "director";
     return {
-      executionAgent: input,
-      auditActor: legacyAuditActor ?? input,
+      executionAgent: valid,
+      auditActor: legacyAuditActor && legacyAuditActor.trim().length > 0 ? legacyAuditActor : valid,
     };
   }
-  return {
-    executionAgent: input.executionAgent.id,
-    auditActor: input.auditActor,
-    context: input,
-  };
+  if (input && typeof input === "object") {
+    const obj = input as Record<string, unknown>;
+    const execAgentObj = obj.executionAgent as { id?: string } | undefined;
+    const agentId = typeof execAgentObj?.id === "string" && execAgentObj.id.trim().length > 0
+      ? execAgentObj.id
+      : (typeof obj.actor === "string" && obj.actor.trim().length > 0
+        ? obj.actor
+        : (typeof obj.agent_id === "string" && obj.agent_id.trim().length > 0 ? obj.agent_id : "director"));
+    const auditActor = typeof obj.auditActor === "string" && obj.auditActor.trim().length > 0
+      ? obj.auditActor
+      : (typeof obj.actor === "string" && obj.actor.trim().length > 0 ? obj.actor : agentId);
+    const contextObj = "executionAgent" in obj && "operationId" in obj ? (obj as unknown as ExecutionContext) : undefined;
+    return {
+      executionAgent: agentId,
+      auditActor: auditActor || "director",
+      ...(contextObj === undefined ? {} : { context: contextObj }),
+    };
+  }
+  return { executionAgent: "director", auditActor: legacyAuditActor || "director" };
 }
 
 /** Fence a durable domain side effect against the operation's current lease. */

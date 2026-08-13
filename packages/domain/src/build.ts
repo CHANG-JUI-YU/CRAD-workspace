@@ -16,6 +16,7 @@ import {
 import { compileProject, type CardModeSelection } from "@st-workspace/compiler";
 import { buildRequiredArtifactManifest } from "./required-artifacts.js";
 import { validateWorkflow } from "./workflow-gate.js";
+import { buildCoverageSnapshot } from "./coverage-assessment.js";
 import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 
 export interface BuildExecutionResult {
@@ -48,8 +49,8 @@ export class BuildService {
       await this.repository.commit(initial.revision, (current) => {
         assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
         return {
-        ...current,
-        operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "needs_input", question: "目前沒有可建置的 artifact，請先建立角色或其他產物。" }) : item),
+          ...current,
+          operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "needs_input", question: "目前沒有可建置的 artifact，請先建立角色或其他產物。" }) : item),
         };
       });
       return { status: "needs_input", summary: "目前沒有可建置的 artifact。" };
@@ -84,19 +85,19 @@ export class BuildService {
       await this.repository.commit(initial.revision, (current) => {
         assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
         return {
-        ...current,
-        operations: current.operations.map((item) => item.id === operationId
-          ? updateOperation(item, { status: "needs_input", question, result_summary: "等待本次打包的模式選擇。" })
-          : item),
-        audit: [...current.audit, {
-          id: internalId("audit"),
-          operation_id: operationId,
-          event: "build.mode_selection_required",
-          actor,
-          occurred_at: now(),
-          project_revision: current.revision + 1,
-          details: { available_modes: ["zhuji", "palette"], ...(manifestMode === undefined ? {} : { manifest_mode: manifestMode }) },
-        }],
+          ...current,
+          operations: current.operations.map((item) => item.id === operationId
+            ? updateOperation(item, { status: "needs_input", question, result_summary: "等待本次打包的模式選擇。" })
+            : item),
+          audit: [...current.audit, {
+            id: internalId("audit"),
+            operation_id: operationId,
+            event: "build.mode_selection_required",
+            actor,
+            occurred_at: now(),
+            project_revision: current.revision + 1,
+            details: { available_modes: ["zhuji", "palette"], ...(manifestMode === undefined ? {} : { manifest_mode: manifestMode }) },
+          }],
         };
       });
       return { status: "needs_input", summary: question };
@@ -106,8 +107,8 @@ export class BuildService {
       await this.repository.commit(initial.revision, (current) => {
         assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
         return {
-        ...current,
-        operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "needs_input", question }) : item),
+          ...current,
+          operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "needs_input", question }) : item),
         };
       });
       return { status: "needs_input", summary: question };
@@ -116,26 +117,26 @@ export class BuildService {
     if (isPublishRequest) {
       const gate = validateWorkflow(initial, "publish", exactManifest);
       if (!gate.ok) {
-      const diagnostics = gate.diagnostics.map((item) => `${item.code}: ${item.message}`);
+        const diagnostics = gate.diagnostics.map((item) => `${item.code}: ${item.message}`);
         await this.repository.commit(initial.revision, (current) => {
           assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
           return {
-          ...current,
-          operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, {
-            status: "blocked",
-            question: diagnostics.join(" "),
-            result_summary: `Publish blocked: ${diagnostics.join(" ")}`,
-            progress: [...item.progress, { item_id: operationId, status: "blocked", message: "workflow gate blocked publish" }],
-          }) : item),
-          audit: [...current.audit, {
-            id: internalId("audit"),
-            operation_id: operationId,
-            event: "publish.gate_blocked",
-            actor,
-            occurred_at: now(),
-            project_revision: current.revision + 1,
-            details: { diagnostics, codes: gate.diagnostics.map((item) => item.code) },
-          }],
+            ...current,
+            operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, {
+              status: "blocked",
+              question: diagnostics.join(" "),
+              result_summary: `Publish blocked: ${diagnostics.join(" ")}`,
+              progress: [...item.progress, { item_id: operationId, status: "blocked", message: "workflow gate blocked publish" }],
+            }) : item),
+            audit: [...current.audit, {
+              id: internalId("audit"),
+              operation_id: operationId,
+              event: "publish.gate_blocked",
+              actor,
+              occurred_at: now(),
+              project_revision: current.revision + 1,
+              details: { diagnostics, codes: gate.diagnostics.map((item) => item.code) },
+            }],
           };
         });
         return { status: "blocked", summary: `Publish blocked: ${diagnostics.join(" ")}` };
@@ -173,8 +174,8 @@ export class BuildService {
       await this.repository.commit(initial.revision, (current) => {
         assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
         return {
-        ...current,
-        operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "needs_input", question: "目前沒有可建置的 artifact，請先建立角色或其他產物。" }) : item),
+          ...current,
+          operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "needs_input", question: "目前沒有可建置的 artifact，請先建立角色或其他產物。" }) : item),
         };
       });
       return { status: "needs_input", summary: "目前沒有可建置的 artifact。" };
@@ -189,6 +190,10 @@ export class BuildService {
     const errorDiagnostics = compiled.diagnostics.filter((item) => item.severity === "error");
     const qualityPolicy = createQualityPolicySnapshot(initial.quality_profile, actor, now());
     const isPublish = /publish|release|發布|發佈|上線/iu.test(request);
+
+    const latestAssessment = initial.coverage_assessments.at(-1);
+    const coverageSnapshot = latestAssessment === undefined ? undefined : buildCoverageSnapshot(initial, latestAssessment);
+
     const build: BuildRecord = {
       id: internalId("build"),
       operation_id: operationId,
@@ -199,35 +204,38 @@ export class BuildService {
       diagnostics,
       created_at: now(),
       quality_policy_snapshot: qualityPolicy,
+      ...(coverageSnapshot === undefined ? {} : { coverage_snapshot: coverageSnapshot }),
     };
+
     if (errorDiagnostics.length > 0) {
       const summary = `Build failed: ${diagnostics.join(" ")}`;
       await this.repository.commit(initial.revision, (current) => {
         assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
         return {
-        ...current,
-        builds: [...current.builds, build],
-        operations: current.operations.map((item) => item.id === operationId
-          ? updateOperation(item, {
-              status: "blocked",
-              question: diagnostics.join(" "),
-              result_summary: summary,
-              progress: [...item.progress, { item_id: build.id, status: "blocked", message: "compiler diagnostics blocked build" }],
-            })
-          : item),
-        audit: [...current.audit, {
-          id: internalId("audit"),
-          operation_id: operationId,
-          event: "build.failed",
-          actor,
-          occurred_at: now(),
-          project_revision: current.revision + 1,
-          details: { build_id: build.id, artifact_ids: artifactIds, content_hash: hash, codes: errorDiagnostics.map((item) => item.code) },
-        }],
+          ...current,
+          builds: [...current.builds, build],
+          operations: current.operations.map((item) => item.id === operationId
+            ? updateOperation(item, {
+                status: "blocked",
+                question: diagnostics.join(" "),
+                result_summary: summary,
+                progress: [...item.progress, { item_id: build.id, status: "blocked", message: "compiler diagnostics blocked build" }],
+              })
+            : item),
+          audit: [...current.audit, {
+            id: internalId("audit"),
+            operation_id: operationId,
+            event: "build.failed",
+            actor,
+            occurred_at: now(),
+            project_revision: current.revision + 1,
+            details: { build_id: build.id, artifact_ids: artifactIds, content_hash: hash, codes: errorDiagnostics.map((item) => item.code) },
+          }],
         };
       });
       return { build_id: build.id, ...(modeSelection === undefined ? {} : { mode_selection: modeSelection }), status: "blocked", summary };
     }
+
     const publish: PublishRecord | undefined = isPublish ? {
       id: internalId("publish"),
       operation_id: operationId,
@@ -238,7 +246,9 @@ export class BuildService {
       export_json_path: publishedCardExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection),
       export_png_path: publishedCardPngExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection),
       created_at: now(),
+      ...(coverageSnapshot === undefined ? {} : { coverage_snapshot: coverageSnapshot }),
     } : undefined;
+
     const warningCount = buildWarnings.length + compiled.diagnostics.filter((item) => item.severity === "warning").length;
     const summary = `${isPublish ? "發布完成" : "Preview 完成"}，輸出 hash ${hash.slice(0, 12)}。${warningCount > 0 ? `（含 ${warningCount} 個警告）` : ""}`;
     const exportJsonPath = publishedCardExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection);
@@ -270,28 +280,29 @@ export class BuildService {
     await this.repository.commit(initial.revision, (current) => {
       assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
       return {
-      ...current,
-      ...(publish === undefined ? {} : { project_status: "published" as const }),
-      builds: [...current.builds, build],
-      ...(publish === undefined ? {} : { publishes: [...current.publishes, publish] }),
-      operations: current.operations.map((item) => item.id === operationId
-        ? updateOperation(item, { status: "completed", result_summary: summary, progress: [...item.progress, { item_id: build.id, status: "completed", message: isPublish ? "publish transaction committed" : "preview generated" }] })
-        : item),
-      audit: [...current.audit, {
-        id: internalId("audit"),
-        operation_id: operationId,
-        event: isPublish ? "publish.committed" : "build.previewed",
-        actor,
-        occurred_at: now(),
-        project_revision: current.revision + 1,
-        details: {
-          build_id: build.id,
-          publish_id: publish?.id,
-          artifact_ids: artifactIds,
-          content_hash: hash,
-          ...(diagnostics.length > 0 ? { diagnostics } : {}),
-        },
-      }],
+        ...current,
+        ...(publish === undefined ? {} : { project_status: "published" as const }),
+        builds: [...current.builds, build],
+        ...(publish === undefined ? {} : { publishes: [...current.publishes, publish] }),
+        operations: current.operations.map((item) => item.id === operationId
+          ? updateOperation(item, { status: "completed", result_summary: summary, progress: [...item.progress, { item_id: build.id, status: "completed", message: isPublish ? "publish transaction committed" : "preview generated" }] })
+          : item),
+        audit: [...current.audit, {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: isPublish ? "publish.committed" : "build.previewed",
+          actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: {
+            build_id: build.id,
+            publish_id: publish?.id,
+            artifact_ids: artifactIds,
+            content_hash: hash,
+            ...(diagnostics.length > 0 ? { diagnostics } : {}),
+            ...(coverageSnapshot === undefined ? {} : { coverage_snapshot_hash: coverageSnapshot.snapshot_hash }),
+          },
+        }],
       };
     }, writeSet);
     await assertExecutionLease(this.repository, execution);

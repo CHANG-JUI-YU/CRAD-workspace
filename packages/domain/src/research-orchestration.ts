@@ -246,8 +246,8 @@ export function submitResearchTaskCandidates(
     throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task "${taskId}" not found.`, true);
   }
 
-  if (task.status !== "claimed" && task.status !== "running") {
-    throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task "${taskId}" is not in claimed/running state.`, true);
+  if (task.status !== "claimed" && task.status !== "running" && task.status !== "completed") {
+    throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task "${taskId}" is not in active state.`, true);
   }
 
   if (task.claim_generation !== claimGeneration || task.lease_owner !== leaseOwner) {

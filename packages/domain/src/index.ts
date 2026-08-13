@@ -16,13 +16,23 @@ import { assertResearchCapability } from "./research-orchestration.js";
 
 export { canonicalizeSource, canonicalizeSourceUrl, extractSourceUrl } from "./source-canonicalizer.js";
 
-export { AuthoringService, type AuthoringExecutionResult, inferAuthoringKind } from "./authoring.js";
+export { AuthoringService, createCoverageBindingForArtifact, type AuthoringExecutionResult, inferAuthoringKind } from "./authoring.js";
 export { BuildService, type BuildExecutionResult } from "./build.js";
 export { ConversionService, type ConversionExecutionResult } from "./conversion.js";
 export { ImportService, type ImportExecutionResult } from "./import.js";
 export { KnowledgeService, getTaskBoundChunksAndHints, reviewRunProjectionRevision, type FactReviewExecutionResult, type FactReviewRunExecutionResult, type KnowledgeExecutionResult, type TaskBoundChunksAndHintsResult } from "./knowledge.js";
 export { validateCurationClaims } from "./fact-curation-service.js";
-export { buildDefaultRequirementSet, coverageAssessmentFreshness, runFormalCoverageAssessment, runInitialCoverageAssessment } from "./coverage-assessment.js";
+export {
+  buildCoverageSnapshot,
+  buildDefaultRequirementSet,
+  coverageAssessmentFreshness,
+  fulfillUserSupplementResolution,
+  recordUserDecisionAndResolution,
+  requirementsResolved,
+  runFormalCoverageAssessment,
+  runInitialCoverageAssessment,
+  sourceFactsReady,
+} from "./coverage-assessment.js";
 export * from "./research-orchestration.js";
 export { ReviewService, type IssueUpdateAction, type IssueUpdateInput, type IssueUpdateResult, type ReviewExecutionResult } from "./review.js";
 export { validateWorkflow, type WorkflowDiagnostic, type WorkflowGatePhase, type WorkflowGateResult } from "./workflow-gate.js";
@@ -274,7 +284,6 @@ export class SourceService {
   }
 
   async selectCandidates(operationId: string, decisions: SourceSelectionDecision[], actorInput: ExecutionActorInput): Promise<SourceSelectionResult> {
-    assertResearchCapability(actorInput, "approve_source");
     const actors = resolveExecutionActors(actorInput);
     const actor = actors.executionAgent;
     const auditActor = actors.auditActor;

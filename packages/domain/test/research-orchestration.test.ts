@@ -3,7 +3,6 @@ import {
   createProjectState,
   coverageAssessmentRevision,
   coverageRequirementSetRevision,
-  buildDefaultRequirementSet,
   type CoverageAssessment,
   type CoverageRequirementSet,
   type ProjectState,
@@ -11,6 +10,7 @@ import {
 import {
   approveSourceCandidate,
   assertResearchCapability,
+  buildDefaultRequirementSet,
   claimResearchTask,
   createResearchBatchFromAssessment,
   exhaustResearchTask,
@@ -23,9 +23,7 @@ function setupStateWithAssessment(): { state: ProjectState; assessmentId: string
   let state = createProjectState("test-proj");
 
   // Create default requirement set
-  const reqSetObj = buildDefaultRequirementSet(["char-luna"], true, "blueprint", "bp-1", "rev-1", "user-1");
-  const reqSetRev = coverageRequirementSetRevision(reqSetObj);
-  const reqSet: CoverageRequirementSet = { ...reqSetObj, id: "reqset-1", revision: reqSetRev, created_at: new Date().toISOString() };
+  const reqSet = buildDefaultRequirementSet(state, "user-1");
 
   // Create assessment with missing items
   const assessmentObj = {
@@ -116,11 +114,12 @@ describe("Research Orchestration (Batches 4-6)", () => {
     expect(result.lineages[0]!.requirement_id).toBe("req.appearance");
 
     // Deduplication check: submit identical candidate URL
+    const runningTask = result.state.coverage_research_tasks.find((t) => t.id === claimed.task.id)!;
     const resubmit = submitResearchTaskCandidates(
       result.state,
-      claimed.task.id,
-      claimed.task.claim_generation,
-      claimed.task.lease_owner!,
+      runningTask.id,
+      runningTask.claim_generation,
+      runningTask.lease_owner!,
       candidateInputs,
       "researcher-1",
     );
