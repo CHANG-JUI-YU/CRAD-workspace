@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { decodeOperationCommand } from "./operations.js";
+import { coverageAssessmentSchema, coverageRequirementIdSchema, coverageRequirementSetSchema, coverageUserDecisionSchema } from "./coverage.js";
 
 const sourceCandidateSchema = z.object({
   id: z.string().min(1),
@@ -67,6 +68,9 @@ const factSchema = z.object({
   value: z.string().min(1).optional(),
   classification: z.enum(["identity", "trait", "event", "relationship", "world", "other"]).optional(),
   entity_refs: z.array(z.string().min(1)).default([]),
+  suggested_entity_refs: z.array(z.string().min(1)).optional(),
+  suggested_coverage_targets: z.array(coverageRequirementIdSchema).optional(),
+  coverage_targets: z.array(coverageRequirementIdSchema).optional(),
   coverage: z.array(z.string().min(1)).optional(),
   status: z.enum(["candidate", "accepted", "rejected", "conflict"]),
   confidence: z.number().min(0).max(1),
@@ -428,7 +432,7 @@ export const interviewStateSchema = z.object({
 }).strict();
 
 export const projectStateSchema = z.object({
-  schema_version: z.literal(1),
+  schema_version: z.literal(2),
   project_id: z.string().min(1),
   project_name: z.string().min(1).optional(),
   project_slug: z.string().min(1).optional(),
@@ -454,4 +458,7 @@ export const projectStateSchema = z.object({
   operations: z.array(operationSchema),
   audit: z.array(auditEventSchema),
   interview: interviewStateSchema.default(() => ({ schema_version: 1 as const, status: "idle" as const, flow: "new_project" as const, answers: [], values: {} })),
+  coverage_requirement_sets: z.array(coverageRequirementSetSchema).default([]),
+  coverage_assessments: z.array(coverageAssessmentSchema).default([]),
+  coverage_user_decisions: z.array(coverageUserDecisionSchema).default([]),
 }).strict();

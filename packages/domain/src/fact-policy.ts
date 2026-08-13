@@ -4,6 +4,8 @@ import {
   CoreError,
   computeProjectProjection,
   createEntityMatcher,
+  coverageRequirementIdForDimension,
+  isCoverageRequirementId,
   isFactCoverageDimension,
   type FactClassification,
   type FactClaim,
@@ -16,6 +18,24 @@ import {
 } from "@st-workspace/core";
 
 export const FACT_REVIEW_POLICY_REVISION = contentHash("fact-review-strict-v1");
+
+export function suggestedTargetsForCoverage(coverage: readonly string[] | undefined): string[] {
+  const targets: string[] = [];
+  for (const dimension of coverage ?? []) {
+    const id = coverageRequirementIdForDimension(dimension);
+    if (id !== undefined && !targets.includes(id)) targets.push(id);
+  }
+  return targets;
+}
+
+export function assertCoverageTargetsValid(targets: readonly string[] | undefined, field: string): void {
+  if (targets === undefined) return;
+  for (const target of targets) {
+    if (!isCoverageRequirementId(target)) {
+      throw new CoreError("COVERAGE_TARGET_INVALID", `${field} contains unknown coverage requirement id "${target}".`, true);
+    }
+  }
+}
 
 export function normalize(value: string): string {
   return value.toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");

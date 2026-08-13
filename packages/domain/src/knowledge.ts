@@ -30,6 +30,7 @@ import {
   FACT_REVIEW_POLICY_REVISION as PIPELINE_FACT_REVIEW_POLICY_REVISION,
   GENERIC_PREDICATES as PIPELINE_GENERIC_PREDICATES,
   acceptedFactRevision,
+  assertCoverageTargetsValid,
   assertStrictFactQuality as assertPipelineFactQuality,
   contradictingAcceptedFacts as pipelineContradictingAcceptedFacts,
   evidenceRevision,
@@ -804,7 +805,7 @@ export class KnowledgeService {
     }
     const targetIds: string[] = [];
     const records: FactReviewDecisionRecord[] = [];
-    const updates = new Map<string, { decision: FactDecision; evidence: FactEvidenceReference[]; record: FactReviewDecisionRecord; entity_refs: string[]; coverage: string[] }>();
+    const updates = new Map<string, { decision: FactDecision; evidence: FactEvidenceReference[]; record: FactReviewDecisionRecord; entity_refs: string[]; coverage: string[]; coverage_targets?: string[] }>();
     const matcher = createEntityMatcher(initial);
     const strictFactPolicy = initial.interview.flow === "source_adaptation" || computeProjectProjection(initial).intent.is_source_adaptation || matcher.entities.length > 0;
     let skippedCount = 0;
@@ -841,9 +842,16 @@ export class KnowledgeService {
       const evidence = decision.decision === "accept" || decision.evidence.length > 0 || structuredEvidenceCount > 0
         ? strictEvidenceReferences(decision, target, initial.sources, initial.knowledge_chunks, decision.decision === "accept")
         : [];
-      const effectiveEntityRefs = normalizeFactEntityRefs(initial, decision.entity_refs ?? target.entity_refs ?? [], target.subject, target.classification);
+      const effectiveEntityRefs = normalizeFactEntityRefs(initial, decision.accepted_entity_refs ?? decision.entity_refs ?? target.entity_refs ?? [], target.subject, target.classification);
       const effectiveCoverage = (decision.coverage ?? []).length > 0 ? [...new Set(decision.coverage ?? [])] : [...(target.coverage ?? [])];
-      const effectiveFact: FactRecord = { ...target, entity_refs: effectiveEntityRefs, coverage: effectiveCoverage };
+      assertCoverageTargetsValid(decision.accepted_coverage_targets, "accepted_coverage_targets");
+      const effectiveCoverageTargets = decision.accepted_coverage_targets ?? target.suggested_coverage_targets;
+      const effectiveFact: FactRecord = {
+        ...target,
+        entity_refs: effectiveEntityRefs,
+        coverage: effectiveCoverage,
+        ...(effectiveCoverageTargets === undefined ? {} : { coverage_targets: [...effectiveCoverageTargets] }),
+      };
       if (decision.decision === "accept") assertPipelineFactQuality(effectiveFact, { matcher, strictEntity: strictFactPolicy, strictCoverage: strictFactPolicy, strictQuality: strictFactPolicy });
       let finalStatus: FactReviewDecisionStatus = status;
       let finalReason = decision.reason;
@@ -880,7 +888,14 @@ export class KnowledgeService {
         created_at: now(),
       };
       records.push(record);
-      updates.set(target.id, { decision, evidence, record, entity_refs: effectiveEntityRefs, coverage: effectiveCoverage });
+        updates.set(target.id, {
+          decision,
+          evidence,
+          record,
+          entity_refs: effectiveEntityRefs,
+          coverage: effectiveCoverage,
+          ...(status === "accepted" && effectiveCoverageTargets !== undefined ? { coverage_targets: [...effectiveCoverageTargets] } : {}),
+        });
     }
     const conflictCount = records.filter((record) => record.decision === "conflict").length;
     const summary = `Fact review run ${run.id}: applied=${records.length}, skipped=${skippedCount}, conflict=${conflictCount}.${skippedCount > 0 ? ` skipped ${skippedCount} already-adjudicated candidates.` : ""}`;
@@ -929,6 +944,7 @@ export class KnowledgeService {
               ...fact,
               status: update.record.decision === "accepted" ? "accepted" : update.record.decision === "rejected" ? "rejected" : update.record.decision === "conflict" ? "conflict" : "candidate",
               entity_refs: update.entity_refs,
+              ...(update.coverage_targets === undefined ? {} : { coverage_targets: update.coverage_targets }),
               evidence: [...new Set([...fact.evidence, ...addedEvidence])],
               ...(update.evidence.length > 0 ? { evidence_refs: [...(fact.evidence_refs ?? []), ...update.evidence] } : {}),
               ...(update.coverage.length > 0 ? { coverage: update.coverage } : {}),

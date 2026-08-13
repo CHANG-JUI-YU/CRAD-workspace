@@ -819,4 +819,74 @@ describe("knowledge, authoring and review services", () => {
       expect(unlimited.next_cursor).toBeUndefined();
     });
   });
+
+  describe("coverage targets", () => {
+    it("persists suggested coverage targets and entity refs from curation claims", async () => {
+      const repository = new MemoryProjectRepository("demo-coverage-suggest");
+      await repository.commit(0, (state) => ({ ...state, operations: [operation("op-curation-3", "authoring")], sources: [{ id: "source-official", candidate_id: "candidate-official", title: "official page", canonical_text: "Yukino is direct and calm.", original_hash: contentHash("x"), revision: contentHash("x"), media_type: "text/plain", created_at: new Date().toISOString() }] }));
+      const claim: FactClaim = {
+        subject: "Yukino", predicate: "has_trait", value: "direct", classification: "trait", confidence: 0.9,
+        coverage: ["character", "personality"], evidence: [{ source: "official page", quote: "Yukino is direct and calm." }],
+        suggested_entity_refs: ["yukino"], suggested_coverage_targets: ["req.personality"],
+      };
+      await new KnowledgeService(repository).applyCuration("op-curation-3", [claim], "curator");
+      const state = await repository.read();
+      expect(state.facts[0]?.suggested_coverage_targets).toEqual(["req.personality"]);
+      expect(state.facts[0]?.suggested_entity_refs).toEqual(["yukino"]);
+      expect(state.facts[0]?.coverage_targets).toBeUndefined();
+    });
+
+    it("lets a reviewer replace suggested targets with canonical coverage targets", async () => {
+      const repository = new MemoryProjectRepository("demo-coverage-replace");
+      const now = new Date().toISOString();
+      const source: SourceRecord = { id: "source-official", candidate_id: "candidate-official", title: "official page", canonical_text: "Yukino is direct and calm.", original_hash: contentHash("x"), revision: contentHash("x"), media_type: "text/plain", created_at: now };
+      await repository.commit(0, (state) => ({
+        ...state,
+        sources: [source],
+        knowledge_chunks: [{ id: "chunk-cov", source_id: source.id, ordinal: 0, text: "Yukino is direct and calm.", hash: contentHash("Yukino is direct and calm."), extractor_revision: "extractor-v1", created_at: now }],
+        operations: [operation("op-curation-4", "authoring"), operation("op-review-4", "review")],
+        facts: [{ id: "fact-cov", candidate_occurrence_id: "occ-cov", statement: "Yukino has_trait direct", subject: "Yukino", predicate: "has_trait", value: "direct", classification: "trait", coverage: ["personality"], suggested_coverage_targets: ["req.personality"], status: "candidate" as const, confidence: 0.8, source_ids: [source.id], evidence: ["Yukino is direct and calm."], evidence_refs: [{ source_id: source.id, source_revision_id: source.revision, quote: "Yukino is direct and calm." }], fact_revision: 1, created_at: now, updated_at: now, created_by: "curator" }],
+      }));
+      const service = new KnowledgeService(repository);
+      const run = await service.beginFactReviewRun("op-review-4", "fact-reviewer-1");
+      const candidate = (await service.factReviewContext()).candidates[0]!;
+      const decision: FactDecision = {
+        candidate_occurrence_id: candidate.candidate_occurrence_id,
+        claim: candidate.statement,
+        decision: "accept",
+        reason: "Supported by the official page.",
+        evidence: [{ source: source.title, quote: "Yukino is direct and calm." }],
+        accepted_coverage_targets: ["req.speech"],
+      };
+      const applied = await service.applyReviewBatch("op-review-4", [decision], "fact-reviewer-1", "fact-reviewer-1", run.id);
+      expect(applied.status).toBe("completed");
+      const state = await repository.read();
+      expect(state.facts.find((item) => item.id === "fact-cov")?.coverage_targets).toEqual(["req.speech"]);
+    });
+
+    it("rejects coverage targets outside the requirement catalog", async () => {
+      const repository = new MemoryProjectRepository("demo-coverage-invalid");
+      const now = new Date().toISOString();
+      const source: SourceRecord = { id: "source-official", candidate_id: "candidate-official", title: "official page", canonical_text: "Yukino is direct and calm.", original_hash: contentHash("x"), revision: contentHash("x"), media_type: "text/plain", created_at: now };
+      await repository.commit(0, (state) => ({
+        ...state,
+        sources: [source],
+        knowledge_chunks: [{ id: "chunk-inv", source_id: source.id, ordinal: 0, text: "Yukino is direct and calm.", hash: contentHash("Yukino is direct and calm."), extractor_revision: "extractor-v1", created_at: now }],
+        operations: [operation("op-curation-5", "authoring"), operation("op-review-5", "review")],
+        facts: [{ id: "fact-inv", candidate_occurrence_id: "occ-inv", statement: "Yukino has_trait direct", subject: "Yukino", predicate: "has_trait", value: "direct", classification: "trait", coverage: ["personality"], suggested_coverage_targets: ["req.personality"], status: "candidate" as const, confidence: 0.8, source_ids: [source.id], evidence: ["Yukino is direct and calm."], evidence_refs: [{ source_id: source.id, source_revision_id: source.revision, quote: "Yukino is direct and calm." }], fact_revision: 1, created_at: now, updated_at: now, created_by: "curator" }],
+      }));
+      const service = new KnowledgeService(repository);
+      const run = await service.beginFactReviewRun("op-review-5", "fact-reviewer-1");
+      const candidate = (await service.factReviewContext()).candidates[0]!;
+      const decision: FactDecision = {
+        candidate_occurrence_id: candidate.candidate_occurrence_id,
+        claim: candidate.statement,
+        decision: "accept",
+        reason: "Supported by the official page.",
+        evidence: [{ source: source.title, quote: "Yukino is direct and calm." }],
+        accepted_coverage_targets: ["req.not-a-real-dimension"],
+      };
+      await expect(service.applyReviewBatch("op-review-5", [decision], "fact-reviewer-1", "fact-reviewer-1", run.id)).rejects.toMatchObject({ code: "COVERAGE_TARGET_INVALID" });
+    });
+  });
 });

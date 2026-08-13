@@ -1,5 +1,5 @@
 import { canonicalJson, contentHash, internalId, type FactClaim, type FactRecord, type SourceRecord } from "@st-workspace/core";
-import { evidenceRevision, evidenceText, sourceMatches, structureSentence, coverageForClassification } from "./fact-policy.js";
+import { evidenceRevision, evidenceText, sourceMatches, structureSentence, coverageForClassification, suggestedTargetsForCoverage } from "./fact-policy.js";
 import { factKey, mergeFactEvidence } from "./fact-projection.js";
 
 function now(): string { return new Date().toISOString(); }
@@ -21,12 +21,14 @@ export function claimOccurrenceId(claim: FactClaim, sources: readonly SourceReco
 
 export function factFromSentence(source: SourceRecord, statement: string, actor: string, ordinal: number, curationRunId?: string): FactRecord {
   const structured = structureSentence(source.title, statement);
+  const coverage = coverageForClassification(structured.classification ?? "other");
   const fact: FactRecord = {
     id: internalId("fact"),
     candidate_occurrence_id: candidateOccurrenceId(source.id, source.revision, statement, ordinal),
     statement,
     ...structured,
-    coverage: coverageForClassification(structured.classification ?? "other"),
+    coverage,
+    suggested_coverage_targets: suggestedTargetsForCoverage(coverage),
     status: "candidate",
     confidence: 0.7,
     source_ids: [source.id],
@@ -54,6 +56,8 @@ export function claimToFact(claim: FactClaim, sourceRecords: readonly SourceReco
     value: claim.value,
     classification: claim.classification,
     ...(claim.entity_refs === undefined ? {} : { entity_refs: [...claim.entity_refs] }),
+    ...(claim.suggested_entity_refs === undefined ? {} : { suggested_entity_refs: [...claim.suggested_entity_refs] }),
+    ...(claim.suggested_coverage_targets === undefined ? {} : { suggested_coverage_targets: [...claim.suggested_coverage_targets] }),
     coverage: claim.coverage,
     status: "candidate",
     confidence: claim.confidence,

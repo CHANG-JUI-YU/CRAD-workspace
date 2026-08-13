@@ -932,6 +932,9 @@ export class FileProjectRepository implements ProjectRepository {
     files.push({ path: "sources/manifest.json", content: canonicalJson({ candidates: state.candidates, sources: state.sources }) + "\n" });
     files.push({ path: "knowledge/chunks.json", content: canonicalJson(state.knowledge_chunks) + "\n" });
     files.push({ path: "facts/register.json", content: canonicalJson({ facts: state.facts, issues: state.issues, review_passes: state.fact_review_passes, review_runs: state.fact_review_runs, review_decisions: state.fact_review_decisions }) + "\n" });
+    files.push({ path: ".workspace/coverage-requirements.json", content: canonicalJson({ requirement_sets: state.coverage_requirement_sets }) + "\n" });
+    files.push({ path: ".workspace/coverage-assessments.json", content: canonicalJson({ assessments: state.coverage_assessments }) + "\n" });
+    files.push({ path: ".workspace/coverage-user-decisions.json", content: canonicalJson({ user_decisions: state.coverage_user_decisions }) + "\n" });
     const latestArtifacts = new Map<string, ArtifactRecord>();
     for (const artifact of state.artifacts) latestArtifacts.set(artifact.key, artifact);
     for (const artifact of state.artifacts) {

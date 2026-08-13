@@ -62,6 +62,8 @@ import {
   type RepairReport,
   type FactRecord,
   type FactClassification,
+  type CoverageAssessment,
+  type CoverageRequirementSet,
   type ExecutionContext,
   type ExecutionLeaseContext,
 } from "@st-workspace/core";
@@ -88,6 +90,10 @@ import {
   type ReviewExecutionResult,
   type FactReviewExecutionResult,
   type KnowledgeExecutionResult,
+  buildDefaultRequirementSet,
+  coverageAssessmentFreshness,
+  runFormalCoverageAssessment,
+  runInitialCoverageAssessment,
 } from "@st-workspace/domain";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
 import {
@@ -2328,6 +2334,44 @@ export class WorkspaceRuntime {
 
   async factReviewContext(options?: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification; reviewer_identity?: string }): Promise<FactReviewContext> {
     return factReviewContextQuery({ repository: this.repository, knowledge: this.knowledge }, options);
+  }
+
+  private async requirementSetFor(state: Awaited<ReturnType<ProjectRepository["read"]>>): Promise<CoverageRequirementSet> {
+    const latest = state.coverage_requirement_sets.at(-1);
+    if (latest !== undefined) return latest;
+    return buildDefaultRequirementSet(state, "system");
+  }
+
+  async coverageRequirementSet(): Promise<CoverageRequirementSet> {
+    const state = await this.repository.read();
+    return this.requirementSetFor(state);
+  }
+
+  async coverageAssessment(pass: "initial" | "formal"): Promise<{ assessment: CoverageAssessment; requirement_set: CoverageRequirementSet; current: boolean }> {
+    const state = await this.repository.read();
+    const requirementSet = await this.requirementSetFor(state);
+    const operationId = internalId("operation");
+    const assessment = pass === "initial"
+      ? runInitialCoverageAssessment(state, requirementSet, operationId, "system")
+      : runFormalCoverageAssessment(state, requirementSet, operationId, "system");
+    const current = coverageAssessmentFreshness(state, assessment);
+    await this.repository.commit(state.revision, (currentState) => ({
+      ...currentState,
+      coverage_requirement_sets: currentState.coverage_requirement_sets.some((set) => set.id === requirementSet.id)
+        ? currentState.coverage_requirement_sets
+        : [...currentState.coverage_requirement_sets, requirementSet],
+      coverage_assessments: [...currentState.coverage_assessments, assessment],
+      audit: [...currentState.audit, {
+        id: internalId("audit"),
+        operation_id: operationId,
+        event: "coverage.assessment.recorded",
+        actor: "system",
+        occurred_at: now(),
+        project_revision: currentState.revision + 1,
+        details: { pass, assessment_id: assessment.id, assessment_revision: assessment.revision, requirement_set_revision: requirementSet.revision },
+      }],
+    }));
+    return { assessment, requirement_set: requirementSet, current };
   }
 
   async reextract(operationId: string, sourceIds: readonly string[], actor: string, extractorRevision?: string): Promise<KnowledgeExecutionResult> {

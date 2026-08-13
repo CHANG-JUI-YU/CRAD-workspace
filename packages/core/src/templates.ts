@@ -3,6 +3,7 @@ import { structuredZhujiModuleSchema, zhujiProposalValueSchema } from "./zhuji.j
 import { AUTHORING_KNOWLEDGE_RULES, type AuthoringKnowledgeContext } from "./authoring-context.js";
 import { wardrobeProposalValueSchema, type WardrobeProposal } from "./wardrobe.js";
 import { FACT_COVERAGE_DIMENSIONS, LEGACY_FACT_COVERAGE_DIMENSIONS } from "./fact-taxonomy.js";
+import { coverageRequirementIdSchema } from "./coverage.js";
 
 /**
  * Public, model-facing contracts for every migrated Agent/Skill.
@@ -395,6 +396,8 @@ export const factClaimSchema = z
     classification: z.enum(["identity", "trait", "event", "relationship", "world", "other"]),
     confidence: z.number().min(0).max(1),
     entity_refs: z.array(text).optional(),
+    suggested_entity_refs: z.array(text).optional(),
+    suggested_coverage_targets: z.array(coverageRequirementIdSchema).optional(),
     coverage: z.array(z.enum([...FACT_COVERAGE_DIMENSIONS, ...LEGACY_FACT_COVERAGE_DIMENSIONS] as [string, ...string[]])).default([]),
     evidence: z.array(factEvidenceSchema).min(1),
   })
@@ -413,6 +416,8 @@ export const factDecisionSchema = z
     evidence: z.array(factEvidenceSchema).default([]),
     evidence_refs: z.array(factEvidenceReferenceSchema).default([]),
     entity_refs: z.array(text).optional(),
+    accepted_entity_refs: z.array(text).optional(),
+    accepted_coverage_targets: z.array(coverageRequirementIdSchema).optional(),
     coverage: z.array(z.enum([...FACT_COVERAGE_DIMENSIONS, ...LEGACY_FACT_COVERAGE_DIMENSIONS] as [string, ...string[]])).default([]),
   })
   .strict()

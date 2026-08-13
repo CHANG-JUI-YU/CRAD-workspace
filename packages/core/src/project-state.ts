@@ -1,6 +1,7 @@
 import { createInterviewState, type InterviewState } from "./interview.js";
 import type { AdaptationDecision } from "./authoring-context.js";
 import { canonicalJson, contentHash, internalId, CoreError } from "./core-utilities.js";
+import { coverageRequirementIdForDimension, type CoverageAssessment, type CoverageRequirementSet, type CoverageUserDecisionRecord } from "./coverage.js";
 import type { OperationCommand, OperationRecord, AuditEvent } from "./operations.js";
 
 export type OperationStatus =
@@ -207,6 +208,12 @@ export interface FactRecord {
   classification?: FactClassification;
   /** Stable Blueprint roster ids; legacy states may omit this field. */
   entity_refs?: string[];
+  /** Curator-suggested Blueprint roster ids, not yet confirmed by a Reviewer. */
+  suggested_entity_refs?: string[];
+  /** Curator-suggested coverage requirement ids, not yet confirmed by a Reviewer. */
+  suggested_coverage_targets?: string[];
+  /** Reviewer-confirmed canonical coverage requirement ids (replacement of suggestions). */
+  coverage_targets?: string[];
   coverage?: string[];
   status: FactStatus;
   confidence: number;
@@ -414,7 +421,7 @@ export interface OperationAttachmentRef {
 }
 
 export interface ProjectState {
-  schema_version: 1;
+  schema_version: 2;
   project_id: string;
   project_name?: string;
   project_slug?: string;
@@ -440,11 +447,14 @@ export interface ProjectState {
   operations: OperationRecord[];
   audit: AuditEvent[];
   interview: InterviewState;
+  coverage_requirement_sets: CoverageRequirementSet[];
+  coverage_assessments: CoverageAssessment[];
+  coverage_user_decisions: CoverageUserDecisionRecord[];
 }
 
 export function createProjectState(projectId: string): ProjectState {
   return {
-    schema_version: 1,
+    schema_version: 2,
     project_id: projectId,
     project_status: "uninitialized",
     revision: 0,
@@ -468,6 +478,9 @@ export function createProjectState(projectId: string): ProjectState {
     operations: [],
     audit: [],
     interview: createInterviewState(),
+    coverage_requirement_sets: [],
+    coverage_assessments: [],
+    coverage_user_decisions: [],
   };
 }
 
@@ -507,8 +520,41 @@ export function backfillLegacyFactReviewHistory(state: ProjectState): ProjectSta
   return { ...state, fact_review_decisions: decisions };
 }
 
+/**
+ * Deterministic, re-entrant v1 -> v2 migration. v1 states lack the coverage
+ * ledger arrays and the target-separated fact fields; this migration only
+ * adds empty ledgers and maps recognizable flat coverage dimensions to
+ * suggested coverage requirement ids. It never promotes subject names to
+ * canonical entity refs and never claims formal coverage readiness.
+ */
+export function migrateProjectStateV1ToV2(state: Record<string, unknown>): Record<string, unknown> {
+  const facts = Array.isArray(state.facts) ? state.facts.map((rawFact) => {
+    const fact = rawFact as Record<string, unknown>;
+    if (typeof fact !== "object" || fact === null) return fact;
+    const coverage = Array.isArray(fact.coverage) ? fact.coverage.filter((value): value is string => typeof value === "string") : [];
+    const suggested = coverage.flatMap((dimension) => {
+      const id = coverageRequirementIdForDimension(dimension);
+      return id === undefined ? [] : [id];
+    });
+    return {
+      ...fact,
+      ...(suggested.length > 0 ? { suggested_coverage_targets: [...new Set(suggested)] } : {}),
+    };
+  }) : [];
+  return {
+    ...state,
+    schema_version: 2,
+    facts,
+    coverage_requirement_sets: [],
+    coverage_assessments: [],
+    coverage_user_decisions: [],
+  };
+}
+
 export function validateState(state: ProjectState): ProjectState {
-  const parsed = projectStateSchema.safeParse(state);
+  const raw = state as unknown as Record<string, unknown>;
+  const candidate = raw.schema_version === 1 ? migrateProjectStateV1ToV2(raw) : raw;
+  const parsed = projectStateSchema.safeParse(candidate);
   if (!parsed.success) throw new CoreError("STATE_INVALID", parsed.error.message);
   return backfillArtifactDependencyFingerprints(backfillLegacyFactReviewHistory(parsed.data as unknown as ProjectState));
 }

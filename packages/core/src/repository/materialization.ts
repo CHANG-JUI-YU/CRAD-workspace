@@ -216,6 +216,9 @@ function controlMaterializedFiles(state: ProjectState): RepositoryFile[] {
     { path: "sources/manifest.json", content: canonicalJson({ candidates: state.candidates, sources: state.sources }) + "\n" },
     { path: "knowledge/chunks.json", content: canonicalJson(state.knowledge_chunks) + "\n" },
     { path: "facts/register.json", content: canonicalJson({ facts: state.facts, issues: state.issues, review_passes: state.fact_review_passes, review_runs: state.fact_review_runs, review_decisions: state.fact_review_decisions }) + "\n" },
+    { path: ".workspace/coverage-requirements.json", content: canonicalJson({ requirement_sets: state.coverage_requirement_sets }) + "\n" },
+    { path: ".workspace/coverage-assessments.json", content: canonicalJson({ assessments: state.coverage_assessments }) + "\n" },
+    { path: ".workspace/coverage-user-decisions.json", content: canonicalJson({ user_decisions: state.coverage_user_decisions }) + "\n" },
   ];
 }
 
