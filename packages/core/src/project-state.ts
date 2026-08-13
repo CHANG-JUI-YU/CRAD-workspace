@@ -14,6 +14,7 @@ import {
   type ResearchTaskRecord,
 } from "./coverage.js";
 import type { OperationCommand, OperationRecord, AuditEvent } from "./operations.js";
+import type { ProvenanceCompositionSummary } from "./provenance.js";
 
 export type OperationStatus =
   | "created"
@@ -389,6 +390,7 @@ export interface BuildRecord {
   created_at: string;
   quality_policy_snapshot?: QualityPolicySnapshot;
   coverage_snapshot?: CoverageSnapshot;
+  provenance_summary?: ProvenanceCompositionSummary;
 }
 
 export interface PublishRecord {
@@ -404,6 +406,7 @@ export interface PublishRecord {
   export_png_path?: string;
   created_at: string;
   coverage_snapshot?: CoverageSnapshot;
+  provenance_summary?: ProvenanceCompositionSummary;
 }
 
 export interface ImportRecord {

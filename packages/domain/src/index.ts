@@ -67,6 +67,36 @@ export {
 } from "./source-adaptation-workflow.js";
 export { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput, type ResolvedExecutionActors } from "./execution-context.js";
 export {
+  deriveStructuredPublishDiagnostics,
+  type PublishDiagnosticAffected,
+  type PublishDiagnosticAffectedKind,
+  type PublishDiagnosticRow,
+  type PublishDiagnosticTarget,
+  type StructuredPublishDiagnostics,
+} from "./publish-diagnostics.js";
+export {
+  coverageAssessmentIsFresh,
+  deriveCoverageCenterMatrix,
+  deriveResearchMonitor,
+  type CoverageCenterCell,
+  type CoverageCenterCellStatus,
+  type CoverageCenterMatrix,
+  type ResearchMonitor,
+  type ResearchMonitorBatchView,
+  type ResearchMonitorTaskView,
+} from "./coverage-center.js";
+export {
+  deriveArtifactCoverageLineage,
+  type ArtifactBindingState,
+  type ArtifactCoverageLineage,
+} from "./artifact-lineage.js";
+export {
+  deriveEvidenceContextViews,
+  deriveEvidenceReferenceStale,
+  type EvidenceContextView,
+} from "./evidence-context.js";
+export { deriveSummaryKPIs, type SummaryKPIs } from "./summary-kpis.js";
+export {
   PALETTE_REQUIRED_MODULES,
   ZHUJI_REQUIRED_MODULES,
   buildRequiredArtifactManifest,

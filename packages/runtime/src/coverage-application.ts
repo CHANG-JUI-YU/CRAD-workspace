@@ -13,17 +13,21 @@ import {
   claimResearchTask,
   createResearchBatchFromAssessment,
   createUserSupplementSource,
+  deriveCoverageCenterMatrix,
   deriveCoverageReadiness,
   deriveDownstreamInvalidation,
+  deriveResearchMonitor,
   emptyDownstreamInvalidationReport,
   exhaustResearchTask,
   previewResolutionConsequences,
   recordUserDecisionAndResolution,
   reviseResearchTask,
   submitResearchTaskCandidates,
+  type CoverageCenterMatrix,
   type DownstreamInvalidationReport,
   type ExecutionActorInput,
   type ResearchCandidateInput,
+  type ResearchMonitor,
   type ResolutionConsequencesPreview,
   type SourceFetcher,
 } from "@st-workspace/domain";
@@ -414,5 +418,13 @@ export async function dashboardCoverage(deps: CoverageApplicationDeps): Promise<
     cells,
     blockers: readiness.blockers,
     ready: readiness.ready,
+  };
+}
+
+export async function dashboardCoverageCenter(deps: CoverageApplicationDeps): Promise<{ matrix: CoverageCenterMatrix; monitor: ResearchMonitor }> {
+  const state = await deps.repository.read();
+  return {
+    matrix: deriveCoverageCenterMatrix(state),
+    monitor: deriveResearchMonitor(state, new Date().toISOString()),
   };
 }

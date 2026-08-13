@@ -1,4 +1,4 @@
-import type { AttachmentStore, RepairInspection } from "@st-workspace/core";
+import type { AttachmentStore, ProvenanceCompositionSummary, RepairInspection } from "@st-workspace/core";
 import type { SourceFetcher } from "@st-workspace/domain";
 
 export interface DashboardProjectView {
@@ -166,6 +166,7 @@ export interface DashboardBuildReadiness {
   png_expected: boolean;
   missing: string[];
   diagnostics: Array<{ code: string; severity: string; message: string }>;
+  provenance_summary?: ProvenanceCompositionSummary;
 }
 
 export interface TavernCheckResult {

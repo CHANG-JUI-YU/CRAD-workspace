@@ -191,6 +191,162 @@ export const DASHBOARD_PANELS_REVIEW_JS = `      function renderQuality(snapshot
         return row;
       }
 
+      function evidenceSourceDetailElement(source) {
+        var box = document.createElement("div");
+        box.className = "workflow-stage";
+        var title = document.createElement("div");
+        title.className = "workflow-stage-title";
+        var label = document.createElement("span");
+        label.textContent = "來源 " + (firstString(source, ["title"]) || firstString(source, ["id"]) || "?");
+        title.append(label);
+        box.append(title);
+        var meta = document.createElement("div");
+        meta.className = "muted";
+        var metaParts = [];
+        if (source.id) metaParts.push("id " + source.id);
+        if (source.revision) metaParts.push("revision " + String(source.revision).slice(0, 8));
+        if (source.media_type) metaParts.push("型別 " + source.media_type);
+        if (source.canonical_text) metaParts.push("chars " + source.canonical_text.length);
+        meta.textContent = metaParts.join(" · ");
+        box.append(meta);
+        if (source.canonical_text) {
+          var body = document.createElement("div");
+          body.className = "muted";
+          body.textContent = "內文：" + source.canonical_text.slice(0, 600);
+          box.append(body);
+        }
+        if (source.url) {
+          var link = document.createElement("a");
+          link.href = source.url;
+          link.target = "_blank";
+          link.rel = "noopener";
+          link.textContent = "開啟外部來源";
+          box.append(link);
+        }
+        return box;
+      }
+
+      function showEvidenceSourceDetail(sourceId) {
+        var target = byId("evidence-source-detail");
+        target.textContent = "";
+        if (!sourceId) { target.textContent = "無法開啟來源：缺少來源 ID。"; return; }
+        target.textContent = "載入來源…";
+        requestJson("/workspace/dashboard/sources/" + encodeURIComponent(sourceId)).then(function (source) {
+          target.textContent = "";
+          target.append(evidenceSourceDetailElement(source));
+        }).catch(function (error) {
+          target.textContent = "";
+          setAreaError("evidence-message", error);
+        });
+      }
+
+      function evidenceContextBlock(ctx) {
+        var box = document.createElement("div");
+        box.className = "workflow-stage";
+        var title = document.createElement("div");
+        title.className = "workflow-stage-title";
+        var titleParts = [];
+        if (ctx.stale) {
+          var staleBadge = document.createElement("span");
+          staleBadge.className = "status-badge error";
+          staleBadge.textContent = ctx.stale_reason || "證據已過期";
+          title.append(staleBadge);
+        }
+        var label = document.createElement("span");
+        label.textContent = ctx.source_title || ctx.source_id || "來源";
+        title.append(label);
+        box.append(title);
+        var meta = document.createElement("div");
+        meta.className = "muted";
+        var metaParts = [];
+        metaParts.push("revision " + String(ctx.source_revision || "").slice(0, 8));
+        if (ctx.chunk_id) metaParts.push("chunk " + String(ctx.chunk_id).slice(0, 8) + (ctx.chunk_hash ? "@" + String(ctx.chunk_hash).slice(0, 8) : ""));
+        if (ctx.section_heading) metaParts.push("章節 " + ctx.section_heading);
+        if (ctx.paragraph) metaParts.push("段落 " + ctx.paragraph);
+        meta.textContent = metaParts.join(" · ");
+        box.append(meta);
+        if (ctx.preceding_context || ctx.evidence_span || ctx.following_context) {
+          var passage = document.createElement("div");
+          passage.className = "evidence-passage";
+          if (ctx.preceding_context) passage.append(document.createTextNode(ctx.preceding_context));
+          if (ctx.evidence_span && ctx.evidence_span.quote) {
+            var quote = document.createElement("strong");
+            quote.textContent = ctx.evidence_span.quote;
+            passage.append(quote);
+          }
+          if (ctx.following_context) passage.append(document.createTextNode(ctx.following_context));
+          box.append(passage);
+        }
+        var viewButton = document.createElement("button");
+        viewButton.type = "button";
+        viewButton.textContent = "查看來源";
+        viewButton.addEventListener("click", function () { showEvidenceSourceDetail(ctx.source_id); });
+        box.append(viewButton);
+        return box;
+      }
+
+      function renderEvidence(page) {
+        var target = byId("evidence-list");
+        target.textContent = "";
+        if (page === null || page === undefined) {
+          byId("evidence-message").textContent = "尚未取得證據上下文。";
+          return;
+        }
+        var candidates = Array.isArray(page.candidates) ? page.candidates : [];
+        if (candidates.length === 0) {
+          byId("evidence-message").textContent = "沒有待裁決的候選事實。";
+          return;
+        }
+        byId("evidence-message").textContent = "候選事實 " + candidates.length + " 筆；每筆顯示完整證據上下文。";
+        for (var i = 0; i < candidates.length; i += 1) {
+          var candidate = candidates[i];
+          if (!isRecord(candidate)) continue;
+          var row = document.createElement("div");
+          row.className = "fact-row fact-adjudication";
+          var text = document.createElement("span");
+          text.textContent = (firstString(candidate, ["statement"]) || "?");
+          row.append(text);
+          var contexts = Array.isArray(candidate.evidence_context) ? candidate.evidence_context : [];
+          for (var c = 0; c < contexts.length; c += 1) {
+            row.append(evidenceContextBlock(contexts[c]));
+          }
+          if (isRecord(page.run)) {
+            var runView = page.run;
+            if (page.projection_revision) runView.projection_revision = page.projection_revision;
+            var select = document.createElement("select");
+            var options = [["accept", "接受"], ["reject", "拒絕"], ["needs_evidence", "需補證據"], ["conflict", "衝突"]];
+            for (var o = 0; o < options.length; o += 1) {
+              var option = document.createElement("option");
+              option.value = options[o][0];
+              option.textContent = options[o][1];
+              select.append(option);
+            }
+            var reason = document.createElement("input");
+            reason.type = "text";
+            reason.placeholder = "裁決原因（必填）";
+            var submit = document.createElement("button");
+            submit.className = "button";
+            submit.textContent = "送出裁決";
+            submit.addEventListener("click", function () {
+              submitFactDecision(runView, candidate.candidate_occurrence_id, candidate.statement, select, reason, "/workspace/fact/review/batch");
+            });
+            row.append(select, reason, submit);
+          }
+          target.append(row);
+        }
+      }
+
+      async function loadEvidenceData() {
+        try {
+          var page = await requestJson("/workspace/dashboard/fact-review/evidence");
+          renderEvidence(page);
+          return page;
+        } catch (error) {
+          setAreaError("evidence-message", error);
+          throw error;
+        }
+      }
+
       function renderSourceFact(snapshot) {
         var candidates = Array.isArray(snapshot.candidates) ? snapshot.candidates : [];
         var sources = Array.isArray(snapshot.sources) ? snapshot.sources : [];

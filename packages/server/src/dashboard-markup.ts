@@ -49,6 +49,7 @@ export const DASHBOARD_MARKUP = `<body>
         <span id="status-badge" class="status-badge">讀取中</span>
       </div>
       <div id="status-summary" class="panel-message" aria-live="polite">正在讀取狀態…</div>
+      <div id="kpi-list" class="kpi-list"></div>
       <dl id="status-fields" class="field-list"></dl>
       <details class="raw-json">
         <summary>查看狀態原始 JSON</summary>
@@ -157,6 +158,7 @@ export const DASHBOARD_MARKUP = `<body>
       </div>
       <div id="readiness-message" class="panel-message" aria-live="polite">尚未執行就緒檢查。</div>
       <div id="readiness-list" class="readiness-list"></div>
+      <div id="provenance-summary" class="provenance-summary"></div>
     </section>
 
     <section class="panel panel-wide" aria-labelledby="artifact-heading">
@@ -228,6 +230,13 @@ export const DASHBOARD_MARKUP = `<body>
       <div id="source-list" class="source-list"></div>
       <div id="fact-list" class="fact-list"></div>
       <div id="fact-review-run" class="fact-list"></div>
+      <div class="coverage-center-heading">
+        <h3 id="evidence-heading">Fact Review 證據上下文</h3>
+        <p class="muted">待裁決事實的逐字引文、來源段落與前後文，以及證據失效狀態。</p>
+      </div>
+      <div id="evidence-message" class="panel-message" aria-live="polite">尚未取得證據上下文。</div>
+      <div id="evidence-list" class="fact-list"></div>
+      <div id="evidence-source-detail" class="fact-list"></div>
     </section>
 
     <section class="panel panel-wide" aria-labelledby="coverage-heading">
@@ -240,6 +249,13 @@ export const DASHBOARD_MARKUP = `<body>
       </div>
       <div id="coverage-message" class="panel-message" aria-live="polite">尚未取得覆蓋資料。</div>
       <div id="coverage-grid" class="coverage-grid"></div>
+      <div class="coverage-center-heading">
+        <h3 id="coverage-center-heading">覆蓋矩陣與研究監控</h3>
+        <p class="muted">角色 × 需求矩陣、研究批次與任務的即時狀態。</p>
+      </div>
+      <div id="coverage-center-message" class="panel-message" aria-live="polite">尚未取得覆蓋矩陣。</div>
+      <div id="coverage-center" class="coverage-center"></div>
+      <div id="research-monitor" class="research-monitor"></div>
     </section>
 
     <section class="panel panel-wide" aria-labelledby="workflow-heading">

@@ -211,6 +211,31 @@ export const DASHBOARD_PANELS_CORE_JS = `      function byId(value) {
         syncProjectSelection(record);
       }
 
+      function renderKpis(kpis) {
+        var target = byId("kpi-list");
+        target.textContent = "";
+        if (kpis === undefined || kpis === null) return;
+        var parts = [];
+        var rows = [
+          ["未解決需求", kpis.unresolved_requirements],
+          ["衝突", kpis.conflicts],
+          ["待補齊補充資料", kpis.pending_supplements],
+          ["進行中研究任務", kpis.active_research_tasks],
+          ["已過期評估", kpis.stale_assessments],
+          ["缺少綁定", kpis.missing_bindings],
+          ["過期綁定", kpis.stale_bindings],
+          ["來源佐證覆蓋率", kpis.source_backed_percent === null ? "不適用" : kpis.source_backed_percent + "%"],
+          ["創作補全覆蓋率", kpis.creative_completion_percent === null ? "不適用" : kpis.creative_completion_percent + "%"]
+        ];
+        for (var i = 0; i < rows.length; i += 1) {
+          var item = document.createElement("span");
+          item.className = "kpi-item";
+          item.textContent = rows[i][0] + "：" + rows[i][1];
+          parts.push(item);
+        }
+        target.append.apply(target, parts);
+      }
+
       var TARGET_QUESTION_SCOPES = {
         "continue_project": "將在目標專案上繼續工作，不會建立新的 Blueprint。",
         "world_project": "將在目標專案上補充世界設定，並以選定範圍更新其 Blueprint。",

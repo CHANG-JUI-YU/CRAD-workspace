@@ -1,4 +1,5 @@
 import {
+  buildProvenanceCompositionSummary,
   canonicalJson,
   computeBuildPlan,
   computeProjectProjection,
@@ -222,6 +223,7 @@ export class BuildService {
       }
     }
     const coverageSnapshot = latestAssessment === undefined ? undefined : buildCoverageSnapshot(initial, latestAssessment, plan);
+    const provenanceSummary = buildProvenanceCompositionSummary(initial, coverageSnapshot, hash);
 
     const build: BuildRecord = {
       id: internalId("build"),
@@ -234,6 +236,7 @@ export class BuildService {
       created_at: now(),
       quality_policy_snapshot: qualityPolicy,
       ...(coverageSnapshot === undefined ? {} : { coverage_snapshot: coverageSnapshot }),
+      provenance_summary: provenanceSummary,
     };
 
     if (errorDiagnostics.length > 0 || coverageDiagnostics.length > 0) {
@@ -276,6 +279,7 @@ export class BuildService {
       export_png_path: publishedCardPngExportPath(initial.project_name, initial.project_id, normalized.latestArtifacts, modeSelection),
       created_at: now(),
       ...(coverageSnapshot === undefined ? {} : { coverage_snapshot: coverageSnapshot }),
+      provenance_summary: provenanceSummary,
     } : undefined;
 
     const warningCount = buildWarnings.length + compiled.diagnostics.filter((item) => item.severity === "warning").length;

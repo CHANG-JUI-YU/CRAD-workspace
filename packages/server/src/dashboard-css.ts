@@ -162,6 +162,54 @@ export const DASHBOARD_CSS = `  <style>
     .workflow-stage button {
       margin-top: 0.45rem;
     }
+    .coverage-center-heading {
+      margin-top: 1rem;
+      font-size: 0.9rem;
+    }
+    .coverage-center-heading h3 {
+      margin: 0 0 0.25rem;
+    }
+    .coverage-center {
+      margin-top: 0.6rem;
+    }
+    .research-monitor {
+      margin-top: 0.6rem;
+      display: grid;
+      gap: 0.5rem;
+    }
+    .evidence-passage {
+      margin-top: 0.4rem;
+      padding: 0.4rem 0.55rem;
+      border-left: 3px solid #c9d6e0;
+      background: #f7fafc;
+      font-size: 0.88rem;
+    }
+    .evidence-passage strong {
+      background: #fdecc8;
+      padding: 0 0.15rem;
+    }
+    .kpi-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.6rem;
+    }
+    .kpi-item {
+      border: 1px solid #dfe6ec;
+      border-radius: 8px;
+      padding: 0.3rem 0.55rem;
+      background: #fbfcfd;
+      font-size: 0.85rem;
+    }
+    .provenance-summary {
+      margin-top: 0.75rem;
+    }
+    .readiness-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      margin-bottom: 0.4rem;
+    }
     .field-list {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));

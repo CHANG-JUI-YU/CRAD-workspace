@@ -342,6 +342,7 @@ export async function buildReadiness(deps: BuildApplicationDeps): Promise<Dashbo
     png: publishedCardPngExportPath(state.project_name, state.project_id, current, outputMode),
   };
   const missing = manifest === undefined ? [] : manifest.characters.flatMap((character) => character.missing_modules.map((module) => `${character.character_id}:${module}`));
+  const latestBuild = [...state.builds].reverse().find((build) => build.status === "previewed" || build.status === "built");
   return {
     modes,
     ...(primary === undefined ? {} : { primary_character: primary }),
@@ -359,6 +360,7 @@ export async function buildReadiness(deps: BuildApplicationDeps): Promise<Dashbo
     png_expected: pngExpected,
     missing,
     diagnostics: manifest?.diagnostics ?? [],
+    ...(latestBuild?.provenance_summary === undefined ? {} : { provenance_summary: latestBuild.provenance_summary }),
   };
 }
 

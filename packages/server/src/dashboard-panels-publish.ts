@@ -154,6 +154,116 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         return hints[code] || "";
       }
 
+      function navigateDiagnosticTarget(target) {
+        if (target === undefined || target === null) return;
+        var panelIds = {
+          sources: "source-list",
+          artifacts: "artifact-list",
+          facts: "fact-list",
+          "fact-review": "fact-review-run",
+          coverage: "coverage-heading",
+          precheck: "precheck-matrix",
+          interview: "interview-heading",
+          readiness: "readiness-list",
+          quality: "quality-heading",
+          builds: "build-heading",
+          publishes: "readiness-list"
+        };
+        var anchor = null;
+        if (target.id) anchor = byId(target.id);
+        if (anchor === null || anchor === undefined) anchor = byId(panelIds[target.panel] || "readiness-list");
+        if (anchor !== null && anchor !== undefined) {
+          anchor.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }
+
+      function renderPublishDiagnostics(structured) {
+        var target = byId("readiness-list");
+        target.textContent = "";
+        if (structured === null || structured === undefined || !Array.isArray(structured.rows) || structured.rows.length === 0) {
+          byId("readiness-message").textContent = "就緒：可以發布。";
+          return;
+        }
+        var blocking = structured.rows.filter(function (item) { return item.severity === "error"; });
+        byId("readiness-message").textContent = blocking.length === 0
+          ? "有 " + structured.rows.length + " 條警告，不阻擋發布。"
+          : "有 " + blocking.length + " 條阻擋診斷；修復後再發布。";
+        for (var i = 0; i < structured.rows.length; i += 1) {
+          var row = structured.rows[i];
+          if (!isRecord(row)) continue;
+          var line = document.createElement("div");
+          line.className = "readiness-row";
+          var badge = document.createElement("span");
+          badge.className = "status-badge " + (row.severity === "error" ? "error" : "active");
+          badge.textContent = row.severity === "error" ? "阻擋" : "警告";
+          line.append(badge);
+          var text = document.createElement("span");
+          text.textContent = (firstString(row, ["code"]) || "?") + "： " + (firstString(row, ["message"]) || "");
+          line.append(text);
+          var detail = document.createElement("span");
+          detail.className = "readiness-hint";
+          var detailParts = [];
+          if (Array.isArray(row.affected) && row.affected.length > 0) {
+            for (var a = 0; a < row.affected.length; a += 1) {
+              var affected = row.affected[a];
+              var affectedLabel = affected.kind + " " + (affected.id ? affected.id.slice(0, 12) : "?");
+              if (affected.character_id) affectedLabel += "（" + affected.character_id + "）";
+              if (affected.requirement_id) affectedLabel += "／" + affected.requirement_id;
+              detailParts.push(affectedLabel);
+            }
+          }
+          if (row.next_action) detailParts.push("下一步：" + row.next_action);
+          detail.textContent = detailParts.join("；");
+          line.append(detail);
+          if (row.target !== undefined && row.target !== null) {
+            var go = document.createElement("button");
+            go.type = "button";
+            go.textContent = "前往";
+            go.addEventListener("click", function () { navigateDiagnosticTarget(row.target); });
+            line.append(go);
+          }
+          target.append(line);
+        }
+        if (structured.has_unknown === true) {
+          var note = document.createElement("div");
+          note.className = "muted";
+          note.textContent = "部分診斷缺少明確動作，已在 Readiness 面板標示。";
+          target.append(note);
+        }
+      }
+
+      function renderProvenanceSummary(summary) {
+        var target = byId("provenance-summary");
+        target.textContent = "";
+        if (summary === undefined || summary === null) return;
+        var box = document.createElement("div");
+        box.className = "workflow-stage";
+        var title = document.createElement("div");
+        title.className = "workflow-stage-title";
+        title.textContent = "來源組成（provenance composition）";
+        box.append(title);
+        var meta = document.createElement("div");
+        meta.className = "muted";
+        var parts = [];
+        if (summary.source_backed) parts.push("來源佐證 " + summary.source_backed.count);
+        if (summary.user_supplement) parts.push("使用者補充 " + summary.user_supplement.count);
+        if (summary.creative_completion) parts.push("創作補全 " + summary.creative_completion.count);
+        if (summary.overrides && summary.overrides.length > 0) parts.push("覆寫決策 " + summary.overrides.length);
+        if (summary.quality_overrides && summary.quality_overrides.length > 0) parts.push("品質覆寫 " + summary.quality_overrides.length);
+        if (summary.assessment) parts.push("評估 " + summary.assessment.id + "@" + summary.assessment.revision.slice(0, 8));
+        if (summary.requirement_set) parts.push("requirement set " + summary.requirement_set.revision.slice(0, 8));
+        if (summary.fact_review_run) parts.push("review run " + summary.fact_review_run.id.slice(0, 8));
+        if (summary.fact_projection_revision) parts.push("fact projection " + summary.fact_projection_revision.slice(0, 8));
+        if (summary.source_revisions && summary.source_revisions.length > 0) parts.push("來源 revisions " + summary.source_revisions.map(function (ref) { return ref.source_id + "@" + ref.revision.slice(0, 8); }).join(", "));
+        if (summary.resolution_ids && summary.resolution_ids.length > 0) parts.push("resolutions " + summary.resolution_ids.map(function (id) { return id.slice(0, 8); }).join(", "));
+        if (summary.authoring_binding_ids && summary.authoring_binding_ids.length > 0) parts.push("bindings " + summary.authoring_binding_ids.map(function (id) { return id.slice(0, 8); }).join(", "));
+        if (summary.coverage_snapshot_hash) parts.push("coverage snapshot " + summary.coverage_snapshot_hash.slice(0, 8));
+        if (summary.build_snapshot_hash) parts.push("build snapshot " + summary.build_snapshot_hash.slice(0, 8));
+        meta.textContent = parts.join(" · ");
+        box.append(meta);
+        target.append(box);
+      }
+
       function renderArtifactList(snapshot) {
         var target = byId("artifact-list");
         target.textContent = "";
@@ -208,7 +318,8 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
             makeActionButton("原始內容", function () { toggleArtifactRaw(row, current); }),
             makeActionButton("與前一版差異", function () { toggleArtifactDiff(row, current, revisions); }),
             makeActionButton("送審", function () { submitArtifactForReview(firstString(current, ["name"]) || firstString(current, ["id"]) || ""); }),
-            makeActionButton("下載", function () { downloadArtifact(current); })
+            makeActionButton("下載", function () { downloadArtifact(current); }),
+            makeActionButton("覆蓋關聯", function () { toggleArtifactLineage(row, current); })
           );
           row.append(badge, currentBadge, name, meta, actions);
           target.append(row);
@@ -224,6 +335,57 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         button.textContent = label;
         button.addEventListener("click", handler);
         return button;
+      }
+
+      function toggleArtifactLineage(row, artifact) {
+        var detail = findRowDetail(row, "artifact-lineage");
+        if (detail !== null) {
+          detail.hidden = !detail.hidden;
+          return;
+        }
+        var artifactId = firstString(artifact, ["id"]);
+        if (!artifactId) return;
+        var container = document.createElement("div");
+        container.className = "artifact-detail artifact-lineage";
+        var loading = document.createElement("div");
+        loading.textContent = "載入覆蓋關聯…";
+        container.append(loading);
+        row.append(container);
+        requestJson("/workspace/dashboard/artifacts/" + encodeURIComponent(artifactId) + "/coverage").then(function (lineage) {
+          container.textContent = "";
+          if (lineage === undefined || lineage === null) {
+            container.textContent = "此 artifact 不在覆蓋綁定範圍內。";
+            return;
+          }
+          var heading = document.createElement("div");
+          heading.className = "detail-heading";
+          var badge = document.createElement("span");
+          badge.className = "status-badge " + (lineage.state === "current" ? "ready" : "error");
+          badge.textContent = lineage.state;
+          heading.append(badge);
+          heading.append(" 覆蓋綁定");
+          container.append(heading);
+          if (lineage.reason) {
+            var reason = document.createElement("div");
+            reason.className = "muted";
+            reason.textContent = "原因：" + lineage.reason;
+            container.append(reason);
+          }
+          var parts = [];
+          if (lineage.assessment) parts.push("評估 " + lineage.assessment.id + "@" + lineage.assessment.revision.slice(0, 8));
+          if (lineage.requirement_set) parts.push("requirement set " + lineage.requirement_set.revision.slice(0, 8));
+          if (lineage.fact_projection_revision) parts.push("fact projection " + lineage.fact_projection_revision.slice(0, 8));
+          if (lineage.fact_review_run) parts.push("review run " + lineage.fact_review_run.id.slice(0, 8));
+          if (lineage.binding) parts.push("binding " + lineage.binding.id.slice(0, 8));
+          if (lineage.input_snapshot_hash) parts.push("input snapshot " + lineage.input_snapshot_hash.slice(0, 8));
+          if (lineage.resolution_ids && lineage.resolution_ids.length > 0) parts.push("resolutions " + lineage.resolution_ids.map(function (id) { return id.slice(0, 8); }).join(", "));
+          var meta = document.createElement("div");
+          meta.className = "muted";
+          meta.textContent = parts.join(" · ");
+          container.append(meta);
+        }).catch(function (error) {
+          loading.textContent = errorText(error);
+        });
       }
 
       function artifactDisplayContent(artifact) {

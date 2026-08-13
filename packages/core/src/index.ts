@@ -10,6 +10,7 @@ export { z } from "zod";
 
 export * from "./core-utilities.js";
 export * from "./coverage.js";
+export * from "./provenance.js";
 export * from "./project-state.js";
 export * from "./fact-taxonomy.js";
 export * from "./entity-matcher.js";

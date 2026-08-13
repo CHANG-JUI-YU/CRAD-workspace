@@ -396,6 +396,8 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
             facts: Array.isArray(pages[2].items) ? pages[2].items : [],
             review_runs: runs
           });
+          void loadCoverageCenterData();
+          void loadEvidenceData();
           return pages;
         } catch (error) {
           setAreaError("source-fact-message", error);
@@ -420,6 +422,7 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
           renderPrecheckMatrix(payload.prechecks);
           renderQuality(payload);
           renderImageList(payload.images, payload.roster, payload.primary_character_id);
+          renderKpis(payload.kpis);
           var staleBanner = byId("image-stale-banner");
           if (payload.images_stale === true) {
             staleBanner.hidden = false;

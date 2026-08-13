@@ -13,12 +13,18 @@ import {
   type OperationRecord,
   type ProjectRepository,
   type ProjectState,
+  type ProvenanceCompositionSummary,
   type RepairInspection,
   type ReviewRecord,
   type SourceCandidate,
   type SourceRecord,
 } from "@st-workspace/core";
-import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "@st-workspace/domain";
+import {
+  buildRequiredArtifactManifest,
+  deriveSummaryKPIs,
+  type RequiredArtifactManifest,
+  type SummaryKPIs,
+} from "@st-workspace/domain";
 
 export const DASHBOARD_PAGE_LIMIT = 50;
 export const DASHBOARD_MAX_PAGE_LIMIT = 200;
@@ -145,6 +151,7 @@ export interface DashboardSummary {
   };
   latest_publish?: DashboardPublishView;
   latest_build?: DashboardBuildView;
+  kpis?: SummaryKPIs;
   repair: { plan_hash: string; item_count: number; recoverable_count: number };
 }
 
@@ -324,6 +331,7 @@ export interface DashboardPublishView {
   created_at: string;
   export_json_path?: string;
   export_png_path?: string;
+  provenance_summary?: ProvenanceCompositionSummary;
 }
 
 export interface DashboardBuildView {
@@ -334,6 +342,7 @@ export interface DashboardBuildView {
   content_hash: string;
   diagnostics_count: number;
   created_at: string;
+  provenance_summary?: ProvenanceCompositionSummary;
 }
 
 export interface DashboardArtifactQuery {
@@ -643,6 +652,7 @@ function mapPublish(publish: ProjectState["publishes"][number]): DashboardPublis
     created_at: publish.created_at,
     ...(publish.export_json_path === undefined ? {} : { export_json_path: publish.export_json_path }),
     ...(publish.export_png_path === undefined ? {} : { export_png_path: publish.export_png_path }),
+    ...(publish.provenance_summary === undefined ? {} : { provenance_summary: publish.provenance_summary }),
   };
 }
 
@@ -655,6 +665,7 @@ function mapBuild(build: ProjectState["builds"][number]): DashboardBuildView {
     content_hash: build.content_hash,
     diagnostics_count: build.diagnostics.length,
     created_at: build.created_at,
+    ...(build.provenance_summary === undefined ? {} : { provenance_summary: build.provenance_summary }),
   };
 }
 
@@ -774,6 +785,7 @@ export function buildDashboardSummary(state: ProjectState, repair: RepairInspect
     },
     ...(latestPublish === undefined ? {} : { latest_publish: mapPublish(latestPublish) }),
     ...(latestBuild === undefined ? {} : { latest_build: mapBuild(latestBuild) }),
+    kpis: deriveSummaryKPIs(state),
     repair: {
       plan_hash: repair.plan_hash,
       item_count: repair.items.length,

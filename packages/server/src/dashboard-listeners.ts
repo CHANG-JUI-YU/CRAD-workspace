@@ -72,7 +72,9 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
           var modeValue = modeSelect instanceof HTMLSelectElement ? modeSelect.value : "";
           var endpoint = modeValue === "" ? "/workspace/publish/preview" : "/workspace/publish/preview?mode=" + encodeURIComponent(modeValue);
           var payload = await requestJson(endpoint);
-          renderReadiness(payload.diagnostics);
+          var structured = await requestJson("/workspace/dashboard/publish-diagnostics");
+          renderPublishDiagnostics(structured);
+          renderProvenanceSummary(payload.provenance_summary);
           return payload;
         });
       });
@@ -118,6 +120,7 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
       });
       byId("project-select").addEventListener("change", updateControls);
       byId("load-coverage").addEventListener("click", function () { void runTask("載入覆蓋", loadCoverageData); });
+      byId("load-coverage").addEventListener("click", function () { void runTask("載入覆蓋矩陣", loadCoverageCenterData); });
       byId("load-workflow").addEventListener("click", function () { void runTask("載入工作流程", loadWorkflowData); });
       void refresh();
 `;

@@ -92,17 +92,26 @@ import {
   type KnowledgeExecutionResult,
   buildDefaultRequirementSet,
   coverageAssessmentFreshness,
+  deriveArtifactCoverageLineage,
   deriveDownstreamInvalidation,
+  deriveEvidenceContextViews,
+  deriveEvidenceReferenceStale,
   deriveProjectInvalidations,
   deriveSourceAdaptationWorkflow,
+  deriveStructuredPublishDiagnostics,
   emptyDownstreamInvalidationReport,
   runFormalCoverageAssessment,
   runInitialCoverageAssessment,
+  type ArtifactCoverageLineage,
+  type CoverageCenterMatrix,
   type DownstreamInvalidationReport,
+  type EvidenceContextView,
+  type ResearchMonitor,
   type SourceAdaptationWorkflowModel,
+  type StructuredPublishDiagnostics,
 } from "@st-workspace/domain";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
-import { coverageResearchCandidates as coverageResearchCandidatesQuery, coverageResearchClaim as coverageResearchClaimQuery, coverageResearchExhaust as coverageResearchExhaustQuery, coverageResearchRecover as coverageResearchRecoverQuery, coverageResearchStart as coverageResearchStartQuery, coverageResolutionConfirm as coverageResolutionConfirmQuery, coverageResolutionPreview as coverageResolutionPreviewQuery, coverageSupplement as coverageSupplementQuery, dashboardCoverage as dashboardCoverageQuery, executeCoverageResearchCandidates, executeCoverageResearchClaim, executeCoverageResearchExhaust, executeCoverageResearchRecover, executeCoverageResearchStart, executeCoverageResolutionConfirm, executeCoverageSupplement, type CoverageApplicationDeps, type CoverageCommandOutcome } from "./coverage-application.js";
+import { coverageResearchCandidates as coverageResearchCandidatesQuery, coverageResearchClaim as coverageResearchClaimQuery, coverageResearchExhaust as coverageResearchExhaustQuery, coverageResearchRecover as coverageResearchRecoverQuery, coverageResearchStart as coverageResearchStartQuery, coverageResolutionConfirm as coverageResolutionConfirmQuery, coverageResolutionPreview as coverageResolutionPreviewQuery, coverageSupplement as coverageSupplementQuery, dashboardCoverage as dashboardCoverageQuery, dashboardCoverageCenter as dashboardCoverageCenterQuery, executeCoverageResearchCandidates, executeCoverageResearchClaim, executeCoverageResearchExhaust, executeCoverageResearchRecover, executeCoverageResearchStart, executeCoverageResolutionConfirm, executeCoverageSupplement, type CoverageApplicationDeps, type CoverageCommandOutcome } from "./coverage-application.js";
 import {
   artifactQueryFromDashboardQuery,
   auditQueryFromDashboardQuery,
@@ -2550,6 +2559,36 @@ export class WorkspaceRuntime {
 
   async dashboardCoverage(): Promise<Record<string, unknown>> {
     return dashboardCoverageQuery(this.coverageDeps());
+  }
+
+  async dashboardCoverageCenter(): Promise<{ matrix: CoverageCenterMatrix; monitor: ResearchMonitor }> {
+    return dashboardCoverageCenterQuery(this.coverageDeps());
+  }
+
+  async dashboardArtifactLineage(artifactId: string): Promise<ArtifactCoverageLineage | undefined> {
+    const state = await this.repository.read();
+    return deriveArtifactCoverageLineage(state, artifactId);
+  }
+
+  async dashboardPublishDiagnostics(): Promise<StructuredPublishDiagnostics> {
+    const state = await this.repository.read();
+    return deriveStructuredPublishDiagnostics(validateWorkflow(state, "publish").diagnostics);
+  }
+
+  async dashboardFactReviewEvidence(options?: { cursor?: string; limit?: number; source_id?: string; classification?: FactClassification; reviewer_identity?: string }): Promise<FactReviewContext> {
+    const context = await factReviewContextQuery({ repository: this.repository, knowledge: this.knowledge }, options);
+    const state = await this.repository.read();
+    return {
+      ...context,
+      candidates: context.candidates.map((candidate) => ({
+        ...candidate,
+        evidence_ref_stale: (candidate.evidence_refs ?? []).map((reference) => ({
+          ref: reference,
+          ...deriveEvidenceReferenceStale(state, reference),
+        })),
+        ...(candidate.evidence_context === undefined ? {} : { evidence_context: deriveEvidenceContextViews(state, candidate.evidence_context) }),
+      })),
+    };
   }
 
   async reextract(operationId: string, sourceIds: readonly string[], actor: string, extractorRevision?: string): Promise<KnowledgeExecutionResult & { downstream_invalidation: DownstreamInvalidationReport }> {

@@ -59,6 +59,13 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         json(response, 200, await (await deps.getRuntime()).dashboardArtifactHistory(dashboardPathId(artifactHistoryMatch[1] ?? ""), dashboardQuery(url)));
         return true;
       }
+      const artifactCoverageMatch = request.method === "GET" ? /^\/workspace\/dashboard\/artifacts\/([^/]+)\/coverage$/u.exec(url.pathname) : null;
+      if (artifactCoverageMatch !== null) {
+        const lineage = await (await deps.getRuntime()).dashboardArtifactLineage(dashboardPathId(artifactCoverageMatch[1] ?? ""));
+        if (lineage === undefined) json(response, 404, { code: "DASHBOARD_ARTIFACT_COVERAGE_NOT_FOUND", message: "Artifact coverage lineage not found" });
+        else json(response, 200, lineage);
+        return true;
+      }
       if (request.method === "GET" && url.pathname === "/workspace/dashboard/facts") {
         json(response, 200, await (await deps.getRuntime()).dashboardFacts(dashboardQuery(url)));
         return true;
@@ -327,6 +334,28 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       }
       if (request.method === "GET" && url.pathname === "/workspace/dashboard/invalidations") {
         json(response, 200, await (await deps.getRuntime()).dashboardInvalidations());
+        return true;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/coverage-center") {
+        json(response, 200, await (await deps.getRuntime()).dashboardCoverageCenter());
+        return true;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/publish-diagnostics") {
+        json(response, 200, await (await deps.getRuntime()).dashboardPublishDiagnostics());
+        return true;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/fact-review/evidence") {
+        const query = dashboardQuery(url);
+        const sourceId = url.searchParams.get("source_id");
+        const classification = url.searchParams.get("classification");
+        const reviewerIdentity = url.searchParams.get("reviewer_identity");
+        json(response, 200, await (await deps.getRuntime()).dashboardFactReviewEvidence({
+          ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+          ...(query.limit === undefined ? {} : { limit: query.limit }),
+          ...(sourceId === null ? {} : { source_id: sourceId }),
+          ...(classification === "identity" || classification === "trait" || classification === "event" || classification === "relationship" || classification === "world" || classification === "other" ? { classification } : {}),
+          ...(reviewerIdentity === null ? {} : { reviewer_identity: reviewerIdentity }),
+        }));
         return true;
       }
       if (request.method === "POST" && url.pathname === "/workspace/coverage/research/start") {

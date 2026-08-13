@@ -269,7 +269,7 @@ function artifactStaleFindings(state: ProjectState, plan: BuildPlan, artifact: A
   return findings;
 }
 
-function coverageAssessmentStaleComponents(state: ProjectState, assessment: CoverageAssessment): string[] {
+export function coverageAssessmentStaleComponents(state: ProjectState, assessment: CoverageAssessment): string[] {
   const components: string[] = [];
   const snapshot = assessment.input_snapshot;
   const precheck = latestRecordedPrecheck(state);
