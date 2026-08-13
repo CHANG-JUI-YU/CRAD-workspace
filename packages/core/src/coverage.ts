@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { canonicalJson, contentHash } from "./core-utilities.js";
+import type { ProjectState } from "./project-state.js";
 
 export const COVERAGE_DIMENSIONS = [
   "identity",
@@ -637,6 +638,39 @@ export function authoringBindingHash(binding: Omit<AuthoringCoverageBinding, "id
       fact_projection_revision: binding.fact_projection_revision,
       fact_review_run_id: binding.fact_review_run_id,
       resolution_ids: binding.resolution_ids,
+    }),
+  );
+}
+
+/**
+ * Single authoritative fact projection revision used by coverage assessments,
+ * authoring bindings and publish snapshots. Every consumer must derive the
+ * revision from the same payload so identical states always hash identically.
+ */
+export function coverageFactProjectionRevision(state: Pick<ProjectState, "facts" | "fact_review_runs" | "fact_review_decisions">): string {
+  return contentHash(
+    canonicalJson({
+      facts: state.facts.map((fact) => ({
+        id: fact.id,
+        status: fact.status,
+        fact_revision: fact.fact_revision ?? 0,
+        coverage_targets: fact.coverage_targets ?? [],
+        suggested_coverage_targets: fact.suggested_coverage_targets ?? [],
+        entity_refs: fact.entity_refs ?? [],
+        evidence_revision: fact.evidence_revision,
+        accepted_fact_revision: fact.accepted_fact_revision,
+      })),
+      runs: state.fact_review_runs.map((run) => ({
+        id: run.id,
+        status: run.status,
+        candidate_set_revision: run.candidate_set_revision,
+      })),
+      decisions: state.fact_review_decisions.map((decision) => ({
+        id: decision.id,
+        decision: decision.decision,
+        candidate_occurrence_id: decision.candidate_occurrence_id,
+        resulting_fact_revision: decision.resulting_fact_revision,
+      })),
     }),
   );
 }

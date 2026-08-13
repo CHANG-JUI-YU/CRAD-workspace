@@ -4,10 +4,9 @@ import {
   COVERAGE_INITIAL_ITEM_STATUSES,
   WORLD_COVERAGE_DIMENSION,
   CoreError,
-  canonicalJson,
   computeProjectProjection,
-  contentHash,
   coverageAssessmentRevision,
+  coverageFactProjectionRevision,
   coverageRequirementById,
   coverageRequirementSetRevision,
   coverageSnapshotHash,
@@ -39,8 +38,8 @@ function latestRecordedPrecheck(state: ProjectState) {
   return [...state.blueprint_prechecks].reverse().find((item) => item.status === "recorded");
 }
 
-function latestActiveRun(state: ProjectState) {
-  return [...state.fact_review_runs].reverse().find((item) => item.status === "open" || item.status === "blocked");
+function latestAuthoritativeRun(state: ProjectState) {
+  return [...state.fact_review_runs].reverse().find((item) => item.status !== "superseded");
 }
 
 function worldEnabled(state: ProjectState): boolean {
@@ -49,24 +48,12 @@ function worldEnabled(state: ProjectState): boolean {
 }
 
 function factProjectionRevision(state: ProjectState): string {
-  return contentHash(
-    canonicalJson({
-      facts: state.facts.map((fact) => ({
-        id: fact.id,
-        status: fact.status,
-        fact_revision: fact.fact_revision ?? 0,
-        coverage_targets: fact.coverage_targets ?? [],
-        suggested_coverage_targets: fact.suggested_coverage_targets ?? [],
-      })),
-      runs: state.fact_review_runs.map((run) => ({ id: run.id, status: run.status, candidate_set_revision: run.candidate_set_revision })),
-      decisions: state.fact_review_decisions.map((decision) => ({ id: decision.id, decision: decision.decision, candidate_occurrence_id: decision.candidate_occurrence_id })),
-    }),
-  );
+  return coverageFactProjectionRevision(state);
 }
 
 function inputSnapshot(state: ProjectState): CoverageAssessmentInputSnapshot {
   const precheck = latestRecordedPrecheck(state);
-  const run = latestActiveRun(state);
+  const run = latestAuthoritativeRun(state);
   return {
     ...(precheck === undefined ? {} : { blueprint_revision: precheck.candidate_blueprint_revision }),
     source_revisions: state.sources.map((source) => ({ source_id: source.id, revision: source.revision })),
@@ -86,13 +73,13 @@ function requirementFacts(state: ProjectState, matcher: ReturnType<typeof create
 
 function hasOpenConflict(state: ProjectState, related: FactRecord[]): boolean {
   if (related.some((fact) => fact.status === "conflict")) return true;
-  const run = latestActiveRun(state);
+  const run = latestAuthoritativeRun(state);
   if (run === undefined) return false;
   return related.some((fact) => latestDecisionForOccurrence(state.fact_review_decisions, run.id, candidateOccurrenceForFact(fact))?.decision === "conflict");
 }
 
 function currentAcceptedDecision(state: ProjectState, fact: FactRecord): boolean {
-  const run = latestActiveRun(state);
+  const run = latestAuthoritativeRun(state);
   if (run === undefined) return false;
   const decision = latestDecisionForOccurrence(state.fact_review_decisions, run.id, candidateOccurrenceForFact(fact));
   return decision?.decision === "accepted" && decision.resulting_fact_revision === fact.fact_revision;
@@ -127,21 +114,12 @@ function formalItemStatus(
   if (hasOpenConflict(state, related)) return { status: "conflicted", acceptedIds: [], resolutionIds: [] };
 
   // Check source-covered accepted facts
-  const satisfied = related.filter(
-    (fact) =>
-      fact.status === "accepted" &&
-      currentAcceptedDecision(state, fact) &&
-      (fact.coverage_targets ?? []).includes(requirementId) &&
-      provenanceCurrent(state, fact),
-  );
-  if (satisfied.length >= definition.satisfaction.min_accepted_facts) {
-    return { status: "covered_by_source", acceptedIds: satisfied.map((fact) => fact.id), resolutionIds: [] };
-  }
-
   // Check current resolutions (creative completion or fulfilled user supplement)
+  const currentReqSetRevision = state.coverage_requirement_sets.at(-1)?.revision;
   const activeResolutions = state.coverage_resolutions.filter(
     (r) =>
       r.requirement_id === requirementId &&
+      r.requirement_set_revision === currentReqSetRevision &&
       (characterId === undefined ? r.character_id === undefined : r.character_id === characterId) &&
       !state.coverage_resolutions.some((other) => other.supersedes === r.id),
   );
@@ -154,6 +132,17 @@ function formalItemStatus(
   const creativeAuth = activeResolutions.find((r) => r.mode === "creative_completion" && r.status === "authorized");
   if (creativeAuth !== undefined) {
     return { status: "creative_completion_authorized", acceptedIds: [], resolutionIds: [creativeAuth.id] };
+  }
+
+  const satisfied = related.filter(
+    (fact) =>
+      fact.status === "accepted" &&
+      currentAcceptedDecision(state, fact) &&
+      (fact.coverage_targets ?? []).includes(requirementId) &&
+      provenanceCurrent(state, fact),
+  );
+  if (satisfied.length >= definition.satisfaction.min_accepted_facts) {
+    return { status: "covered_by_source", acceptedIds: satisfied.map((fact) => fact.id), resolutionIds: [] };
   }
 
   return { status: "missing", acceptedIds: [], resolutionIds: [] };
@@ -274,7 +263,7 @@ export function runFormalCoverageAssessment(state: ProjectState, requirementSet:
 export function coverageAssessmentFreshness(state: ProjectState, assessment: CoverageAssessment): boolean {
   const snapshot = assessment.input_snapshot;
   const precheck = latestRecordedPrecheck(state);
-  const run = latestActiveRun(state);
+  const run = latestAuthoritativeRun(state);
   if (snapshot.blueprint_revision !== precheck?.candidate_blueprint_revision) return false;
   if (snapshot.fact_review_run_id !== run?.id) return false;
   const currentSources = state.sources.map((source) => ({ source_id: source.id, revision: source.revision }));
@@ -306,13 +295,26 @@ export function recordUserDecisionAndResolution(
   const reqSet = state.coverage_requirement_sets.at(-1);
   const latestAssessment = state.coverage_assessments.at(-1);
 
+  if (action === "requirement_change" || action === "assessment_replacement") {
+    throw new CoreError(
+      "COVERAGE_USER_DECISION_INVALID",
+      `Action "${action}" changes the requirement set; submit a new requirement set revision with an explicit user decision instead of a silent no-op.`,
+      true,
+    );
+  }
+
+  if (latestAssessment === undefined) {
+    throw new CoreError("COVERAGE_RESOLUTION_INVALID", "No coverage assessment exists to bind the resolution; run an assessment first.", true);
+  }
+
   const decisionId = internalId("user-decision");
   const decision: CoverageUserDecisionRecord = {
     id: decisionId,
     action,
     requirement_ids: requirementIds,
     ...(characterId === undefined ? {} : { character_id: characterId }),
-    ...(latestAssessment === undefined ? {} : { assessment_id: latestAssessment.id, assessment_revision: latestAssessment.revision }),
+    assessment_id: latestAssessment.id,
+    assessment_revision: latestAssessment.revision,
     requirement_set_revision: reqSet?.revision ?? "",
     choice,
     rationale,
@@ -393,6 +395,57 @@ export function fulfillUserSupplementResolution(
     throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Resolution "${pendingResolutionId}" is not a pending user_supplement resolution.`, true);
   }
 
+  const reqSet = state.coverage_requirement_sets.at(-1);
+  if (reqSet === undefined || pending.requirement_set_revision !== reqSet.revision) {
+    throw new CoreError(
+      "COVERAGE_RESOLUTION_INVALID",
+      `Resolution "${pendingResolutionId}" targets requirement set revision ${pending.requirement_set_revision} which is no longer current.`,
+      true,
+    );
+  }
+  if (sourceRefs.length === 0 || factRefs.length === 0) {
+    throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Resolution "${pendingResolutionId}" requires at least one source reference and one accepted fact reference.`, true);
+  }
+
+  const authoritativeRun = latestAuthoritativeRun(state);
+  for (const ref of sourceRefs) {
+    const source = state.sources.find((item) => item.id === ref.source_id);
+    if (source === undefined || source.revision !== ref.revision) {
+      throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Source "${ref.source_id}" is missing or its revision does not match the current source record.`, true);
+    }
+  }
+  for (const ref of factRefs) {
+    const fact = state.facts.find((item) => item.id === ref.fact_id);
+    if (fact === undefined || fact.status !== "accepted") {
+      throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Fact "${ref.fact_id}" does not exist or is not accepted.`, true);
+    }
+    if (ref.fact_revision !== fact.accepted_fact_revision) {
+      throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Fact "${ref.fact_id}" revision does not match the current accepted canonical revision.`, true);
+    }
+    const decision = state.fact_review_decisions.find((item) => item.id === ref.decision_id);
+    if (
+      decision === undefined ||
+      authoritativeRun === undefined ||
+      decision.review_run_id !== authoritativeRun.id ||
+      decision.decision !== "accepted" ||
+      decision.resulting_fact_revision !== fact.fact_revision
+    ) {
+      throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Decision "${ref.decision_id}" is not the current accepted decision for fact "${ref.fact_id}".`, true);
+    }
+    if (!provenanceCurrent(state, fact)) {
+      throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Fact "${ref.fact_id}" no longer has current source provenance.`, true);
+    }
+    if (!(fact.coverage_targets ?? []).includes(pending.requirement_id)) {
+      throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Fact "${ref.fact_id}" does not cover requirement "${pending.requirement_id}".`, true);
+    }
+    if (pending.character_id !== undefined) {
+      const matcher = createEntityMatcher(state);
+      if (!factReferencesEntity(fact, matcher, pending.character_id)) {
+        throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Fact "${ref.fact_id}" does not reference character "${pending.character_id}".`, true);
+      }
+    }
+  }
+
   const successorId = internalId("resolution");
   const successor: CoverageResolution = {
     id: successorId,
@@ -436,14 +489,159 @@ export function sourceFactsReady(state: ProjectState): boolean {
     return unfulfilled.length === 0;
   }
 
-  // All accepted facts must have valid provenance and no open conflicts
+  const candidates = state.facts.filter((f) => f.status === "candidate");
+  if (candidates.length > 0) return false;
+
+  const hasConflict = state.facts.some((f) => f.status === "conflict");
+  if (hasConflict) return false;
+
+  const run = latestAuthoritativeRun(state);
+  if (run === undefined || run.status !== "completed") return false;
+
   const accepted = state.facts.filter((f) => f.status === "accepted");
   for (const fact of accepted) {
     if (!provenanceCurrent(state, fact)) return false;
+    const decision = latestDecisionForOccurrence(state.fact_review_decisions, run.id, candidateOccurrenceForFact(fact));
+    if (decision === undefined || decision.decision !== "accepted" || decision.resulting_fact_revision !== fact.fact_revision) return false;
   }
 
-  const hasConflict = state.facts.some((f) => f.status === "conflict");
-  return !hasConflict;
+  return true;
+}
+
+/**
+ * Structured blocker describing why coverage readiness is not satisfied.
+ */
+export interface CoverageBlocker {
+  code: string;
+  character_id?: string;
+  requirement_id?: string;
+  current_status?: string;
+  fact_ids?: string[];
+  source_ids?: string[];
+  conflict?: boolean;
+  stale_component?: string;
+  message: string;
+  next_action?: string;
+}
+
+function staleComponent(state: ProjectState, assessment: CoverageAssessment): string {
+  const precheck = latestRecordedPrecheck(state);
+  if (assessment.input_snapshot.blueprint_revision !== precheck?.candidate_blueprint_revision) return "blueprint";
+  if (assessment.input_snapshot.fact_review_run_id !== latestAuthoritativeRun(state)?.id) return "review_run";
+  const currentSources = state.sources.map((source) => ({ source_id: source.id, revision: source.revision }));
+  if (assessment.input_snapshot.source_revisions.length !== currentSources.length) return "sources";
+  for (let index = 0; index < currentSources.length; index += 1) {
+    const before = assessment.input_snapshot.source_revisions[index];
+    const after = currentSources[index];
+    if (before === undefined || after === undefined || before.source_id !== after.source_id || before.revision !== after.revision) return "sources";
+  }
+  return "facts";
+}
+
+/**
+ * Single authoritative coverage readiness check consumed by authoring gates,
+ * the publish workflow gate and the runtime. Returns structured blockers so
+ * every consumer surfaces the same diagnostics.
+ */
+export function deriveCoverageReadiness(state: ProjectState): { ready: boolean; blockers: CoverageBlocker[] } {
+  const blockers: CoverageBlocker[] = [];
+
+  const reqSet = state.coverage_requirement_sets.at(-1);
+  if (reqSet === undefined) {
+    blockers.push({
+      code: "COVERAGE_RESEARCH_REQUIRED",
+      message: "尚未建立 requirement set；請先完成來源處理與初步評估。",
+      next_action: "建立 requirement set 並執行 initial assessment。",
+    });
+    return { ready: false, blockers };
+  }
+
+  const latestAssessment = state.coverage_assessments.at(-1);
+  const assessmentUsable = latestAssessment !== undefined && latestAssessment.pass === "formal";
+  if (!assessmentUsable) {
+    blockers.push({
+      code: "COVERAGE_FACT_REVIEW_REQUIRED",
+      message: "尚未建立通過 Fact Review 的 formal coverage assessment。",
+      next_action: "完成 Fact Review 後執行 formal assessment。",
+    });
+  } else {
+    if (latestAssessment.requirement_set_id !== reqSet.id || latestAssessment.requirement_set_revision !== reqSet.revision) {
+      blockers.push({
+        code: "COVERAGE_ASSESSMENT_STALE",
+        stale_component: "requirement_set",
+        message: "最新 assessment 對應的 requirement set 已變更。",
+        next_action: "以新 requirement set 重新執行 formal assessment。",
+      });
+    }
+    if (!coverageAssessmentFreshness(state, latestAssessment)) {
+      blockers.push({
+        code: "COVERAGE_ASSESSMENT_STALE",
+        stale_component: staleComponent(state, latestAssessment),
+        message: "最新 coverage assessment 已過期，輸入已變更。",
+        next_action: "重新執行 formal assessment。",
+      });
+    }
+  }
+
+  if (state.facts.length > 0) {
+    const candidates = state.facts.filter((f) => f.status === "candidate");
+    if (candidates.length > 0) {
+      blockers.push({
+        code: "COVERAGE_FACT_REVIEW_REQUIRED",
+        current_status: "candidate",
+        fact_ids: candidates.map((f) => f.id),
+        message: "仍有 candidate facts 尚未裁決。",
+        next_action: "完成 Fact Review 所有候選裁決。",
+      });
+    }
+    const conflicts = state.facts.filter((f) => f.status === "conflict");
+    if (conflicts.length > 0) {
+      blockers.push({
+        code: "COVERAGE_RESOLUTION_REQUIRED",
+        conflict: true,
+        fact_ids: conflicts.map((f) => f.id),
+        message: "存在未解決的 Fact conflict。",
+        next_action: "由 Director 解析 conflict 後重新評估。",
+      });
+    }
+    const run = latestAuthoritativeRun(state);
+    if (run !== undefined && run.status !== "completed") {
+      blockers.push({
+        code: "COVERAGE_FACT_REVIEW_REQUIRED",
+        current_status: run.status,
+        message: "目前的事實審查 run 尚未完成。",
+        next_action: "完成 Fact Review。",
+      });
+    }
+    for (const fact of state.facts.filter((f) => f.status === "accepted")) {
+      if (!provenanceCurrent(state, fact)) {
+        const sourceIds = fact.evidence_refs?.map((ref) => ref.source_id) ?? [];
+        blockers.push({
+          code: "COVERAGE_ASSESSMENT_STALE",
+          stale_component: "sources",
+          fact_ids: [fact.id],
+          ...(sourceIds.length === 0 ? {} : { source_ids: sourceIds }),
+          message: "accepted fact 的來源佐證已失效。",
+          next_action: "更新來源或重新審查。",
+        });
+      }
+    }
+  }
+
+  const resolved = requirementsResolved(state);
+  if (!resolved.resolved) {
+    for (const ref of resolved.missing) {
+      blockers.push({
+        code: "COVERAGE_RESOLUTION_REQUIRED",
+        ...(ref.character_id === undefined ? {} : { character_id: ref.character_id }),
+        requirement_id: ref.requirement_id,
+        message: `需求 ${ref.requirement_id} 尚未解決。`,
+        next_action: "完成來源覆蓋或取得使用者 resolution。",
+      });
+    }
+  }
+
+  return { ready: blockers.length === 0, blockers };
 }
 
 /**
@@ -459,22 +657,41 @@ export function requirementsResolved(state: ProjectState): {
 
   const latestAssessment = state.coverage_assessments.at(-1);
   if (latestAssessment === undefined) return { resolved: false, missing: [], items: [] };
+  if (latestAssessment.pass !== "formal") return { resolved: false, missing: [], items: [] };
+  if (latestAssessment.requirement_set_id !== reqSet.id || latestAssessment.requirement_set_revision !== reqSet.revision) {
+    return { resolved: false, missing: [], items: [] };
+  }
 
-  const missing: CoverageRequirementRef[] = [];
-  const items: Array<{ character_id?: string; requirement_id: string; status: CoverageAssessmentItemStatus }> = [];
+  const expected = new Map<string, CoverageRequirementRef>();
+  for (const character of reqSet.characters) {
+    for (const reqId of character.requirement_ids) {
+      expected.set(`${character.character_id}/${reqId}`, { character_id: character.character_id, requirement_id: reqId });
+    }
+  }
+  for (const reqId of reqSet.world_requirement_ids) {
+    expected.set(`world/${reqId}`, { requirement_id: reqId });
+  }
 
+  const itemByKey = new Map<string, { character_id?: string; requirement_id: string; status: CoverageAssessmentItemStatus }>();
   for (const item of latestAssessment.items) {
-    items.push({
+    const key = `${item.character_id ?? "world"}/${item.requirement_id}`;
+    if (itemByKey.has(key)) return { resolved: false, missing: [], items: [] };
+    itemByKey.set(key, {
       ...(item.character_id === undefined ? {} : { character_id: item.character_id }),
       requirement_id: item.requirement_id,
       status: item.status,
     });
+  }
+  if (itemByKey.size !== expected.size) return { resolved: false, missing: [], items: [] };
 
+  const missing: CoverageRequirementRef[] = [];
+  const items: Array<{ character_id?: string; requirement_id: string; status: CoverageAssessmentItemStatus }> = [];
+  for (const [key, expectedRef] of expected) {
+    const item = itemByKey.get(key);
+    if (item === undefined) return { resolved: false, missing: [], items: [] };
+    items.push(item);
     if (item.status === "missing" || item.status === "candidate_signal" || item.status === "conflicted") {
-      missing.push({
-        ...(item.character_id === undefined ? {} : { character_id: item.character_id }),
-        requirement_id: item.requirement_id,
-      });
+      missing.push(expectedRef);
     }
   }
 

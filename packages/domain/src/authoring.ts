@@ -3,6 +3,7 @@ import {
   canonicalJson,
   contentHash,
   CoreError,
+  coverageFactProjectionRevision,
   internalId,
   normalizeSparseRelationshipsDocument,
   templateProposalValueSchema,
@@ -118,11 +119,7 @@ export function createCoverageBindingForArtifact(state: ProjectState, artifact: 
   const assessment = state.coverage_assessments.at(-1);
   if (assessment === undefined) return undefined;
 
-  const factProjectionRev = contentHash(
-    canonicalJson({
-      facts: state.facts.map((fact) => ({ id: fact.id, status: fact.status, fact_revision: fact.fact_revision ?? 0 })),
-    }),
-  );
+  const factProjectionRev = coverageFactProjectionRevision(state);
 
   const activeResolutions = state.coverage_resolutions.filter((r) => !state.coverage_resolutions.some((other) => other.supersedes === r.id));
 

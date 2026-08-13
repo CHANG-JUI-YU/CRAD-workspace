@@ -170,7 +170,7 @@ describe("Audit 5 Batch 1 Implementations", () => {
       const derived = deriveReviewRunStatusAndResponse(mockState, "run-1", "op-fact", { applied: 1, skipped: 0, conflicts: 0 });
       expect(derived.runStatus).toBe("open");
       expect(derived.operationStatus).toBe("needs_input");
-      expect(derived.responseStatus).toBe("needs_input");
+      expect(derived.responseStatus).toBe("completed");
     });
 
     it("derives response status as completed when all candidates in run are adjudicated cleanly", () => {

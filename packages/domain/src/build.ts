@@ -16,7 +16,7 @@ import {
 import { compileProject, type CardModeSelection } from "@st-workspace/compiler";
 import { buildRequiredArtifactManifest } from "./required-artifacts.js";
 import { validateWorkflow } from "./workflow-gate.js";
-import { buildCoverageSnapshot } from "./coverage-assessment.js";
+import { buildCoverageSnapshot, coverageAssessmentFreshness } from "./coverage-assessment.js";
 import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 
 export interface BuildExecutionResult {
@@ -191,24 +191,41 @@ export class BuildService {
     const qualityPolicy = createQualityPolicySnapshot(initial.quality_profile, actor, now());
     const isPublish = /publish|release|發布|發佈|上線/iu.test(request);
 
+    const sourceAdaptation = projection.intent.is_source_adaptation;
     const latestAssessment = initial.coverage_assessments.at(-1);
+    const coverageDiagnostics: Array<{ code: string; severity: "error"; message: string }> = [];
+    if (sourceAdaptation) {
+      if (latestAssessment === undefined || latestAssessment.pass !== "formal") {
+        coverageDiagnostics.push({
+          code: "COVERAGE_ASSESSMENT_REQUIRED",
+          severity: "error",
+          message: "尚未建立通過 Fact Review 的 formal coverage assessment；無法固定 coverage snapshot。",
+        });
+      } else if (!coverageAssessmentFreshness(initial, latestAssessment)) {
+        coverageDiagnostics.push({
+          code: "COVERAGE_ASSESSMENT_STALE",
+          severity: "error",
+          message: "最新 coverage assessment 已過期；請重新執行 formal assessment 後再打包。",
+        });
+      }
+    }
     const coverageSnapshot = latestAssessment === undefined ? undefined : buildCoverageSnapshot(initial, latestAssessment);
 
     const build: BuildRecord = {
       id: internalId("build"),
       operation_id: operationId,
-      status: errorDiagnostics.length > 0 ? "failed" : (isPublish ? "built" : "previewed"),
+      status: errorDiagnostics.length > 0 || coverageDiagnostics.length > 0 ? "failed" : (isPublish ? "built" : "previewed"),
       artifact_ids: artifactIds,
-      ...(errorDiagnostics.length === 0 ? { canonical_ir_ref: jsonBlobRef } : {}),
+      ...(errorDiagnostics.length === 0 && coverageDiagnostics.length === 0 ? { canonical_ir_ref: jsonBlobRef } : {}),
       content_hash: hash,
-      diagnostics,
+      diagnostics: [...coverageDiagnostics.map((item) => `${item.code}: ${item.message}`), ...diagnostics],
       created_at: now(),
       quality_policy_snapshot: qualityPolicy,
       ...(coverageSnapshot === undefined ? {} : { coverage_snapshot: coverageSnapshot }),
     };
 
-    if (errorDiagnostics.length > 0) {
-      const summary = `Build failed: ${diagnostics.join(" ")}`;
+    if (errorDiagnostics.length > 0 || coverageDiagnostics.length > 0) {
+      const summary = `Build failed: ${build.diagnostics.join(" ")}`;
       await this.repository.commit(initial.revision, (current) => {
         assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
         return {
@@ -217,7 +234,7 @@ export class BuildService {
           operations: current.operations.map((item) => item.id === operationId
             ? updateOperation(item, {
                 status: "blocked",
-                question: diagnostics.join(" "),
+                question: build.diagnostics.join(" "),
                 result_summary: summary,
                 progress: [...item.progress, { item_id: build.id, status: "blocked", message: "compiler diagnostics blocked build" }],
               })
@@ -229,7 +246,7 @@ export class BuildService {
             actor,
             occurred_at: now(),
             project_revision: current.revision + 1,
-            details: { build_id: build.id, artifact_ids: artifactIds, content_hash: hash, codes: errorDiagnostics.map((item) => item.code) },
+            details: { build_id: build.id, artifact_ids: artifactIds, content_hash: hash, codes: [...errorDiagnostics.map((item) => item.code), ...coverageDiagnostics.map((item) => item.code)] },
           }],
         };
       });

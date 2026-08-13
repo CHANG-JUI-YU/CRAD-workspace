@@ -1,7 +1,7 @@
 import { artifactDependencyFingerprint, computeProjectProjection, createEntityMatcher, factReferencesEntity, parseWardrobeMarkdown, relationshipPerspectiveEntries, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "./required-artifacts.js";
 import { contradictingAcceptedFacts } from "./knowledge.js";
-import { buildCoverageSnapshot, requirementsResolved, sourceFactsReady } from "./coverage-assessment.js";
+import { buildCoverageSnapshot, coverageAssessmentFreshness, requirementsResolved, sourceFactsReady } from "./coverage-assessment.js";
 
 export type WorkflowGatePhase = "draft" | "publish";
 
@@ -569,6 +569,24 @@ export function validateWorkflow(state: ProjectState, phase: WorkflowGatePhase, 
 function reportCoverageReadiness(state: ProjectState, diagnostics: WorkflowDiagnostic[]): void {
   if (state.coverage_requirement_sets.length === 0) return;
 
+  const latestAssessment = state.coverage_assessments.at(-1);
+  if (latestAssessment === undefined || latestAssessment.pass !== "formal") {
+    add(diagnostics, {
+      code: "COVERAGE_FACT_REVIEW_REQUIRED",
+      message: "A formal coverage assessment after Fact Review is required before publish.",
+      severity: "error",
+    });
+    return;
+  }
+  if (!coverageAssessmentFreshness(state, latestAssessment)) {
+    add(diagnostics, {
+      code: "COVERAGE_ASSESSMENT_STALE",
+      message: "The latest coverage assessment is stale; re-run the formal assessment before publish.",
+      severity: "error",
+    });
+    return;
+  }
+
   const res = requirementsResolved(state);
   if (!res.resolved) {
     const missingStr = res.missing.map((m) => `${m.character_id ?? "world"}/${m.requirement_id}`).join(", ");
@@ -587,17 +605,14 @@ function reportCoverageReadiness(state: ProjectState, diagnostics: WorkflowDiagn
     });
   }
 
-  const latestAssessment = state.coverage_assessments.at(-1);
-  if (latestAssessment !== undefined) {
-    for (const binding of state.coverage_authoring_bindings) {
-      if (binding.assessment_id !== latestAssessment.id || binding.assessment_revision !== latestAssessment.revision) {
-        add(diagnostics, {
-          code: "COVERAGE_AUTHORING_BINDING_STALE",
-          message: `Authoring binding ${binding.id} for artifact ${binding.artifact_id} was created against an outdated coverage assessment revision.`,
-          severity: "error",
-          artifact_ids: [binding.artifact_id],
-        });
-      }
+  for (const binding of state.coverage_authoring_bindings) {
+    if (binding.assessment_id !== latestAssessment.id || binding.assessment_revision !== latestAssessment.revision) {
+      add(diagnostics, {
+        code: "COVERAGE_AUTHORING_BINDING_STALE",
+        message: `Authoring binding ${binding.id} for artifact ${binding.artifact_id} was created against an outdated coverage assessment revision.`,
+        severity: "error",
+        artifact_ids: [binding.artifact_id],
+      });
     }
   }
 }

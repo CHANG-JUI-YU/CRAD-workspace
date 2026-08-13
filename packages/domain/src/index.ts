@@ -26,12 +26,14 @@ export {
   buildCoverageSnapshot,
   buildDefaultRequirementSet,
   coverageAssessmentFreshness,
+  deriveCoverageReadiness,
   fulfillUserSupplementResolution,
   recordUserDecisionAndResolution,
   requirementsResolved,
   runFormalCoverageAssessment,
   runInitialCoverageAssessment,
   sourceFactsReady,
+  type CoverageBlocker,
 } from "./coverage-assessment.js";
 export * from "./research-orchestration.js";
 export { ReviewService, type IssueUpdateAction, type IssueUpdateInput, type IssueUpdateResult, type ReviewExecutionResult } from "./review.js";

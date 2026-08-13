@@ -236,7 +236,9 @@ describe("local Dashboard", () => {
       const cancelled = await (await fetch(`${base}/workspace/operation/fail`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-      expect((await terminal.json()).code).toBe("OPERATION_NOT_CANCELLABLE");
+        body: JSON.stringify({ operation_id: "op-done" }),
+      })).json();
+      expect(cancelled.code).toBe("OPERATION_NOT_CANCELLABLE");
       const stateAfter = await repository.read();
       expect(stateAfter.operations.find((item) => item.id === "op-done")?.status).toBe("completed");
     } finally {
