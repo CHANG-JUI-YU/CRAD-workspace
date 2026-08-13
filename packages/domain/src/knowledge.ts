@@ -14,6 +14,7 @@ import {
   type FactReviewEvidenceContext,
   type FactReviewPassRecord,
   type FactReviewRunRecord,
+  type FactReviewRunStatus,
   type KnowledgeChunk,
   type OperationRecord,
   type ProjectRepository,
@@ -81,6 +82,51 @@ export interface FactReviewRunExecutionResult {
   run: FactReviewRunRecord;
   status: "completed" | "needs_input";
   summary: string;
+}
+
+export function deriveReviewRunStatusAndResponse(
+  state: ProjectState,
+  runId: string,
+  operationId: string,
+  batchStats: { applied: number; skipped: number; conflicts: number },
+  _targetIds: string[] = [],
+  batchHasBlocker = false,
+): { runStatus: FactReviewRunStatus; operationStatus: "needs_input" | "completed"; responseStatus: "needs_input" | "completed"; summary: string } {
+  const run = state.fact_review_runs.find((r) => r.id === runId);
+  if (run === undefined) {
+    return {
+      runStatus: "open",
+      operationStatus: "needs_input",
+      responseStatus: "needs_input",
+      summary: `Fact review run ${runId} not found.`,
+    };
+  }
+  const decisionsForRun = state.fact_review_decisions.filter((d) => d.review_run_id === run.id);
+  const latestByOccurrence = new Map<string, FactReviewDecisionRecord>();
+  for (const item of decisionsForRun) {
+    latestByOccurrence.set(item.candidate_occurrence_id, item);
+  }
+  const complete = run.candidate_occurrence_ids.length > 0 && run.candidate_occurrence_ids.every((id) => latestByOccurrence.has(id));
+  const hasBlocker = [...latestByOccurrence.values()].some((item) => item.decision === "needs_evidence" || item.decision === "conflict");
+
+  let runStatus: FactReviewRunStatus;
+  if (run.status === "superseded") {
+    runStatus = "superseded";
+  } else if (hasBlocker) {
+    runStatus = "blocked";
+  } else if (complete) {
+    runStatus = "completed";
+  } else {
+    runStatus = "open";
+  }
+
+  const operationStatus = runStatus === "completed" ? "completed" : "needs_input";
+  const responseStatus = batchHasBlocker ? "needs_input" : "completed";
+
+  const statusText = runStatus === "completed" ? "completed" : runStatus === "blocked" ? "blocked (needs evidence or conflict resolution)" : "open (pending candidate decisions)";
+  const summary = `Fact review run ${run.id}: applied=${batchStats.applied}, skipped=${batchStats.skipped}, conflict=${batchStats.conflicts}.${batchStats.skipped > 0 ? ` skipped ${batchStats.skipped} already-adjudicated candidates.` : ""} Run overall status: ${statusText}.`;
+
+  return { runStatus, operationStatus, responseStatus, summary };
 }
 
 const FACT_REVIEW_POLICY_REVISION = PIPELINE_FACT_REVIEW_POLICY_REVISION;
@@ -830,8 +876,8 @@ export class KnowledgeService {
         return previous?.decision === "accepted" || previous?.decision === "rejected";
       });
       if (alreadySettled) {
-        const summary = `Fact review run ${run.id}: applied=0, skipped=${decisions.length}, conflict=0. skipped ${decisions.length} already-adjudicated candidates.`;
-        return { fact_ids: [], applied: 0, skipped: decisions.length, conflicts: 0, status: "completed", summary };
+        const derived = deriveReviewRunStatusAndResponse(initial, run.id, operationId, { applied: 0, skipped: decisions.length, conflicts: 0 });
+        return { fact_ids: [], applied: 0, skipped: decisions.length, conflicts: 0, status: derived.responseStatus, summary: derived.summary };
       }
       throw new CoreError("FACT_REVIEW_RUN_CLOSED", `Fact review run ${run.id} is no longer open.`, true);
     }
@@ -934,18 +980,18 @@ export class KnowledgeService {
         });
     }
     const conflictCount = records.filter((record) => record.decision === "conflict").length;
-    const summary = `Fact review run ${run.id}: applied=${records.length}, skipped=${skippedCount}, conflict=${conflictCount}.${skippedCount > 0 ? ` skipped ${skippedCount} already-adjudicated candidates.` : ""}`;
     if (records.length === 0) {
+      const derivedEmpty = deriveReviewRunStatusAndResponse(initial, run.id, operationId, { applied: 0, skipped: skippedCount, conflicts: 0 });
       await this.repository.commit(initial.revision, (current) => {
         assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
         return {
           ...current,
           operations: current.operations.map((item) => item.id === operationId
-            ? updateOperation(item, { status: "completed", result_summary: summary })
+            ? updateOperation(item, { status: derivedEmpty.operationStatus, result_summary: derivedEmpty.summary })
             : item),
         };
       });
-      return { fact_ids: [], applied: 0, skipped: skippedCount, conflicts: 0, status: "completed", summary };
+      return { fact_ids: [], applied: 0, skipped: skippedCount, conflicts: 0, status: derivedEmpty.responseStatus, summary: derivedEmpty.summary };
     }
     const initiallyUndecided = new Set(records
       .filter((record) => pipelineLatestDecisionForOccurrence(initial.fact_review_decisions, run!.id, record.candidate_occurrence_id) === undefined)
@@ -958,15 +1004,13 @@ export class KnowledgeService {
           throw new CoreError("FACT_REVIEW_CONCURRENT_UPDATE", `Candidate ${concurrentlyDecided.candidate_occurrence_id} was adjudicated by another reviewer.`, true);
         }
         const decisionsForRun = [...current.fact_review_decisions, ...records];
-        const latestByOccurrence = new Map<string, FactReviewDecisionRecord>();
-        for (const item of decisionsForRun) {
-          if (item.review_run_id === run!.id) latestByOccurrence.set(item.candidate_occurrence_id, item);
-        }
-        const complete = run!.candidate_occurrence_ids.every((id) => latestByOccurrence.has(id));
-        const blocked = [...latestByOccurrence.values()].some((item) => item.decision === "needs_evidence" || item.decision === "conflict");
+        const tempState: ProjectState = { ...current, fact_review_decisions: decisionsForRun };
+        const batchHasBlocker = records.some((record) => record.decision === "needs_evidence" || record.decision === "conflict");
+        const derivedCommit = deriveReviewRunStatusAndResponse(tempState, run!.id, operationId, { applied: records.length, skipped: skippedCount, conflicts: conflictCount }, targetIds, batchHasBlocker);
+        const complete = run!.candidate_occurrence_ids.length > 0 && run!.candidate_occurrence_ids.every((id) => decisionsForRun.some((d) => d.review_run_id === run!.id && d.candidate_occurrence_id === id));
         const updatedRun: FactReviewRunRecord = {
           ...run!,
-          status: complete ? (blocked ? "blocked" : "completed") : "open",
+          status: derivedCommit.runStatus,
           ...(complete ? { completed_at: now() } : {}),
         };
         return {
@@ -1000,7 +1044,7 @@ export class KnowledgeService {
           fact_review_runs: current.fact_review_runs.map((item) => item.id === run!.id ? updatedRun : item),
           fact_review_decisions: decisionsForRun,
           operations: current.operations.map((item) => item.id === operationId
-            ? updateOperation(item, { status: blocked ? "needs_input" : "completed", progress: [...item.progress, ...targetIds.map((id) => ({ item_id: id, status: "completed" as const, message: "Fact review decision applied." }))], result_summary: summary })
+            ? updateOperation(item, { status: derivedCommit.operationStatus, progress: [...item.progress, ...targetIds.map((id) => ({ item_id: id, status: "completed" as const, message: "Fact review decision applied." }))], result_summary: derivedCommit.summary })
             : item),
           audit: [...current.audit, {
             id: internalId("audit"), operation_id: operationId, event: "fact.review.batch.applied", actor, occurred_at: now(), project_revision: current.revision + 1,
@@ -1017,8 +1061,10 @@ export class KnowledgeService {
       }
       throw error;
     }
-    const needsInput = records.some((record) => record.decision === "needs_evidence" || record.decision === "conflict");
-    return { fact_ids: targetIds, applied: records.length, skipped: skippedCount, conflicts: conflictCount, status: needsInput ? "needs_input" : "completed", summary };
+    const finalState = await this.repository.read();
+    const batchHasBlocker = records.some((record) => record.decision === "needs_evidence" || record.decision === "conflict");
+    const finalDerived = deriveReviewRunStatusAndResponse(finalState, run.id, operationId, { applied: records.length, skipped: skippedCount, conflicts: conflictCount }, targetIds, batchHasBlocker);
+    return { fact_ids: targetIds, applied: records.length, skipped: skippedCount, conflicts: conflictCount, status: finalDerived.responseStatus, summary: finalDerived.summary };
   }
 
   /** Director-only resolution entry that may overwrite conflict decisions. */

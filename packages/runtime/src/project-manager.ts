@@ -230,7 +230,7 @@ export class WorkspaceProjectManager {
     };
   }
 
-  async request(request: string, context: WorkspaceContext, options: { agent?: string } = {}): Promise<RequestResult> {
+  async request(request: string, context: WorkspaceContext, options: { agent?: string; idempotency_key?: string; target_operation_id?: string; operation_id?: string } = {}): Promise<RequestResult> {
     await this.ensureRuntime();
     if (/^(?:建立|新增|開始|start|new)\s*(?:新)?專案|^new project/iu.test(request.trim())) {
       const current = await this.repositoryValue.read();

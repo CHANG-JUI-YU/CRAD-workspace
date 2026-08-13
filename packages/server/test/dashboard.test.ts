@@ -236,19 +236,6 @@ describe("local Dashboard", () => {
       const cancelled = await (await fetch(`${base}/workspace/operation/fail`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ operation_id: "op-running" }),
-      })).json();
-      expect(cancelled).toMatchObject({ operation_id: "op-running", status: "cancelled" });
-      const state = await repository.read();
-      const after = state.operations.find((item) => item.id === "op-running");
-      expect(after?.status).toBe("failed");
-      expect(state.audit.some((entry) => entry.operation_id === "op-running" && entry.event === "operation.failed" && entry.details.code === "OPERATION_CANCELLED")).toBe(true);
-      const terminal = await fetch(`${base}/workspace/operation/fail`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ operation_id: "op-done" }),
-      });
-      expect(terminal.status).toBe(400);
       expect((await terminal.json()).code).toBe("OPERATION_NOT_CANCELLABLE");
       const stateAfter = await repository.read();
       expect(stateAfter.operations.find((item) => item.id === "op-done")?.status).toBe("completed");

@@ -113,6 +113,7 @@ export const DASHBOARD_CSS = `  <style>
     .status-badge.ready { color: #17633e; background: #e5f6ec; }
     .status-badge.active { color: #1d5d88; background: #e6f1fb; }
     .status-badge.error { color: #8e3030; background: #ffebea; }
+    .status-badge.cancelled { color: #475569; background: #f1f5f9; border: 1px solid #cbd5e1; }
     .field-list {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));

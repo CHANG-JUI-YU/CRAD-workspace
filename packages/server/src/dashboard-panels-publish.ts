@@ -441,7 +441,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
       }
 
       var cachedOperations = [];
-      var OPERATION_FILTERS = { all: "", active: "created,resolving,running,partial", needs_input: "needs_input", failed: "failed", terminal: "completed,cancelled" };
+      var OPERATION_FILTERS = { all: "", active: "created,resolving,running,partial", needs_input: "needs_input", failed: "failed", cancelled: "cancelled", terminal: "completed,cancelled,failed" };
       var SEVERITY_RANK = { critical: 4, error: 3, warning: 2, info: 1 };
       var SEVERITIES = ["critical", "error", "warning", "info"];
       var currentOverrides = {};
@@ -461,7 +461,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
             localValidation("Operation 回答", "回答不可為空。");
             return;
           }
-          var body = { request: value };
+          var body = { request: value, target_operation_id: operationId, operation_id: operationId };
           void runTask("回答 Operation", async function () {
             var payload = await postJson("/workspace/request", body);
             await loadDashboardData();
@@ -479,7 +479,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
       function confirmCancel(operationId) {
         return function () {
           if (state.busy) return;
-          if (!window.confirm("確定要取消 operation " + operationId + "？此操作將被標記為失敗。" + "需要重新執行時可再按「重試」。")) return;
+          if (!window.confirm("確定要取消 operation " + operationId + "？此操作將被標記為取消。")) return;
           postOperation("fail", operationId);
         };
       }
@@ -518,8 +518,8 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
             if (isRecord(lastProgress) && firstString(lastProgress, ["message"])) labelParts.push("step: " + firstString(lastProgress, ["message"]));
           }
           if (operation.status === "needs_input" && operation.question) labelParts.push("問題: " + operation.question);
-          if (operation.error_class === "recoverable") labelParts.push("可安全重試");
-          if (operation.error_class === "fatal") labelParts.push("需人工重送");
+          if (operation.status !== "cancelled" && operation.error_class === "recoverable") labelParts.push("可安全重試");
+          if (operation.status !== "cancelled" && operation.error_class === "fatal") labelParts.push("需人工重送");
           if (operation.last_error) labelParts.push("error: " + operation.last_error);
           label.textContent = labelParts.join(" · ");
           row.append(badge, label);
@@ -543,6 +543,18 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
               retry.addEventListener("click", retryOperation(operation.id));
               actions.append(retry);
             }
+          } else if (status === "cancelled") {
+            var newReq = document.createElement("button");
+            newReq.type = "button";
+            newReq.textContent = "建立新工作";
+            newReq.addEventListener("click", function () {
+              var inputEl = byId("request-input");
+              if (inputEl) {
+                inputEl.focus();
+                inputEl.scrollIntoView({ behavior: "smooth" });
+              }
+            });
+            actions.append(newReq);
           } else if (status === "created" || status === "resolving" || status === "running" || status === "partial") {
             var cancel = document.createElement("button");
             cancel.type = "button";

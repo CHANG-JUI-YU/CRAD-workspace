@@ -8,6 +8,8 @@ export const requestSchema = z.object({
   request: z.string().trim().min(1),
   agent: z.string().min(1).optional(),
   attachments: attachmentsSchema,
+  operation_id: z.string().min(1).optional(),
+  target_operation_id: z.string().min(1).optional(),
 }).strict();
 
 export type RequestInput = z.infer<typeof requestSchema>;

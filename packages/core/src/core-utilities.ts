@@ -87,6 +87,12 @@ export interface RequestResult {
   project_path?: string;
   interview_question?: InterviewState["current"];
   flow?: InterviewFlow;
+  pending_operations?: Array<{
+    operation_id: string;
+    kind: string;
+    question: string;
+    request: string;
+  }>;
 }
 
 export class CoreError extends Error {

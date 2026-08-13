@@ -226,9 +226,14 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         const input = parseRequest(requestSchema, parsed, "REQUEST_REQUIRED");
         const requestText = input.request;
         const requestedAgent = input.agent;
+        const targetOpId = input.target_operation_id ?? input.operation_id;
+        const requestOptions = {
+          ...(requestedAgent === undefined ? {} : { agent: requestedAgent }),
+          ...(targetOpId === undefined ? {} : { target_operation_id: targetOpId }),
+        };
         const result = deps.projectManager === undefined
-          ? await (await deps.getAgentAdapter()).request({ request: requestText, context: { actor: deps.actor, attachments: decodeAttachments(input.attachments) }, ...(requestedAgent === undefined ? {} : { agent: requestedAgent }) })
-          : await deps.projectManager.request(requestText, { actor: deps.actor, attachments: decodeAttachments(input.attachments) }, requestedAgent === undefined ? {} : { agent: requestedAgent });
+          ? await (await deps.getAgentAdapter()).request({ request: requestText, context: { actor: deps.actor, attachments: decodeAttachments(input.attachments) }, ...requestOptions })
+          : await deps.projectManager.request(requestText, { actor: deps.actor, attachments: decodeAttachments(input.attachments) }, requestOptions);
         json(response, 200, result);
         return true;
       }

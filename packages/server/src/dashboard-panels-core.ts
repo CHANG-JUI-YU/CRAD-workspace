@@ -88,7 +88,8 @@ export const DASHBOARD_PANELS_CORE_JS = `      function byId(value) {
       function statusClass(status) {
         if (["completed", "complete", "ready", "published"].indexOf(status) >= 0) return "ready";
         if (["created", "resolving", "running", "needs_input", "partial", "active", "interviewing"].indexOf(status) >= 0) return "active";
-        if (["failed", "cancelled", "error"].indexOf(status) >= 0) return "error";
+        if (["cancelled"].indexOf(status) >= 0) return "cancelled";
+        if (["failed", "error"].indexOf(status) >= 0) return "error";
         return "";
       }
 

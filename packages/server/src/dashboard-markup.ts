@@ -257,7 +257,8 @@ export const DASHBOARD_MARKUP = `<body>
             <option value="active">進行中</option>
             <option value="needs_input">待輸入</option>
             <option value="failed">失敗</option>
-            <option value="terminal">已完成／已取消</option>
+            <option value="cancelled">已取消</option>
+            <option value="terminal">已完成／已取消／已失敗</option>
           </select>
         </label>
         <button id="load-operations" type="button">載入 Operations</button>

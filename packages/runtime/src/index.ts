@@ -953,16 +953,22 @@ export class WorkspaceRuntime {
       return {
         ...current,
         operations: current.operations.map((entry) => entry.id === operationId
-          ? { ...stripLease(entry), status: "failed" as const, result_summary: "The operation was cancelled from the workspace console", updated_at: now() }
+          ? { ...stripLease(entry), status: "cancelled" as const, result_summary: "The operation was cancelled from the workspace console", updated_at: now() }
           : entry),
         audit: [...current.audit, {
           id: internalId("audit"),
           operation_id: operationId,
-          event: "operation.failed",
+          event: "operation.cancelled",
           actor,
           occurred_at: now(),
           project_revision: current.revision + 1,
-          details: { message: "The operation was cancelled from the workspace console", recoverable: true, code: "OPERATION_CANCELLED" },
+          details: {
+            message: "The operation was cancelled from the workspace console",
+            cancellation_actor: actor,
+            cancellation_reason: "user_requested",
+            previous_status: item.status,
+            code: "OPERATION_CANCELLED",
+          },
         }],
       };
     });
@@ -1966,7 +1972,11 @@ export class WorkspaceRuntime {
     };
   }
 
-  async request(request: string, context: WorkspaceContext, options: { agent?: string; idempotency_key?: string } = {}): Promise<RequestResult> {
+  async resumeOperation(operationId: string, requestText: string, context: WorkspaceContext = { actor: "worker", attachments: [] }): Promise<RequestResult> {
+    return this.request(requestText, context, { target_operation_id: operationId });
+  }
+
+  async request(request: string, context: WorkspaceContext, options: { agent?: string; idempotency_key?: string; target_operation_id?: string; operation_id?: string } = {}): Promise<RequestResult> {
     const trimmed = request.trim();
     if (trimmed.length === 0) {
       throw new CoreError("REQUEST_EMPTY", "請描述想完成的事情", true);
@@ -2004,10 +2014,38 @@ export class WorkspaceRuntime {
         ? this.answerInterview(trimmed, context)
         : this.startInterview(trimmed, context);
     }
-    const pending = [...existing.operations].reverse().find((operation) => operation.status === "needs_input");
-    if (pending !== undefined) {
-      const resumed = await this.resumePendingIfAnswered(pending, trimmed, context, kind);
+    const targetOpId = options.target_operation_id ?? options.operation_id;
+    if (targetOpId !== undefined) {
+      const targetOp = existing.operations.find((op) => op.id === targetOpId);
+      if (targetOp === undefined) {
+        throw new CoreError("OPERATION_NOT_FOUND", `Operation ${targetOpId} does not exist`, true);
+      }
+      if (targetOp.status !== "needs_input") {
+        throw new CoreError("OPERATION_NOT_RESUMABLE", `Operation ${targetOpId} is in status '${targetOp.status}' and cannot be resumed.`, true);
+      }
+      const resumed = await this.resumePendingIfAnswered(targetOp, trimmed, context, "unknown");
       if (resumed !== undefined) return resumed;
+    } else {
+      const pendingList = existing.operations.filter((operation) => operation.status === "needs_input");
+      if (pendingList.length === 1) {
+        const resumed = await this.resumePendingIfAnswered(pendingList[0]!, trimmed, context, kind);
+        if (resumed !== undefined) return resumed;
+      } else if (pendingList.length > 1) {
+        const pendingOptions = pendingList.map((op) => ({
+          operation_id: op.id,
+          kind: op.kind,
+          question: op.question ?? "需要使用者回應以繼續執行。",
+          request: op.request,
+        }));
+        return {
+          status: "needs_input",
+          summary: `目前有多筆待答覆的操作 (${pendingList.length} 筆)，請明確選擇要處理的 operation_id。`,
+          question: "目前存在多筆等待回應的操作，請選擇其一繼續執行。",
+          completed: [],
+          blocked: pendingList.map((op) => op.id),
+          pending_operations: pendingOptions,
+        };
+      }
     }
     if (options.idempotency_key !== undefined) {
       const existingByKey = existing.operations.find((item) => item.idempotency_key === options.idempotency_key);

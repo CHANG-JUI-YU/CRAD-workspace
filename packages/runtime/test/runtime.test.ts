@@ -1208,7 +1208,7 @@ describe("natural language runtime boundary", () => {
       expect(state.operations.find((item) => item.id === "op-done")?.status).toBe("completed");
     });
 
-    it("cancels a running operation with an audited failed transition", async () => {
+    it("cancels a running operation with an audited cancelled transition", async () => {
       const repository = new MemoryProjectRepository("cancel-running");
       const now = new Date().toISOString();
       await repository.commit(0, (current) => ({
@@ -1220,11 +1220,11 @@ describe("natural language runtime boundary", () => {
       expect(result).toEqual({ operation_id: "op-busy", status: "cancelled", summary: "Operation cancelled." });
       const state = await repository.read();
       const after = state.operations.find((item) => item.id === "op-busy");
-      expect(after?.status).toBe("failed");
+      expect(after?.status).toBe("cancelled");
       expect(after?.result_summary).toBe("The operation was cancelled from the workspace console");
       expect(after?.lease_owner).toBeUndefined();
       expect(after?.lease_token).toBeUndefined();
-      expect(state.audit.some((entry) => entry.operation_id === "op-busy" && entry.event === "operation.failed" && entry.details.code === "OPERATION_CANCELLED" && entry.details.recoverable === true)).toBe(true);
+      expect(state.audit.some((entry) => entry.operation_id === "op-busy" && entry.event === "operation.cancelled" && entry.details.code === "OPERATION_CANCELLED" && entry.details.cancellation_actor === "console")).toBe(true);
     });
 
     it("cancels a needs_input operation", async () => {
