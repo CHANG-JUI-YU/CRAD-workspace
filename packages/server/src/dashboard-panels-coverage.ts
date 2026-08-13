@@ -19,9 +19,11 @@ function startCoverageResearch(cell) {
   postJson("/workspace/coverage/research/start", {
     assessment_id: payload.assessment.id,
     assessment_revision: payload.assessment.revision,
-  }).then(function () {
+  }).then(function (result) {
+    renderMutationInvalidation(result.downstream_invalidation);
     byId("coverage-message").textContent = "已建立研究批次。";
     void loadCoverageData();
+    void refreshWorkflowViews();
   }).catch(function (error) {
     setAreaError("coverage-message", error);
   });
@@ -43,9 +45,11 @@ function recoverCoverageTask(cell, action, promptText) {
     if (value.trim() === "") { setAreaError("coverage-message", "請提供 URL。"); return; }
     body.url = value.trim();
   }
-  postJson("/workspace/coverage/research/recover", body).then(function () {
+  postJson("/workspace/coverage/research/recover", body).then(function (result) {
+    renderMutationInvalidation(result.downstream_invalidation);
     byId("coverage-message").textContent = "已建立 successor 研究任務。";
     void loadCoverageData();
+    void refreshWorkflowViews();
   }).catch(function (error) {
     setAreaError("coverage-message", error);
   });
@@ -74,9 +78,11 @@ function previewCoverageResolution(cell, action) {
         action: action,
         choice: choice.trim(),
         rationale: choice.trim(),
-      }).then(function () {
+      }).then(function (result) {
+        renderMutationInvalidation(result.downstream_invalidation);
         container.textContent = "已確認 resolution。";
         void loadCoverageData();
+        void refreshWorkflowViews();
       }).catch(function (error) {
         setAreaError("coverage-message", error);
       });

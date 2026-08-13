@@ -321,6 +321,14 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         json(response, 200, await (await deps.getRuntime()).dashboardCoverage());
         return true;
       }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/workflow") {
+        json(response, 200, await (await deps.getRuntime()).dashboardWorkflow());
+        return true;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/invalidations") {
+        json(response, 200, await (await deps.getRuntime()).dashboardInvalidations());
+        return true;
+      }
       if (request.method === "POST" && url.pathname === "/workspace/coverage/research/start") {
         const parsed = await body(request);
         const input = parseRequest(coverageResearchStartInputSchema, parsed, "COVERAGE_RESEARCH_REQUIRED");

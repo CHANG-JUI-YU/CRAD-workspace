@@ -118,5 +118,6 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
       });
       byId("project-select").addEventListener("change", updateControls);
       byId("load-coverage").addEventListener("click", function () { void runTask("載入覆蓋", loadCoverageData); });
+      byId("load-workflow").addEventListener("click", function () { void runTask("載入工作流程", loadWorkflowData); });
       void refresh();
 `;

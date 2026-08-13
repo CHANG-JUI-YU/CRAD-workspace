@@ -14,11 +14,14 @@ import {
   createResearchBatchFromAssessment,
   createUserSupplementSource,
   deriveCoverageReadiness,
+  deriveDownstreamInvalidation,
+  emptyDownstreamInvalidationReport,
   exhaustResearchTask,
   previewResolutionConsequences,
   recordUserDecisionAndResolution,
   reviseResearchTask,
   submitResearchTaskCandidates,
+  type DownstreamInvalidationReport,
   type ExecutionActorInput,
   type ResearchCandidateInput,
   type ResolutionConsequencesPreview,
@@ -57,11 +60,11 @@ export async function replayCoverageCommand(
   operation: OperationRecord,
   marker: string,
   apply: () => Promise<CoverageCommandOutcome>,
-): Promise<{ operation_id: string; status: string; summary: string; completed: string[]; blocked: string[] }> {
+): Promise<{ operation_id: string; status: string; summary: string; completed: string[]; blocked: string[]; downstream_invalidation: DownstreamInvalidationReport }> {
   const state = await deps.repository.read();
   const alreadyApplied = state.audit.some((item) => item.operation_id === operation.id && item.event === marker);
   if (alreadyApplied) {
-    return { operation_id: operation.id, status: "completed", summary: "Coverage command already applied.", completed: [], blocked: [] };
+    return { operation_id: operation.id, status: "completed", summary: "Coverage command already applied.", completed: [], blocked: [], downstream_invalidation: emptyDownstreamInvalidationReport() };
   }
   const outcome = await apply();
   await deps.repository.commit(outcome.state.revision, (current) => ({
@@ -69,7 +72,8 @@ export async function replayCoverageCommand(
     ...outcome.state,
     audit: [...current.audit, ...outcome.auditEvents.map((event) => ({ ...event, project_revision: current.revision + 1 }))],
   }));
-  return { operation_id: operation.id, status: "completed", summary: "Coverage command applied.", completed: [operation.id], blocked: [] };
+  const after = await deps.repository.read();
+  return { operation_id: operation.id, status: "completed", summary: "Coverage command applied.", completed: [operation.id], blocked: [], downstream_invalidation: deriveDownstreamInvalidation(state, after) };
 }
 
 async function commitCommand(
@@ -77,14 +81,15 @@ async function commitCommand(
   state: ProjectState,
   operation: OperationRecord,
   outcome: CoverageCommandOutcome,
-): Promise<{ operation_id: string; status: string; summary: string; completed: string[]; blocked: string[] }> {
+): Promise<{ operation_id: string; status: string; summary: string; completed: string[]; blocked: string[]; downstream_invalidation: DownstreamInvalidationReport }> {
   await deps.repository.commit(state.revision, (current) => ({
     ...current,
     ...outcome.state,
     operations: [...outcome.state.operations, operation],
     audit: [...outcome.state.audit, ...outcome.auditEvents.map((event) => ({ ...event, project_revision: current.revision + 1 }))],
   }));
-  return { operation_id: operation.id, status: "completed", summary: "Coverage command applied.", completed: [operation.id], blocked: [] };
+  const after = await deps.repository.read();
+  return { operation_id: operation.id, status: "completed", summary: "Coverage command applied.", completed: [operation.id], blocked: [], downstream_invalidation: deriveDownstreamInvalidation(state, after) };
 }
 
 function coverageOperation(actor: string | undefined, type: string, payload: Record<string, unknown>, agentId: string, role: string): OperationRecord {

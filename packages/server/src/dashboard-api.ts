@@ -137,7 +137,7 @@ export const DASHBOARD_API_JS = `      function tokenQuery() {
       }
 
       async function refreshAfterAction() {
-        await Promise.allSettled([loadProjects(), loadStatus(), loadInterview()]);
+        await Promise.allSettled([loadProjects(), loadStatus(), loadInterview(), refreshWorkflowViews()]);
       }
 
       function localValidation(label, message) {

@@ -242,6 +242,19 @@ export const DASHBOARD_MARKUP = `<body>
       <div id="coverage-grid" class="coverage-grid"></div>
     </section>
 
+    <section class="panel panel-wide" aria-labelledby="workflow-heading">
+      <div class="panel-heading">
+        <div>
+          <h2 id="workflow-heading">來源適配工作流程</h2>
+          <p class="muted">九階段進度、目前下一步與最新下游失效狀態。</p>
+        </div>
+        <button id="load-workflow" type="button">載入工作流程</button>
+      </div>
+      <div id="workflow-message" class="panel-message" aria-live="polite">尚未取得工作流程資料。</div>
+      <div id="workflow-stages" class="workflow-stages"></div>
+      <div id="workflow-invalidations" class="workflow-invalidations"></div>
+    </section>
+
     <section class="panel panel-wide" aria-labelledby="build-heading">
       <div class="panel-heading">
         <div>

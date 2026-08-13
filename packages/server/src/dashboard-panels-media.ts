@@ -431,6 +431,7 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
           byId("source-fact-message").textContent = "首頁摘要已載入；按下按鈕取得來源與事實。";
           byId("operation-message").textContent = "首頁摘要已載入；按下按鈕取得 operation。";
           byId("quality-message").textContent = "首頁摘要已載入；按下按鈕取得 issue。";
+          void refreshWorkflowViews();
           return payload;
         } catch (error) {
           setAreaError("prechecks-message", error);

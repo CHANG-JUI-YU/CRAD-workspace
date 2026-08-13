@@ -114,6 +114,54 @@ export const DASHBOARD_CSS = `  <style>
     .status-badge.active { color: #1d5d88; background: #e6f1fb; }
     .status-badge.error { color: #8e3030; background: #ffebea; }
     .status-badge.cancelled { color: #475569; background: #f1f5f9; border: 1px solid #cbd5e1; }
+    .workflow-stages {
+      display: grid;
+      grid-template-columns: repeat(1, minmax(0, 1fr));
+      gap: 0.55rem;
+      margin: 0.75rem 0 0;
+    }
+    .workflow-stage {
+      border: 1px solid #dfe6ec;
+      border-radius: 8px;
+      padding: 0.55rem 0.75rem;
+      background: #fbfcfd;
+    }
+    .workflow-stage-title {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 700;
+    }
+    .workflow-blockers {
+      margin: 0.4rem 0 0;
+      padding-left: 1.1rem;
+      color: #8e3030;
+      font-size: 0.85rem;
+    }
+    .workflow-invalidations {
+      margin: 0.75rem 0 0;
+      font-size: 0.88rem;
+    }
+    .workflow-invalidations-heading {
+      font-weight: 700;
+      margin-bottom: 0.4rem;
+    }
+    .workflow-invalidation-item {
+      border: 1px solid #f0d4d4;
+      border-radius: 8px;
+      padding: 0.45rem 0.65rem;
+      margin-bottom: 0.4rem;
+      background: #fffafa;
+    }
+    .workflow-invalidation-title {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 700;
+    }
+    .workflow-stage button {
+      margin-top: 0.45rem;
+    }
     .field-list {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));

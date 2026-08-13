@@ -46,6 +46,25 @@ export {
 export * from "./research-orchestration.js";
 export { ReviewService, type IssueUpdateAction, type IssueUpdateInput, type IssueUpdateResult, type ReviewExecutionResult } from "./review.js";
 export { validateWorkflow, type WorkflowDiagnostic, type WorkflowGatePhase, type WorkflowGateResult } from "./workflow-gate.js";
+export {
+  deriveDownstreamInvalidation,
+  deriveProjectInvalidations,
+  emptyDownstreamInvalidationReport,
+  type DownstreamInvalidationItem,
+  type DownstreamInvalidationReport,
+  type DownstreamInvalidationSource,
+  type DownstreamInvalidationSourceKind,
+  type DownstreamInvalidationTargetKind,
+} from "./downstream-invalidation.js";
+export {
+  SOURCE_ADAPTATION_WORKFLOW_STAGES,
+  deriveSourceAdaptationWorkflow,
+  type SourceAdaptationWorkflowModel,
+  type SourceAdaptationWorkflowStage,
+  type SourceAdaptationWorkflowStageId,
+  type SourceAdaptationWorkflowStageStatus,
+  type WorkflowStageBlocker,
+} from "./source-adaptation-workflow.js";
 export { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput, type ResolvedExecutionActors } from "./execution-context.js";
 export {
   PALETTE_REQUIRED_MODULES,

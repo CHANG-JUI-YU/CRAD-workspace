@@ -92,8 +92,14 @@ import {
   type KnowledgeExecutionResult,
   buildDefaultRequirementSet,
   coverageAssessmentFreshness,
+  deriveDownstreamInvalidation,
+  deriveProjectInvalidations,
+  deriveSourceAdaptationWorkflow,
+  emptyDownstreamInvalidationReport,
   runFormalCoverageAssessment,
   runInitialCoverageAssessment,
+  type DownstreamInvalidationReport,
+  type SourceAdaptationWorkflowModel,
 } from "@st-workspace/domain";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
 import { coverageResearchCandidates as coverageResearchCandidatesQuery, coverageResearchClaim as coverageResearchClaimQuery, coverageResearchExhaust as coverageResearchExhaustQuery, coverageResearchRecover as coverageResearchRecoverQuery, coverageResearchStart as coverageResearchStartQuery, coverageResolutionConfirm as coverageResolutionConfirmQuery, coverageResolutionPreview as coverageResolutionPreviewQuery, coverageSupplement as coverageSupplementQuery, dashboardCoverage as dashboardCoverageQuery, executeCoverageResearchCandidates, executeCoverageResearchClaim, executeCoverageResearchExhaust, executeCoverageResearchRecover, executeCoverageResearchStart, executeCoverageResolutionConfirm, executeCoverageSupplement, type CoverageApplicationDeps, type CoverageCommandOutcome } from "./coverage-application.js";
@@ -512,6 +518,12 @@ export class WorkspaceRuntime {
     return startInterviewQuery({ repository: this.repository }, request, context);
   }
   async answerInterview(answer: string, context: WorkspaceContext): Promise<RequestResult> {
+    const before = await this.repository.read();
+    const result = await this.answerInterviewImpl(answer, context);
+    return this.attachDownstreamInvalidation(result, before);
+  }
+
+  private async answerInterviewImpl(answer: string, context: WorkspaceContext): Promise<RequestResult> {
     const initial = await this.repository.read();
     let state = initial;
     let operation = [...initial.operations].reverse().find((item) => item.kind === "interview" && !["completed", "cancelled", "failed"].includes(item.status));
@@ -1025,18 +1037,19 @@ export class WorkspaceRuntime {
     };
   }
 
-  private async replayCoverageCommand(marker: string, operation: OperationRecord, apply: (deps: CoverageApplicationDeps, state: ProjectState, operation: OperationRecord, actor: string, attachments: Array<{ name: string; content: Uint8Array; media_type?: string }>) => Promise<CoverageCommandOutcome>): Promise<RequestResult> {
+  private async replayCoverageCommand(marker: string, operation: OperationRecord, apply: (deps: CoverageApplicationDeps, state: ProjectState, operation: OperationRecord, actor: string, attachments: Array<{ name: string; content: Uint8Array; media_type?: string }>) => Promise<CoverageCommandOutcome>): Promise<RequestResult & { downstream_invalidation: DownstreamInvalidationReport }> {
     const deps = this.coverageDeps();
     const state = await this.repository.read();
-  if (this.hasAuditMarker(operation.id, marker, state)) return responseFromOperation(await this.completeReplayedOperation(operation));
-  const attachments = await this.loadOperationAttachments(operation, operation.command) ?? [];
+    if (this.hasAuditMarker(operation.id, marker, state)) return { ...responseFromOperation(await this.completeReplayedOperation(operation)), downstream_invalidation: emptyDownstreamInvalidationReport() };
+    const attachments = await this.loadOperationAttachments(operation, operation.command) ?? [];
     const outcome = await apply(deps, state, operation, operation.actor ?? "worker", attachments);
     await this.repository.commit(state.revision, (current) => ({
       ...current,
       ...outcome.state,
       audit: [...outcome.state.audit, ...outcome.auditEvents.map((event) => ({ ...event, project_revision: current.revision + 1 }))],
     }));
-    return { operation_id: operation.id, status: "completed", summary: `${marker} applied.`, completed: [], blocked: [], ...outcome.result };
+    const after = await this.repository.read();
+    return { operation_id: operation.id, status: "completed", summary: `${marker} applied.`, completed: [], blocked: [], ...outcome.result, downstream_invalidation: deriveDownstreamInvalidation(state, after) };
   }
 
   private async markNeedsInput(operation: OperationRecord, question: string, execution?: ExecutionContext): Promise<RequestResult> {
@@ -1583,13 +1596,23 @@ export class WorkspaceRuntime {
   }
 
   async selectSourceCandidates(decisions: SourceSelectionDecision[], context: WorkspaceContext): Promise<RequestResult> {
-    return selectSourceCandidatesQuery({ repository: this.repository, sources: this.sources }, decisions, context);
+    const before = await this.repository.read();
+    const result = await selectSourceCandidatesQuery({ repository: this.repository, sources: this.sources }, decisions, context);
+    return this.attachDownstreamInvalidation(result, before);
   }
 
   async createAdaptationDecision(input: Omit<AdaptationDecision, "id" | "created_at" | "created_by">, context: WorkspaceContext): Promise<RequestResult> {
-    return createAdaptationDecisionQuery({ repository: this.repository, sources: this.sources }, input, context);
+    const before = await this.repository.read();
+    const result = await createAdaptationDecisionQuery({ repository: this.repository, sources: this.sources }, input, context);
+    return this.attachDownstreamInvalidation(result, before);
   }
   async submitTemplateProposal(proposal: unknown, context: WorkspaceContext, options: { agent?: string } = {}): Promise<RequestResult> {
+    const before = await this.repository.read();
+    const result = await this.submitTemplateProposalImpl(proposal, context, options);
+    return this.attachDownstreamInvalidation(result, before);
+  }
+
+  private async submitTemplateProposalImpl(proposal: unknown, context: WorkspaceContext, options: { agent?: string } = {}): Promise<RequestResult> {
     const parsed = templateProposalValueSchema.safeParse(proposal);
     if (!parsed.success) throw new CoreError("TEMPLATE_SCHEMA_INVALID", parsed.error.message, true);
     await this.ensureInterviewComplete();
@@ -2025,6 +2048,27 @@ export class WorkspaceRuntime {
   }
 
   async request(request: string, context: WorkspaceContext, options: { agent?: string; idempotency_key?: string; target_operation_id?: string; operation_id?: string } = {}): Promise<RequestResult> {
+    const before = await this.repository.read();
+    const result = await this.requestImpl(request, context, options);
+    return this.attachDownstreamInvalidation(result, before);
+  }
+
+  private async attachDownstreamInvalidation<T extends object>(result: T, before: ProjectState): Promise<T & { downstream_invalidation: DownstreamInvalidationReport }> {
+    const after = await this.repository.read();
+    return { ...result, downstream_invalidation: deriveDownstreamInvalidation(before, after) };
+  }
+
+  async dashboardWorkflow(): Promise<SourceAdaptationWorkflowModel> {
+    const state = await this.repository.read();
+    return deriveSourceAdaptationWorkflow(state);
+  }
+
+  async dashboardInvalidations(): Promise<DownstreamInvalidationReport> {
+    const state = await this.repository.read();
+    return deriveProjectInvalidations(state);
+  }
+
+  private async requestImpl(request: string, context: WorkspaceContext, options: { agent?: string; idempotency_key?: string; target_operation_id?: string; operation_id?: string } = {}): Promise<RequestResult> {
     const trimmed = request.trim();
     if (trimmed.length === 0) {
       throw new CoreError("REQUEST_EMPTY", "請描述想完成的事情", true);
@@ -2439,7 +2483,13 @@ export class WorkspaceRuntime {
     return this.requirementSetFor(state);
   }
 
-  async coverageAssessment(pass: "initial" | "formal"): Promise<{ assessment: CoverageAssessment; requirement_set: CoverageRequirementSet; current: boolean }> {
+  async coverageAssessment(pass: "initial" | "formal"): Promise<{ assessment: CoverageAssessment; requirement_set: CoverageRequirementSet; current: boolean; downstream_invalidation: DownstreamInvalidationReport }> {
+    const before = await this.repository.read();
+    const result = await this.coverageAssessmentImpl(pass);
+    return this.attachDownstreamInvalidation(result, before);
+  }
+
+  private async coverageAssessmentImpl(pass: "initial" | "formal"): Promise<{ assessment: CoverageAssessment; requirement_set: CoverageRequirementSet; current: boolean }> {
     const state = await this.repository.read();
     const requirementSet = await this.requirementSetFor(state);
     const operationId = internalId("operation");
@@ -2502,12 +2552,16 @@ export class WorkspaceRuntime {
     return dashboardCoverageQuery(this.coverageDeps());
   }
 
-  async reextract(operationId: string, sourceIds: readonly string[], actor: string, extractorRevision?: string): Promise<KnowledgeExecutionResult> {
-    return reextractQuery({ repository: this.repository, knowledge: this.knowledge }, operationId, sourceIds, actor, extractorRevision);
+  async reextract(operationId: string, sourceIds: readonly string[], actor: string, extractorRevision?: string): Promise<KnowledgeExecutionResult & { downstream_invalidation: DownstreamInvalidationReport }> {
+    const before = await this.repository.read();
+    const result = await reextractQuery({ repository: this.repository, knowledge: this.knowledge }, operationId, sourceIds, actor, extractorRevision);
+    return this.attachDownstreamInvalidation(result, before);
   }
 
   async startFactReviewRun(actor: string): Promise<FactReviewRunRecord> {
-    return startFactReviewRunQuery({ repository: this.repository, knowledge: this.knowledge }, actor);
+    const before = await this.repository.read();
+    const result = await startFactReviewRunQuery({ repository: this.repository, knowledge: this.knowledge }, actor);
+    return this.attachDownstreamInvalidation(result, before);
   }
 
   async applyFactReviewBatch(
@@ -2516,8 +2570,10 @@ export class WorkspaceRuntime {
     reviewerIdentity?: string,
     reviewRunId?: string,
     expectedProjectionRevision?: string,
-  ): Promise<FactReviewExecutionResult> {
-    return applyFactReviewBatchQuery({ repository: this.repository, knowledge: this.knowledge }, decisions, actor, reviewerIdentity, reviewRunId, expectedProjectionRevision);
+  ): Promise<FactReviewExecutionResult & { downstream_invalidation: DownstreamInvalidationReport }> {
+    const before = await this.repository.read();
+    const result = await applyFactReviewBatchQuery({ repository: this.repository, knowledge: this.knowledge }, decisions, actor, reviewerIdentity, reviewRunId, expectedProjectionRevision);
+    return this.attachDownstreamInvalidation(result, before);
   }
 
   async resolveFactConflict(
@@ -2525,8 +2581,10 @@ export class WorkspaceRuntime {
     actor: string,
     reviewRunId?: string,
     expectedProjectionRevision?: string,
-  ): Promise<FactReviewExecutionResult> {
-    return resolveFactConflictQuery({ repository: this.repository, knowledge: this.knowledge }, decisions, actor, reviewRunId, expectedProjectionRevision);
+  ): Promise<FactReviewExecutionResult & { downstream_invalidation: DownstreamInvalidationReport }> {
+    const before = await this.repository.read();
+    const result = await resolveFactConflictQuery({ repository: this.repository, knowledge: this.knowledge }, decisions, actor, reviewRunId, expectedProjectionRevision);
+    return this.attachDownstreamInvalidation(result, before);
   }
 
   async setProjectImage(context: WorkspaceContext, options: { character_id?: string; aspect_ratio?: string; source?: string; license?: string } = {}): Promise<{ image_id: string; width: number; height: number }> {
