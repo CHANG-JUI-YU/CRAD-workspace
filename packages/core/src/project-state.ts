@@ -196,6 +196,7 @@ export interface SourceRecord {
   revision: string;
   media_type: string;
   original_name?: string;
+  provenance_kind?: "external_source" | "user_supplement";
   selection_snapshot?: SourceSelectionSnapshot;
   created_at: string;
 }

@@ -230,6 +230,18 @@ export const DASHBOARD_MARKUP = `<body>
       <div id="fact-review-run" class="fact-list"></div>
     </section>
 
+    <section class="panel panel-wide" aria-labelledby="coverage-heading">
+      <div class="panel-heading">
+        <div>
+          <h2 id="coverage-heading">Coverage 角色設定覆蓋</h2>
+          <p class="muted">來源覆蓋評估、研究任務與 resolution 的目前狀態。</p>
+        </div>
+        <button id="load-coverage" type="button">載入覆蓋</button>
+      </div>
+      <div id="coverage-message" class="panel-message" aria-live="polite">尚未取得覆蓋資料。</div>
+      <div id="coverage-grid" class="coverage-grid"></div>
+    </section>
+
     <section class="panel panel-wide" aria-labelledby="build-heading">
       <div class="panel-heading">
         <div>

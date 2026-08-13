@@ -1,4 +1,4 @@
-import { z, type SourceAttachment } from "@st-workspace/core";
+import { coverageRequirementIdSchema, z, type SourceAttachment } from "@st-workspace/core";
 
 const base64Pattern = /^[A-Za-z0-9+/]*={0,2}$/u;
 
@@ -175,3 +175,84 @@ export function decodeAttachments(attachments: unknown): SourceAttachment[] {
   }
   return result;
 }
+
+export const coverageResearchCandidateItemSchema = z.object({
+  title: z.string().min(1),
+  url: z.string().url().optional(),
+  canonical_url: z.string().url().optional(),
+  snippet: z.string().min(1).optional(),
+  domain: z.string().min(1).optional(),
+  official: z.boolean().optional(),
+  target_requirement_ids: z.array(z.string().min(1)).optional(),
+}).strict();
+export type CoverageResearchCandidateItemInput = z.infer<typeof coverageResearchCandidateItemSchema>;
+
+export const coverageResearchStartInputSchema = z.object({
+  assessment_id: z.string().min(1).optional(),
+  assessment_revision: z.string().min(1).optional(),
+}).strict();
+export type CoverageResearchStartInput = z.infer<typeof coverageResearchStartInputSchema>;
+
+export const coverageResearchClaimInputSchema = z.object({
+  batch_id: z.string().min(1),
+  lease_duration_ms: z.number().int().positive().optional(),
+}).strict();
+export type CoverageResearchClaimInput = z.infer<typeof coverageResearchClaimInputSchema>;
+
+export const coverageResearchCandidatesInputSchema = z.object({
+  task_id: z.string().min(1),
+  claim_generation: z.number().int().nonnegative(),
+  lease_owner: z.string().min(1),
+  candidates: z.array(coverageResearchCandidateItemSchema).min(1),
+}).strict();
+export type CoverageResearchCandidatesInput = z.infer<typeof coverageResearchCandidatesInputSchema>;
+
+export const coverageResearchExhaustInputSchema = z.object({
+  task_id: z.string().min(1),
+  claim_generation: z.number().int().nonnegative(),
+  lease_owner: z.string().min(1),
+  searched_queries: z.array(z.string().min(1)),
+  source_families: z.array(z.string().min(1)),
+  exhausted_reason: z.string().min(1),
+}).strict();
+export type CoverageResearchExhaustInput = z.infer<typeof coverageResearchExhaustInputSchema>;
+
+const coverageResolutionScopeSchema = z.object({
+  assessment_id: z.string().min(1),
+  assessment_revision: z.string().min(1),
+  requirement_id: coverageRequirementIdSchema,
+  character_id: z.string().min(1).optional(),
+});
+
+export const coverageResolutionPreviewInputSchema = coverageResolutionScopeSchema.extend({
+  action: z.enum(["user_supplement", "creative_completion"]),
+}).strict();
+export type CoverageResolutionPreviewInput = z.infer<typeof coverageResolutionPreviewInputSchema>;
+
+export const coverageResolutionConfirmInputSchema = coverageResolutionScopeSchema.extend({
+  action: z.enum(["user_supplement", "creative_completion"]),
+  choice: z.string().min(1),
+  rationale: z.string().min(1),
+}).strict();
+export type CoverageResolutionConfirmInput = z.infer<typeof coverageResolutionConfirmInputSchema>;
+
+export const coverageSupplementInputSchema = coverageResolutionScopeSchema.extend({
+  text: z.string().trim().min(1).optional(),
+  url: z.string().url().optional(),
+  attachments: attachmentsSchema,
+}).strict().superRefine((value, ctx) => {
+  if (value.text === undefined && value.url === undefined && (value.attachments ?? []).length === 0) {
+    ctx.addIssue({ code: "custom", path: ["text"], message: "至少提供補充文字、URL 或附件其中一項。" });
+  }
+});
+export type CoverageSupplementInput = z.infer<typeof coverageSupplementInputSchema>;
+
+export const coverageResearchRecoverInputSchema = z.object({
+  task_id: z.string().min(1),
+  action: z.enum(["revise_query", "revise_constraints", "manual_url", "supplement", "creative_completion"]),
+  query_seeds: z.array(z.string().min(1)).optional(),
+  source_constraints: z.array(z.string().min(1)).optional(),
+  url: z.string().url().optional(),
+  attachments: attachmentsSchema,
+}).strict();
+export type CoverageResearchRecoverInput = z.infer<typeof coverageResearchRecoverInputSchema>;

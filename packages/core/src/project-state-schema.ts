@@ -50,6 +50,7 @@ const sourceRecordSchema = z.object({
   revision: z.string().regex(/^[a-f0-9]{64}$/u),
   media_type: z.string().min(1),
   original_name: z.string().optional(),
+  provenance_kind: z.enum(["external_source", "user_supplement"]).optional(),
   selection_snapshot: z.object({
     operation_id: z.string().min(1),
     candidate_ids: z.array(z.string().min(1)),

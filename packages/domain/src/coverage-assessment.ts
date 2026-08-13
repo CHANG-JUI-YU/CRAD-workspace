@@ -923,3 +923,53 @@ export function buildCoverageSnapshot(state: ProjectState, assessment: CoverageA
   const hash = coverageSnapshotHash(snapshotObj);
   return { ...snapshotObj, snapshot_hash: hash };
 }
+
+export interface ResolutionConsequencesPreview {
+  assessment_id: string;
+  assessment_revision: string;
+  requirement_id: string;
+  character_id?: string;
+  action: "user_supplement" | "creative_completion";
+  status: string;
+  consequences: string[];
+  current_resolution_ids: string[];
+}
+
+export function previewResolutionConsequences(
+  state: ProjectState,
+  assessment: CoverageAssessment,
+  requirementId: string,
+  characterId: string | undefined,
+  action: "user_supplement" | "creative_completion",
+): ResolutionConsequencesPreview {
+  const itemKey = `${characterId ?? "world"}/${requirementId}`;
+  const item = assessment.items.find((candidate) => `${candidate.character_id ?? "world"}/${candidate.requirement_id}` === itemKey);
+  if (item === undefined) {
+    throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Requirement ${requirementId} is not part of the current assessment scope.`, true);
+  }
+  const consequences = action === "user_supplement"
+    ? [
+        "內容會永久記錄為 user-supplied provenance。",
+        "仍需經 ingestion、Fact Curation 與 Fact Review。",
+        "使用者不需管理內部 ID。",
+        "只有正式接受且 provenance 有效的 Fact 才能滿足 coverage。",
+      ]
+    : [
+        "明確授權非來源支持的創作補全。",
+        "不會建立虛假的 SourceRecord 或 Fact provenance。",
+        "正式產物將保留此 creative authorization lineage。",
+      ];
+  const currentResolutionIds = state.coverage_resolutions
+    .filter((resolution) => resolution.requirement_id === requirementId && (characterId === undefined ? resolution.character_id === undefined : resolution.character_id === characterId))
+    .map((resolution) => resolution.id);
+  return {
+    assessment_id: assessment.id,
+    assessment_revision: assessment.revision,
+    requirement_id: requirementId,
+    ...(characterId === undefined ? {} : { character_id: characterId }),
+    action,
+    status: item.status,
+    consequences,
+    current_resolution_ids: currentResolutionIds,
+  };
+}

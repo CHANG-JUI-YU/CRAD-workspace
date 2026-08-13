@@ -30,7 +30,7 @@ export function isResearcherAgent(agentId: string): boolean {
 
 export function assertResearchCapability(
   agentInput: ExecutionActorInput,
-  action: "approve_source" | "fetch_source" | "accept_fact" | "mutate_requirements" | "submit_candidates" | "exhaust_task",
+  action: "approve_source" | "fetch_source" | "accept_fact" | "mutate_requirements" | "submit_candidates" | "exhaust_task" | "revise_task",
 ): void {
   const { executionAgent } = resolveExecutionActors(agentInput);
   if (isResearcherAgent(executionAgent)) {
@@ -565,4 +565,77 @@ export function fetchApprovedSource(
   const sources = [...state.sources, sourceRecord];
 
   return { source: sourceRecord, state: { ...state, candidates, sources } };
+}
+
+export interface ResearchTaskRevision {
+  query_seeds?: string[];
+  source_constraints?: string[];
+}
+
+export function reviseResearchTask(
+  state: ProjectState,
+  taskId: string,
+  patch: ResearchTaskRevision,
+  executionInput: ExecutionActorInput,
+): { task: ResearchTaskRecord; state: ProjectState } {
+  assertResearchCapability(executionInput, "revise_task");
+  const task = state.coverage_research_tasks.find((item) => item.id === taskId);
+  if (task === undefined) throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task ${taskId} does not exist.`, true);
+  if (task.status !== "exhausted") {
+    throw new CoreError("COVERAGE_RESEARCH_TASK_TERMINAL", `Research task "${taskId}" is ${task.status} and cannot be revised; only exhausted tasks can spawn a successor.`, true);
+  }
+  const { lease_owner: _leaseOwner, lease_expires_at: _leaseExpiresAt, ...taskBase } = task;
+  const successor: ResearchTaskRecord = {
+    ...taskBase,
+    id: internalId("task"),
+    status: "queued",
+    claim_generation: 0,
+    attempt: 0,
+    predecessor_id: task.id,
+    ...(patch.query_seeds === undefined ? {} : { query_seeds: [...patch.query_seeds] }),
+    ...(patch.source_constraints === undefined ? {} : { source_constraints: [...patch.source_constraints] }),
+    searched_queries: [],
+    source_families: [],
+    created_at: now(),
+    updated_at: now(),
+  };
+  const batches = state.coverage_research_batches.map((batch) =>
+    batch.id === task.batch_id ? { ...batch, task_ids: [...batch.task_ids, successor.id] } : batch,
+  );
+  return {
+    task: successor,
+    state: applyDerivedResearchBatchStatus(
+      { ...state, coverage_research_tasks: [...state.coverage_research_tasks, successor], coverage_research_batches: batches },
+      task.batch_id,
+    ),
+  };
+}
+
+export function createUserSupplementSource(
+  state: ProjectState,
+  text: string,
+  actor: string,
+  operationId: string,
+): { source: SourceRecord; state: ProjectState } {
+  const sourceId = internalId("source");
+  const sourceRecord: SourceRecord = {
+    id: sourceId,
+    candidate_id: internalId("candidate"),
+    title: "User supplement",
+    canonical_text: text,
+    original_hash: contentHash(text),
+    revision: contentHash(canonicalJson({ id: sourceId, text, kind: "user_supplement" })),
+    media_type: "text/plain",
+    provenance_kind: "user_supplement",
+    selection_snapshot: {
+      operation_id: operationId,
+      candidate_ids: [],
+      approved_candidate_ids: [],
+      rejected_candidate_ids: [],
+      selected_at: now(),
+      selected_by: actor,
+    },
+    created_at: now(),
+  };
+  return { source: sourceRecord, state: { ...state, sources: [...state.sources, sourceRecord] } };
 }

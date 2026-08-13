@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { coverageRequirementIdSchema } from "./coverage.js";
 import { factDecisionSchema, templateProposalValueSchema } from "./templates.js";
 import { zhujiProposalValueSchema } from "./zhuji.js";
 import type { IssueSeverity, OperationAttachmentRef, OperationProgress, OperationStatus } from "./project-state.js";
@@ -23,6 +24,73 @@ export const issueUpdateCommandPayloadSchema = z.object({
 
 export const factReviewCommandPayloadSchema = z.object({
   decisions: z.array(factDecisionSchema).min(1).optional(),
+}).strict();
+
+export const coverageResearchCandidateCommandItemSchema = z.object({
+  title: z.string().min(1),
+  url: z.string().url().optional(),
+  canonical_url: z.string().url().optional(),
+  snippet: z.string().optional(),
+  domain: z.string().optional(),
+  official: z.boolean().optional(),
+  target_requirement_ids: z.array(z.string().min(1)).optional(),
+}).strict();
+
+export const coverageResearchStartCommandPayloadSchema = z.object({
+  assessment_id: z.string().min(1),
+  assessment_revision: z.string().min(1),
+}).strict();
+
+export const coverageResearchClaimCommandPayloadSchema = z.object({
+  batch_id: z.string().min(1),
+  lease_duration_ms: z.number().int().positive().optional(),
+}).strict();
+
+export const coverageResearchCandidatesCommandPayloadSchema = z.object({
+  task_id: z.string().min(1),
+  claim_generation: z.number().int().nonnegative(),
+  lease_owner: z.string().min(1),
+  candidates: z.array(coverageResearchCandidateCommandItemSchema).min(1),
+}).strict();
+
+export const coverageResearchExhaustCommandPayloadSchema = z.object({
+  task_id: z.string().min(1),
+  claim_generation: z.number().int().nonnegative(),
+  lease_owner: z.string().min(1),
+  searched_queries: z.array(z.string().min(1)),
+  source_families: z.array(z.string().min(1)),
+  exhausted_reason: z.string().min(1),
+}).strict();
+
+export const coverageResolutionConfirmCommandPayloadSchema = z.object({
+  assessment_id: z.string().min(1),
+  assessment_revision: z.string().min(1),
+  requirement_id: coverageRequirementIdSchema,
+  character_id: z.string().min(1).optional(),
+  action: z.enum(["user_supplement", "creative_completion"]),
+  choice: z.string().min(1),
+  rationale: z.string().min(1),
+}).strict();
+
+export const coverageSupplementCommandPayloadSchema = z.object({
+  assessment_id: z.string().min(1),
+  assessment_revision: z.string().min(1),
+  requirement_id: coverageRequirementIdSchema,
+  character_id: z.string().min(1).optional(),
+  text: z.string().min(1).optional(),
+  url: z.string().url().optional(),
+}).strict().superRefine((value, context) => {
+  if (value.text === undefined && value.url === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "A user supplement requires either text or a URL.", path: ["text"] });
+  }
+});
+
+export const coverageResearchRecoverCommandPayloadSchema = z.object({
+  task_id: z.string().min(1),
+  action: z.enum(["revise_query", "revise_constraints", "manual_url", "supplement", "creative_completion"]),
+  query_seeds: z.array(z.string().min(1)).optional(),
+  source_constraints: z.array(z.string().min(1)).optional(),
+  url: z.string().url().optional(),
 }).strict();
 
 const emptyOperationCommandPayloadSchema = z.object({}).strict();
@@ -50,6 +118,14 @@ export interface IssueUpdateCommandPayload {
   severity?: IssueSeverity;
 }
 export type FactReviewCommandPayload = z.infer<typeof factReviewCommandPayloadSchema>;
+export type CoverageResearchCandidateCommandItem = z.infer<typeof coverageResearchCandidateCommandItemSchema>;
+export type CoverageResearchStartCommandPayload = z.infer<typeof coverageResearchStartCommandPayloadSchema>;
+export type CoverageResearchClaimCommandPayload = z.infer<typeof coverageResearchClaimCommandPayloadSchema>;
+export type CoverageResearchCandidatesCommandPayload = z.infer<typeof coverageResearchCandidatesCommandPayloadSchema>;
+export type CoverageResearchExhaustCommandPayload = z.infer<typeof coverageResearchExhaustCommandPayloadSchema>;
+export type CoverageResolutionConfirmCommandPayload = z.infer<typeof coverageResolutionConfirmCommandPayloadSchema>;
+export type CoverageSupplementCommandPayload = z.infer<typeof coverageSupplementCommandPayloadSchema>;
+export type CoverageResearchRecoverCommandPayload = z.infer<typeof coverageResearchRecoverCommandPayloadSchema>;
 
 export const operationCommandSchema = z.discriminatedUnion("type", [
   z.object({ version: z.literal(1), type: z.literal("template_proposal"), payload: templateProposalValueSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
@@ -61,6 +137,13 @@ export const operationCommandSchema = z.discriminatedUnion("type", [
   z.object({ version: z.literal(1), type: z.literal("issue_update"), payload: issueUpdateCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
   z.object({ version: z.literal(1), type: z.literal("request"), payload: emptyOperationCommandPayloadSchema.optional(), attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
   z.object({ version: z.literal(1), type: z.literal("fact_review"), payload: factReviewCommandPayloadSchema.optional(), attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("coverage_research_start"), payload: coverageResearchStartCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("coverage_research_claim"), payload: coverageResearchClaimCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("coverage_research_candidates"), payload: coverageResearchCandidatesCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("coverage_research_exhaust"), payload: coverageResearchExhaustCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("coverage_resolution_confirm"), payload: coverageResolutionConfirmCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("coverage_supplement"), payload: coverageSupplementCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("coverage_research_recover"), payload: coverageResearchRecoverCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
   z.object({ version: z.literal(1), type: z.literal("invalid"), payload: z.object({ code: z.literal("OPERATION_COMMAND_INVALID"), message: z.string().min(1), recoverable: z.literal(true), original_type: z.string().min(1).optional() }).strict(), attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
 ]);
 

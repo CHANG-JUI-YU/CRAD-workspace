@@ -96,6 +96,7 @@ import {
   runInitialCoverageAssessment,
 } from "@st-workspace/domain";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
+import { coverageResearchCandidates as coverageResearchCandidatesQuery, coverageResearchClaim as coverageResearchClaimQuery, coverageResearchExhaust as coverageResearchExhaustQuery, coverageResearchRecover as coverageResearchRecoverQuery, coverageResearchStart as coverageResearchStartQuery, coverageResolutionConfirm as coverageResolutionConfirmQuery, coverageResolutionPreview as coverageResolutionPreviewQuery, coverageSupplement as coverageSupplementQuery, dashboardCoverage as dashboardCoverageQuery, executeCoverageResearchCandidates, executeCoverageResearchClaim, executeCoverageResearchExhaust, executeCoverageResearchRecover, executeCoverageResearchStart, executeCoverageResolutionConfirm, executeCoverageSupplement, type CoverageApplicationDeps, type CoverageCommandOutcome } from "./coverage-application.js";
 import {
   artifactQueryFromDashboardQuery,
   auditQueryFromDashboardQuery,
@@ -212,6 +213,7 @@ export * from "./interview-application.js";
 export * from "./operation-runner.js";
 export * from "./operation-recovery.js";
 export * from "./source-application.js";
+export * from "./coverage-application.js";
 export interface DashboardProjectView {
   project_id: string;
   project_name?: string;
@@ -456,6 +458,27 @@ export class WorkspaceRuntime {
       : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID", execution),
     request: (operation, _command, context, execution) => this.replayRequest(operation, context, execution),
     fact_review: (operation, _command, context, execution) => this.replayRequest(operation, context, execution),
+    coverage_research_start: (operation, command, _context, execution) => command.type === "coverage_research_start"
+      ? this.replayCoverageCommand("coverage.research.started", operation, executeCoverageResearchStart)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID", execution),
+    coverage_research_claim: (operation, command, _context, execution) => command.type === "coverage_research_claim"
+      ? this.replayCoverageCommand("coverage.research.claimed", operation, executeCoverageResearchClaim)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID", execution),
+    coverage_research_candidates: (operation, command, _context, execution) => command.type === "coverage_research_candidates"
+      ? this.replayCoverageCommand("coverage.research.candidates.submitted", operation, executeCoverageResearchCandidates)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID", execution),
+    coverage_research_exhaust: (operation, command, _context, execution) => command.type === "coverage_research_exhaust"
+      ? this.replayCoverageCommand("coverage.research.exhausted", operation, executeCoverageResearchExhaust)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID", execution),
+    coverage_resolution_confirm: (operation, command, _context, execution) => command.type === "coverage_resolution_confirm"
+      ? this.replayCoverageCommand("coverage.resolution.confirmed", operation, executeCoverageResolutionConfirm)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID", execution),
+    coverage_supplement: (operation, command, _context, execution) => command.type === "coverage_supplement"
+      ? this.replayCoverageCommand("coverage.supplement.ingested", operation, executeCoverageSupplement)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID", execution),
+    coverage_research_recover: (operation, command, _context, execution) => command.type === "coverage_research_recover"
+      ? this.replayCoverageCommand("coverage.research.recovered", operation, executeCoverageResearchRecover)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID", execution),
   };
 
   constructor(private readonly repository: ProjectRepository, options: WorkspaceRuntimeOptions = {}) {
@@ -994,6 +1017,28 @@ export class WorkspaceRuntime {
     return result;
   }
 
+  private coverageDeps(): CoverageApplicationDeps {
+    return {
+      repository: this.repository,
+      knowledge: this.knowledge,
+      ...(this.fetcher === undefined ? {} : { fetcher: this.fetcher }),
+    };
+  }
+
+  private async replayCoverageCommand(marker: string, operation: OperationRecord, apply: (deps: CoverageApplicationDeps, state: ProjectState, operation: OperationRecord, actor: string, attachments: Array<{ name: string; content: Uint8Array; media_type?: string }>) => Promise<CoverageCommandOutcome>): Promise<RequestResult> {
+    const deps = this.coverageDeps();
+    const state = await this.repository.read();
+  if (this.hasAuditMarker(operation.id, marker, state)) return responseFromOperation(await this.completeReplayedOperation(operation));
+  const attachments = await this.loadOperationAttachments(operation, operation.command) ?? [];
+    const outcome = await apply(deps, state, operation, operation.actor ?? "worker", attachments);
+    await this.repository.commit(state.revision, (current) => ({
+      ...current,
+      ...outcome.state,
+      audit: [...outcome.state.audit, ...outcome.auditEvents.map((event) => ({ ...event, project_revision: current.revision + 1 }))],
+    }));
+    return { operation_id: operation.id, status: "completed", summary: `${marker} applied.`, completed: [], blocked: [], ...outcome.result };
+  }
+
   private async markNeedsInput(operation: OperationRecord, question: string, execution?: ExecutionContext): Promise<RequestResult> {
     if (execution !== undefined) await this.assertExecutionLease(execution);
     const state = await this.repository.read();
@@ -1012,6 +1057,7 @@ export class WorkspaceRuntime {
   private operationRequiresIdentity(operation: OperationRecord): boolean {
     const command = operation.command;
     if (command?.type === "template_proposal" || command?.type === "zhuji_proposal" || command?.type === "issue_update") return true;
+    if (command?.type === "coverage_research_claim" || command?.type === "coverage_research_candidates" || command?.type === "coverage_research_exhaust" || command?.type === "coverage_research_recover") return true;
     return operation.kind === "authoring" || operation.kind === "review";
   }
 
@@ -1025,6 +1071,8 @@ export class WorkspaceRuntime {
     }
     if (command?.type === "zhuji_proposal") return this.agents.registryView().canSubmitProposal(agent, "zhuji");
     if (command?.type === "issue_update") return this.agents.registryView().canUpdateIssue(agent);
+    if (command?.type === "coverage_research_start" || command?.type === "coverage_research_claim" || command?.type === "coverage_research_candidates" || command?.type === "coverage_research_exhaust" || command?.type === "coverage_research_recover") return definition.role === "researcher";
+    if (command?.type === "coverage_resolution_confirm" || command?.type === "coverage_supplement") return definition.role === "orchestrator";
     if (operation.kind === "review") return definition.role === "critic" || definition.role === "reviewer";
     if (operation.kind === "authoring") return definition.role === "creator" || definition.role === "converter" || definition.role === "orchestrator";
     return true;
@@ -2416,6 +2464,42 @@ export class WorkspaceRuntime {
       }],
     }));
     return { assessment, requirement_set: requirementSet, current };
+  }
+
+  async coverageResearchStart(actor: string, assessmentId?: string, assessmentRevision?: string): Promise<Record<string, unknown>> {
+    return coverageResearchStartQuery(this.coverageDeps(), actor, assessmentId, assessmentRevision);
+  }
+
+  async coverageResearchClaim(actor: string, batchId: string, leaseDurationMs?: number): Promise<Record<string, unknown>> {
+    return coverageResearchClaimQuery(this.coverageDeps(), actor, batchId, leaseDurationMs);
+  }
+
+  async coverageResearchCandidates(actor: string, taskId: string, claimGeneration: number, leaseOwner: string, candidates: Array<{ title: string; url?: string | undefined; canonical_url?: string | undefined; snippet?: string | undefined; domain?: string | undefined; official?: boolean | undefined; target_requirement_ids?: string[] | undefined }>): Promise<Record<string, unknown>> {
+    return coverageResearchCandidatesQuery(this.coverageDeps(), actor, taskId, claimGeneration, leaseOwner, candidates);
+  }
+
+  async coverageResearchExhaust(actor: string, taskId: string, claimGeneration: number, leaseOwner: string, searchedQueries: string[], sourceFamilies: string[], exhaustedReason: string): Promise<Record<string, unknown>> {
+    return coverageResearchExhaustQuery(this.coverageDeps(), actor, taskId, claimGeneration, leaseOwner, searchedQueries, sourceFamilies, exhaustedReason);
+  }
+
+  async coverageResolutionPreview(input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; action: "user_supplement" | "creative_completion" }): Promise<import("@st-workspace/domain").ResolutionConsequencesPreview> {
+    return coverageResolutionPreviewQuery(this.coverageDeps(), input);
+  }
+
+  async coverageResolutionConfirm(actor: string, input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; action: "user_supplement" | "creative_completion"; choice: string; rationale: string }): Promise<Record<string, unknown>> {
+    return coverageResolutionConfirmQuery(this.coverageDeps(), actor, input);
+  }
+
+  async coverageSupplement(actor: string, input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; text?: string; url?: string }, attachments: Array<{ name: string; content: Uint8Array; media_type?: string }>): Promise<Record<string, unknown>> {
+    return coverageSupplementQuery(this.coverageDeps(), actor, input, attachments);
+  }
+
+  async coverageResearchRecover(actor: string, input: { task_id: string; action: "revise_query" | "revise_constraints" | "manual_url" | "supplement" | "creative_completion"; query_seeds?: string[]; source_constraints?: string[]; url?: string }, attachments: Array<{ name: string; content: Uint8Array; media_type?: string }> = []): Promise<Record<string, unknown>> {
+    return coverageResearchRecoverQuery(this.coverageDeps(), actor, input, attachments);
+  }
+
+  async dashboardCoverage(): Promise<Record<string, unknown>> {
+    return dashboardCoverageQuery(this.coverageDeps());
   }
 
   async reextract(operationId: string, sourceIds: readonly string[], actor: string, extractorRevision?: string): Promise<KnowledgeExecutionResult> {

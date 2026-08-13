@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { CoreError, internalId, z, type AdaptationDecision, type RequestResult } from "@st-workspace/core";
-import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, decodeAttachments, factReviewBatchInputSchema, imageInputSchema, imageRemoveInputSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
+import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverageResearchCandidatesInputSchema, coverageResearchClaimInputSchema, coverageResearchExhaustInputSchema, coverageResearchRecoverInputSchema, coverageResearchStartInputSchema, coverageResolutionConfirmInputSchema, coverageResolutionPreviewInputSchema, coverageSupplementInputSchema, decodeAttachments, factReviewBatchInputSchema, imageInputSchema, imageRemoveInputSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
 import { type AgentAdapter, type WorkspaceProjectManager, type WorkspaceRuntime, type WorkspaceWorker } from "@st-workspace/runtime";
 import { structuredError } from "./errors.js";
 import { body, compact, dashboardPathId, dashboardQuery, json, parseRequest } from "./http-utils.js";
@@ -315,6 +315,60 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       if (request.method === "POST" && url.pathname === "/workspace/fact/review/run") {
         const runtime = await deps.getRuntime();
         json(response, 200, await runtime.startFactReviewRun(deps.actor));
+        return true;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/coverage") {
+        json(response, 200, await (await deps.getRuntime()).dashboardCoverage());
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/coverage/research/start") {
+        const parsed = await body(request);
+        const input = parseRequest(coverageResearchStartInputSchema, parsed, "COVERAGE_RESEARCH_REQUIRED");
+        json(response, 200, await (await deps.getRuntime()).coverageResearchStart(deps.actor, input.assessment_id, input.assessment_revision));
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/coverage/research/claim") {
+        const parsed = await body(request);
+        const input = parseRequest(coverageResearchClaimInputSchema, parsed, "COVERAGE_RESEARCH_REQUIRED");
+        json(response, 200, await (await deps.getRuntime()).coverageResearchClaim(deps.actor, input.batch_id, input.lease_duration_ms));
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/coverage/research/candidates") {
+        const parsed = await body(request);
+        const input = parseRequest(coverageResearchCandidatesInputSchema, parsed, "COVERAGE_RESEARCH_REQUIRED");
+        json(response, 200, await (await deps.getRuntime()).coverageResearchCandidates(deps.actor, input.task_id, input.claim_generation, input.lease_owner, input.candidates));
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/coverage/research/exhaust") {
+        const parsed = await body(request);
+        const input = parseRequest(coverageResearchExhaustInputSchema, parsed, "COVERAGE_RESEARCH_REQUIRED");
+        json(response, 200, await (await deps.getRuntime()).coverageResearchExhaust(deps.actor, input.task_id, input.claim_generation, input.lease_owner, input.searched_queries, input.source_families, input.exhausted_reason));
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/coverage/resolution/preview") {
+        const parsed = await body(request);
+        const input = parseRequest(coverageResolutionPreviewInputSchema, parsed, "COVERAGE_RESOLUTION_REQUIRED");
+        json(response, 200, await (await deps.getRuntime()).coverageResolutionPreview({ assessment_id: input.assessment_id, assessment_revision: input.assessment_revision, requirement_id: input.requirement_id, ...(input.character_id === undefined ? {} : { character_id: input.character_id }), action: input.action }));
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/coverage/resolution/confirm") {
+        const parsed = await body(request);
+        const input = parseRequest(coverageResolutionConfirmInputSchema, parsed, "COVERAGE_RESOLUTION_REQUIRED");
+        json(response, 200, await (await deps.getRuntime()).coverageResolutionConfirm(deps.actor, { assessment_id: input.assessment_id, assessment_revision: input.assessment_revision, requirement_id: input.requirement_id, ...(input.character_id === undefined ? {} : { character_id: input.character_id }), action: input.action, choice: input.choice, rationale: input.rationale }));
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/coverage/supplement") {
+        const parsed = await body(request);
+        const input = parseRequest(coverageSupplementInputSchema, parsed, "COVERAGE_SUPPLEMENT_REQUIRED");
+        const attachments = decodeAttachments(input.attachments);
+        json(response, 200, await (await deps.getRuntime()).coverageSupplement(deps.actor, { assessment_id: input.assessment_id, assessment_revision: input.assessment_revision, requirement_id: input.requirement_id, ...(input.character_id === undefined ? {} : { character_id: input.character_id }), ...(input.text === undefined ? {} : { text: input.text }), ...(input.url === undefined ? {} : { url: input.url }) }, attachments));
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/coverage/research/recover") {
+        const parsed = await body(request);
+        const input = parseRequest(coverageResearchRecoverInputSchema, parsed, "COVERAGE_RESEARCH_REQUIRED");
+        const attachments = decodeAttachments(input.attachments);
+        json(response, 200, await (await deps.getRuntime()).coverageResearchRecover(deps.actor, { task_id: input.task_id, action: input.action, ...(input.query_seeds === undefined ? {} : { query_seeds: input.query_seeds }), ...(input.source_constraints === undefined ? {} : { source_constraints: input.source_constraints }), ...(input.url === undefined ? {} : { url: input.url }) }, attachments));
         return true;
       }
       if (request.method === "POST" && url.pathname === "/workspace/knowledge/reextract") {

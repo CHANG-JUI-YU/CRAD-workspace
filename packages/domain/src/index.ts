@@ -31,6 +31,7 @@ export {
   deriveCoverageReadiness,
   fulfillUserSupplementResolution,
   isCoverageSensitiveArtifactKind,
+  previewResolutionConsequences,
   projectActiveCoverageBindings,
   recordUserDecisionAndResolution,
   requirementsResolved,
@@ -40,6 +41,7 @@ export {
   type ActiveCoverageBindingProjection,
   type ArtifactCoverageScope,
   type CoverageBlocker,
+  type ResolutionConsequencesPreview,
 } from "./coverage-assessment.js";
 export * from "./research-orchestration.js";
 export { ReviewService, type IssueUpdateAction, type IssueUpdateInput, type IssueUpdateResult, type ReviewExecutionResult } from "./review.js";

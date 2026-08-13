@@ -342,6 +342,90 @@ const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
     impact: "復原未執行，未產生任何副作用。",
     next_actions: ["重新指定執行代理後重試。"],
   },
+  COVERAGE_ASSESSMENT_STALE: {
+    category: "coverage",
+    message_zh: "Coverage 評估已過期。",
+    impact: "此操作未執行；評估內容與目前狀態不符。",
+    next_actions: ["重新執行 formal coverage assessment 後重試。"],
+  },
+  COVERAGE_ASSESSMENT_REQUIRED: {
+    category: "coverage",
+    message_zh: "需要先建立通過 Fact Review 的 formal coverage assessment。",
+    impact: "此操作未執行。",
+    next_actions: ["完成來源處理與 Fact Review 後重新執行 formal assessment。"],
+  },
+  COVERAGE_ASSESSMENT_INVALID: {
+    category: "coverage",
+    message_zh: "Coverage assessment 內容無效。",
+    impact: "此操作未執行。",
+    next_actions: ["檢查 assessment 項目與狀態後重試。"],
+  },
+  COVERAGE_RESOLUTION_INVALID: {
+    category: "coverage",
+    message_zh: "Coverage resolution 無效。",
+    impact: "此操作未執行；resolution 與目前評估或範圍不符。",
+    next_actions: ["確認評估 revision、角色範圍與來源後重試。"],
+  },
+  COVERAGE_RESOLUTION_REQUIRED: {
+    category: "coverage",
+    message_zh: "仍有未解決的 coverage requirement。",
+    impact: "發布或 authoring 被阻擋。",
+    next_actions: ["為每個 missing 項目選擇來源研究、使用者補充或創意補全。"],
+  },
+  COVERAGE_RESEARCH_REQUIRED: {
+    category: "coverage",
+    message_zh: "需要先建立來源研究批次。",
+    impact: "此操作未執行。",
+    next_actions: ["為 current assessment 建立 research batch 後重試。"],
+  },
+  COVERAGE_RESEARCH_TASK_STALE: {
+    category: "coverage",
+    message_zh: "研究任務已過期或不存在。",
+    impact: "此操作未執行。",
+    next_actions: ["重新載入研究任務狀態後重試。"],
+  },
+  COVERAGE_RESEARCH_TASK_TERMINAL: {
+    category: "coverage",
+    message_zh: "研究任務已終結，不能再修改。",
+    impact: "此操作未執行。",
+    next_actions: ["以 revise/recover 建立 successor 任務，或改用 resolution 流程。"],
+  },
+  COVERAGE_RESEARCH_TASK_LEASE_LOST: {
+    category: "coverage",
+    message_zh: "研究任務的租約已失效或 generation 不符。",
+    impact: "此提交被阻擋。",
+    next_actions: ["重新 claim 任務後重試。"],
+  },
+  COVERAGE_RESEARCH_EXHAUSTED: {
+    category: "coverage",
+    message_zh: "研究任務已耗盡搜尋。",
+    impact: "此操作未執行。",
+    next_actions: ["選擇 revise query、revise constraints、手動提供來源或 resolution。"],
+  },
+  COVERAGE_RESEARCH_CAPABILITY_DENIED: {
+    category: "coverage",
+    message_zh: "此代理沒有研究任務權限。",
+    impact: "此操作未執行。",
+    next_actions: ["使用具有 researcher 權限的代理執行。"],
+  },
+  COVERAGE_RESEARCH_APPROVAL_REQUIRED: {
+    category: "coverage",
+    message_zh: "來源尚未經使用者或 Director 批准。",
+    impact: "此操作未執行。",
+    next_actions: ["先批准候選來源再提取。"],
+  },
+  COVERAGE_SUPPLEMENT_REQUIRED: {
+    category: "coverage",
+    message_zh: "缺少使用者補充內容。",
+    impact: "此操作未執行。",
+    next_actions: ["提供補充文字、URL 或附件。"],
+  },
+  COVERAGE_USER_DECISION_INVALID: {
+    category: "coverage",
+    message_zh: "Coverage 使用者決定無效。",
+    impact: "此操作未執行。",
+    next_actions: ["以合法的 action 與 requirement 重新提交決定。"],
+  },
 };
 
 const CATEGORY_BY_PREFIX: Array<{ pattern: RegExp; category: string }> = [
@@ -368,6 +452,7 @@ const CATEGORY_BY_PREFIX: Array<{ pattern: RegExp; category: string }> = [
   { pattern: /^REVISION_/u, category: "storage" },
   { pattern: /^ATTACHMENT_/u, category: "storage" },
   { pattern: /^EXECUTION_/u, category: "operation" },
+  { pattern: /^COVERAGE_/u, category: "coverage" },
   { pattern: /^UNAUTHORIZED$/u, category: "auth" },
   { pattern: /^EXTERNAL_/u, category: "auth" },
 ];

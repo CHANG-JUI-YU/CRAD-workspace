@@ -7,6 +7,7 @@ import { DASHBOARD_API_JS } from "./dashboard-api.js";
 import { DASHBOARD_ACTIONS_JS } from "./dashboard-actions.js";
 import { DASHBOARD_PANELS_PUBLISH_JS } from "./dashboard-panels-publish.js";
 import { DASHBOARD_PANELS_REVIEW_JS } from "./dashboard-panels-review.js";
+import { DASHBOARD_PANELS_COVERAGE_JS } from "./dashboard-panels-coverage.js";
 import { DASHBOARD_PANELS_MEDIA_JS } from "./dashboard-panels-media.js";
 import { DASHBOARD_LISTENERS_JS } from "./dashboard-listeners.js";
 
@@ -27,6 +28,7 @@ export function dashboard(): string {
     + DASHBOARD_ACTIONS_JS
     + DASHBOARD_PANELS_PUBLISH_JS
     + DASHBOARD_PANELS_REVIEW_JS
+    + DASHBOARD_PANELS_COVERAGE_JS
     + DASHBOARD_PANELS_MEDIA_JS
     + DASHBOARD_LISTENERS_JS
     + DASHBOARD_FOOTER
