@@ -1,7 +1,8 @@
 import {
   canonicalJson,
-  contentHash,
+  computeBuildPlan,
   computeProjectProjection,
+  contentHash,
   CoreError,
   createQualityPolicySnapshot,
   internalId,
@@ -16,7 +17,7 @@ import {
 import { compileProject, type CardModeSelection } from "@st-workspace/compiler";
 import { buildRequiredArtifactManifest } from "./required-artifacts.js";
 import { validateWorkflow } from "./workflow-gate.js";
-import { buildCoverageSnapshot, coverageAssessmentFreshness } from "./coverage-assessment.js";
+import { buildCoverageSnapshot, coverageAssessmentFreshness, projectActiveCoverageBindings } from "./coverage-assessment.js";
 import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 
 export interface BuildExecutionResult {
@@ -193,6 +194,7 @@ export class BuildService {
 
     const sourceAdaptation = projection.intent.is_source_adaptation;
     const latestAssessment = initial.coverage_assessments.at(-1);
+    const plan = computeBuildPlan(initial, modeSelection);
     const coverageDiagnostics: Array<{ code: string; severity: "error"; message: string }> = [];
     if (sourceAdaptation) {
       if (latestAssessment === undefined || latestAssessment.pass !== "formal") {
@@ -207,9 +209,19 @@ export class BuildService {
           severity: "error",
           message: "最新 coverage assessment 已過期；請重新執行 formal assessment 後再打包。",
         });
+      } else {
+        for (const projected of projectActiveCoverageBindings(initial, plan)) {
+          if (projected.status === "missing") {
+            coverageDiagnostics.push({ code: "COVERAGE_AUTHORING_BINDING_MISSING", severity: "error", message: `Artifact ${projected.entry.artifact_id}（${projected.entry.kind}）缺少 coverage authoring binding；請重新 authoring 該產物。` });
+          } else if (projected.status === "stale") {
+            coverageDiagnostics.push({ code: "COVERAGE_AUTHORING_BINDING_STALE", severity: "error", message: `Artifact ${projected.entry.artifact_id} 的 coverage binding 已過期；請重新 authoring 該產物。` });
+          } else if (projected.status === "duplicate") {
+            coverageDiagnostics.push({ code: "COVERAGE_AUTHORING_BINDING_DUPLICATE", severity: "error", message: `Artifact ${projected.entry.artifact_id} 有多筆 current binding；請檢查 binding 記錄。` });
+          }
+        }
       }
     }
-    const coverageSnapshot = latestAssessment === undefined ? undefined : buildCoverageSnapshot(initial, latestAssessment);
+    const coverageSnapshot = latestAssessment === undefined ? undefined : buildCoverageSnapshot(initial, latestAssessment, plan);
 
     const build: BuildRecord = {
       id: internalId("build"),

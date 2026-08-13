@@ -18,6 +18,7 @@ import {
   type ZhujiProposalValue,
 } from "@st-workspace/core";
 import { ConversionService } from "./conversion.js";
+import { coverageAssessmentFreshness, deriveArtifactScopeResolutionIds, isCoverageSensitiveArtifactKind } from "./coverage-assessment.js";
 import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 
 export interface AuthoringExecutionResult {
@@ -116,12 +117,22 @@ function templateArtifactKind(kind: TemplateProposalValue["kind"]): ArtifactKind
 }
 
 export function createCoverageBindingForArtifact(state: ProjectState, artifact: ArtifactRecord, actor: string): AuthoringCoverageBinding | undefined {
+  if (!isCoverageSensitiveArtifactKind(artifact.kind)) return undefined;
+  const reqSet = state.coverage_requirement_sets.at(-1);
   const assessment = state.coverage_assessments.at(-1);
-  if (assessment === undefined) return undefined;
+  if (reqSet === undefined || assessment === undefined || assessment.pass !== "formal") return undefined;
 
-  const factProjectionRev = coverageFactProjectionRevision(state);
+  if (assessment.requirement_set_id !== reqSet.id || assessment.requirement_set_revision !== reqSet.revision) {
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", `Assessment ${assessment.id} no longer matches the current requirement set; run a fresh formal assessment before authoring.`, true);
+  }
+  if (!coverageAssessmentFreshness(state, assessment)) {
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", `Assessment ${assessment.id} is stale; run a fresh formal assessment before authoring.`, true);
+  }
+  if (assessment.input_snapshot.fact_projection_revision !== coverageFactProjectionRevision(state)) {
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", `Assessment ${assessment.id} fact projection is stale; run a fresh formal assessment before authoring.`, true);
+  }
 
-  const activeResolutions = state.coverage_resolutions.filter((r) => !state.coverage_resolutions.some((other) => other.supersedes === r.id));
+  const resolutionIds = deriveArtifactScopeResolutionIds(state, artifact, assessment);
 
   const bindingObj = {
     artifact_id: artifact.id,
@@ -129,9 +140,9 @@ export function createCoverageBindingForArtifact(state: ProjectState, artifact: 
     assessment_id: assessment.id,
     assessment_revision: assessment.revision,
     requirement_set_revision: assessment.requirement_set_revision,
-    fact_projection_revision: factProjectionRev,
+    fact_projection_revision: coverageFactProjectionRevision(state),
     ...(assessment.input_snapshot.fact_review_run_id === undefined ? {} : { fact_review_run_id: assessment.input_snapshot.fact_review_run_id }),
-    resolution_ids: activeResolutions.map((r) => r.id),
+    resolution_ids: resolutionIds,
     created_by: actor,
   };
 
@@ -220,7 +231,31 @@ export class AuthoringService {
     await this.repository.commit(initial.revision, (current) => {
       assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
       const currentPrevious = [...current.artifacts].reverse().find((item) => item.key === key);
-      if (currentPrevious?.content_hash === hash) {
+      const latestAssessment = current.coverage_assessments.at(-1);
+      const reqSet = current.coverage_requirement_sets.at(-1);
+      const workflowEnabled = reqSet !== undefined && latestAssessment !== undefined && latestAssessment.pass === "formal";
+      const needsBinding = workflowEnabled && isCoverageSensitiveArtifactKind(kind);
+      const bindingCurrent = needsBinding && currentPrevious !== undefined && latestAssessment !== undefined && reqSet !== undefined
+        ? (() => {
+          const existing = current.coverage_authoring_bindings.find((item) => item.artifact_id === currentPrevious.id && item.artifact_revision === currentPrevious.revision);
+          if (existing === undefined) return false;
+          return existing.assessment_id === latestAssessment.id
+            && existing.assessment_revision === latestAssessment.revision
+            && existing.requirement_set_revision === reqSet.revision
+            && existing.fact_projection_revision === coverageFactProjectionRevision(current)
+            && existing.input_snapshot_hash === authoringBindingHash({
+              artifact_id: existing.artifact_id,
+              artifact_revision: existing.artifact_revision,
+              assessment_id: existing.assessment_id,
+              assessment_revision: existing.assessment_revision,
+              requirement_set_revision: existing.requirement_set_revision,
+              fact_projection_revision: existing.fact_projection_revision,
+              ...(existing.fact_review_run_id === undefined ? {} : { fact_review_run_id: existing.fact_review_run_id }),
+              resolution_ids: existing.resolution_ids,
+            });
+        })()
+        : false;
+      if (currentPrevious?.content_hash === hash && (!needsBinding || bindingCurrent)) {
         reusedId = currentPrevious.id;
         return {
           ...current,
@@ -229,10 +264,12 @@ export class AuthoringService {
             : item),
         };
       }
+      const binding = needsBinding ? createCoverageBindingForArtifact(current, artifact, actor) : undefined;
       return {
         ...current,
         ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
         artifacts: [...current.artifacts, artifact],
+        ...(binding === undefined ? {} : { coverage_authoring_bindings: [...current.coverage_authoring_bindings, binding] }),
         operations: current.operations.map((item) => item.id === operationId
             ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: artifact.id, status: "completed", message: `Validated ${proposalValue.kind} template.` }], result_summary: summary })
           : item),
@@ -243,7 +280,15 @@ export class AuthoringService {
           actor: auditActor,
           occurred_at: now(),
           project_revision: current.revision + 1,
-          details: { artifact_id: artifact.id, key, template_kind: proposalValue.kind, artifact_kind: kind, based_on: previous?.revision, agent_id: actor },
+          details: {
+            artifact_id: artifact.id,
+            key,
+            template_kind: proposalValue.kind,
+            artifact_kind: kind,
+            based_on: previous?.revision,
+            agent_id: actor,
+            ...(binding === undefined ? {} : { binding_id: binding.id, binding_hash: binding.input_snapshot_hash, assessment_id: binding.assessment_id, requirement_set_revision: binding.requirement_set_revision }),
+          },
         }],
       };
     });
@@ -292,7 +337,31 @@ export class AuthoringService {
     await this.repository.commit(initial.revision, (current) => {
       assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
       const currentPrevious = [...current.artifacts].reverse().find((item) => item.key === key);
-      if (currentPrevious?.content_hash === hash) {
+      const latestAssessment = current.coverage_assessments.at(-1);
+      const reqSet = current.coverage_requirement_sets.at(-1);
+      const workflowEnabled = reqSet !== undefined && latestAssessment !== undefined && latestAssessment.pass === "formal";
+      const needsBinding = workflowEnabled && isCoverageSensitiveArtifactKind("zhuji");
+      const bindingCurrent = needsBinding && currentPrevious !== undefined && latestAssessment !== undefined && reqSet !== undefined
+        ? (() => {
+          const existing = current.coverage_authoring_bindings.find((item) => item.artifact_id === currentPrevious.id && item.artifact_revision === currentPrevious.revision);
+          if (existing === undefined) return false;
+          return existing.assessment_id === latestAssessment.id
+            && existing.assessment_revision === latestAssessment.revision
+            && existing.requirement_set_revision === reqSet.revision
+            && existing.fact_projection_revision === coverageFactProjectionRevision(current)
+            && existing.input_snapshot_hash === authoringBindingHash({
+              artifact_id: existing.artifact_id,
+              artifact_revision: existing.artifact_revision,
+              assessment_id: existing.assessment_id,
+              assessment_revision: existing.assessment_revision,
+              requirement_set_revision: existing.requirement_set_revision,
+              fact_projection_revision: existing.fact_projection_revision,
+              ...(existing.fact_review_run_id === undefined ? {} : { fact_review_run_id: existing.fact_review_run_id }),
+              resolution_ids: existing.resolution_ids,
+            });
+        })()
+        : false;
+      if (currentPrevious?.content_hash === hash && (!needsBinding || bindingCurrent)) {
         reusedId = currentPrevious.id;
         return {
           ...current,
@@ -301,10 +370,12 @@ export class AuthoringService {
             : item),
         };
       }
+      const binding = needsBinding ? createCoverageBindingForArtifact(current, artifact, actor) : undefined;
       return {
         ...current,
         ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
         artifacts: [...current.artifacts, artifact],
+        ...(binding === undefined ? {} : { coverage_authoring_bindings: [...current.coverage_authoring_bindings, binding] }),
         operations: current.operations.map((item) => item.id === operationId
           ? updateOperation(item, { status: "completed", progress: [...item.progress, { item_id: artifact.id, status: "completed", message: "珠璣結構通過 Schema 驗證並建立 revision" }], result_summary: summary })
           : item),
@@ -315,7 +386,17 @@ export class AuthoringService {
           actor: auditActor,
           occurred_at: now(),
           project_revision: current.revision + 1,
-          details: { artifact_id: artifact.id, key, kind: "zhuji", character_id: parsed.data.character_id, module: module.module, revision: artifact.revision, based_on: previous?.revision, agent_id: actor },
+          details: {
+            artifact_id: artifact.id,
+            key,
+            kind: "zhuji",
+            character_id: parsed.data.character_id,
+            module: module.module,
+            revision: artifact.revision,
+            based_on: previous?.revision,
+            agent_id: actor,
+            ...(binding === undefined ? {} : { binding_id: binding.id, binding_hash: binding.input_snapshot_hash, assessment_id: binding.assessment_id, requirement_set_revision: binding.requirement_set_revision }),
+          },
         }],
       };
     });

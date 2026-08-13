@@ -1,7 +1,7 @@
-import { artifactDependencyFingerprint, computeProjectProjection, createEntityMatcher, factReferencesEntity, parseWardrobeMarkdown, relationshipPerspectiveEntries, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
+import { artifactDependencyFingerprint, computeBuildPlan, computeProjectProjection, coverageFactProjectionRevision, createEntityMatcher, factReferencesEntity, parseWardrobeMarkdown, relationshipPerspectiveEntries, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "./required-artifacts.js";
 import { contradictingAcceptedFacts } from "./knowledge.js";
-import { buildCoverageSnapshot, coverageAssessmentFreshness, requirementsResolved, sourceFactsReady } from "./coverage-assessment.js";
+import { coverageAssessmentFreshness, projectActiveCoverageBindings, requirementsResolved, sourceFactsReady } from "./coverage-assessment.js";
 
 export type WorkflowGatePhase = "draft" | "publish";
 
@@ -605,13 +605,28 @@ function reportCoverageReadiness(state: ProjectState, diagnostics: WorkflowDiagn
     });
   }
 
-  for (const binding of state.coverage_authoring_bindings) {
-    if (binding.assessment_id !== latestAssessment.id || binding.assessment_revision !== latestAssessment.revision) {
+  const plan = computeBuildPlan(state);
+  for (const projected of projectActiveCoverageBindings(state, plan)) {
+    if (projected.status === "missing") {
+      add(diagnostics, {
+        code: "COVERAGE_AUTHORING_BINDING_MISSING",
+        message: `Artifact ${projected.entry.artifact_id}（${projected.entry.kind}）缺少 coverage authoring binding；請重新 authoring 該產物。`,
+        severity: "error",
+        artifact_ids: [projected.entry.artifact_id],
+      });
+    } else if (projected.status === "stale") {
       add(diagnostics, {
         code: "COVERAGE_AUTHORING_BINDING_STALE",
-        message: `Authoring binding ${binding.id} for artifact ${binding.artifact_id} was created against an outdated coverage assessment revision.`,
+        message: `Artifact ${projected.entry.artifact_id} 的 coverage binding 已過期；請重新 authoring 該產物。`,
         severity: "error",
-        artifact_ids: [binding.artifact_id],
+        artifact_ids: [projected.entry.artifact_id],
+      });
+    } else if (projected.status === "duplicate") {
+      add(diagnostics, {
+        code: "COVERAGE_AUTHORING_BINDING_DUPLICATE",
+        message: `Artifact ${projected.entry.artifact_id} 有多筆 current binding；請檢查 binding 記錄。`,
+        severity: "error",
+        artifact_ids: [projected.entry.artifact_id],
       });
     }
   }
@@ -624,11 +639,21 @@ function reportCoverageSnapshotFreshness(state: ProjectState, diagnostics: Workf
   const latestAssessment = state.coverage_assessments.at(-1);
   if (latestAssessment === undefined) return;
 
-  const currentSnapshot = buildCoverageSnapshot(state, latestAssessment);
-  if (lastBuild.coverage_snapshot.snapshot_hash !== currentSnapshot.snapshot_hash) {
+  const snapshot = lastBuild.coverage_snapshot;
+  const stale = snapshot.assessment_id !== latestAssessment.id
+    || snapshot.assessment_revision !== latestAssessment.revision
+    || snapshot.requirement_set_revision !== (state.coverage_requirement_sets.find((s) => s.id === latestAssessment.requirement_set_id)?.revision ?? "")
+    || snapshot.fact_projection_revision !== coverageFactProjectionRevision(state)
+    || snapshot.fact_review_run_id !== latestAssessment.input_snapshot.fact_review_run_id
+    || snapshot.source_revisions.length !== latestAssessment.input_snapshot.source_revisions.length
+    || snapshot.source_revisions.some((ref, index) => {
+      const current = latestAssessment.input_snapshot.source_revisions[index];
+      return current === undefined || current.source_id !== ref.source_id || current.revision !== ref.revision;
+    });
+  if (stale) {
     add(diagnostics, {
       code: "COVERAGE_PUBLISH_SNAPSHOT_STALE",
-      message: `The previewed coverage snapshot hash (${lastBuild.coverage_snapshot.snapshot_hash.slice(0, 12)}) does not match current state (${currentSnapshot.snapshot_hash.slice(0, 12)}). Blueprint, facts, or resolutions changed after preview.`,
+      message: `The previewed coverage snapshot (${snapshot.snapshot_hash.slice(0, 12)}) no longer matches current assessment, facts, or sources. Blueprint, facts, or resolutions changed after preview.`,
       severity: "error",
     });
   }

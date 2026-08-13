@@ -4,6 +4,8 @@ import {
   COVERAGE_INITIAL_ITEM_STATUSES,
   WORLD_COVERAGE_DIMENSION,
   CoreError,
+  artifactBinding,
+  authoringBindingHash,
   computeProjectProjection,
   coverageAssessmentRevision,
   coverageFactProjectionRevision,
@@ -13,7 +15,11 @@ import {
   createEntityMatcher,
   factReferencesEntity,
   internalId,
+  parseArtifactValue,
+  type ArtifactRecord,
   type AuthoringCoverageBinding,
+  type BuildPlan,
+  type BuildPlanEntry,
   type CoverageAssessment,
   type CoverageAssessmentInputSnapshot,
   type CoverageAssessmentItem,
@@ -703,9 +709,176 @@ export function requirementsResolved(state: ProjectState): {
 }
 
 /**
+ * Artifact kinds that must carry a current coverage binding when the coverage
+ * workflow is enabled. Workflow/intermediate artifacts (review, source_research,
+ * fact_curation, fact_review, conversion, import_analysis, director_routing,
+ * draft_note, unknown) and the Blueprint itself are intentionally excluded.
+ */
+export const COVERAGE_SENSITIVE_ARTIFACT_KINDS: ReadonlySet<string> = new Set([
+  "character",
+  "relationship",
+  "world_lore",
+  "greeting",
+  "zhuji",
+  "palette",
+  "wardrobe",
+  "plugin",
+]);
+
+export function isCoverageSensitiveArtifactKind(kind: string): boolean {
+  return COVERAGE_SENSITIVE_ARTIFACT_KINDS.has(kind);
+}
+
+export interface ArtifactCoverageScope {
+  character_ids: string[];
+  world: boolean;
+  global: boolean;
+}
+
+export function deriveArtifactCoverageScope(state: ProjectState, artifact: ArtifactRecord): ArtifactCoverageScope {
+  switch (artifact.kind) {
+    case "world_lore":
+      return { character_ids: [], world: true, global: false };
+    case "plugin":
+      return { character_ids: [], world: false, global: true };
+    case "character":
+    case "zhuji":
+    case "palette":
+    case "wardrobe": {
+      const bound = artifactBinding(artifact);
+      if (bound.characterIds.length === 0) {
+        throw new CoreError("COVERAGE_BINDING_SCOPE_INVALID", `Cannot derive a coverage scope for ${artifact.kind} artifact ${artifact.id}: no bound character id.`, true);
+      }
+      return { character_ids: [...bound.characterIds], world: false, global: false };
+    }
+    case "relationship": {
+      const document = parseArtifactValue(artifact) as { document?: { character_ids?: unknown } };
+      const raw = Array.isArray(document?.document?.character_ids) ? document.document.character_ids.filter((c): c is string => typeof c === "string" && c.trim().length > 0) : [];
+      if (raw.length > 0) return { character_ids: raw, world: false, global: false };
+      const bound = artifactBinding(artifact);
+      if (bound.characterIds.length === 0) {
+        throw new CoreError("COVERAGE_BINDING_SCOPE_INVALID", `Cannot derive a coverage scope for relationship artifact ${artifact.id}: no participant character ids.`, true);
+      }
+      return { character_ids: [...bound.characterIds], world: false, global: false };
+    }
+    case "greeting": {
+      const bound = artifactBinding(artifact);
+      if (bound.characterIds.length > 0) return { character_ids: [...bound.characterIds], world: false, global: false };
+      const projection = computeProjectProjection(state).intent;
+      const primary = projection.primary_character_id ?? projection.roster[0]?.id;
+      if (primary === undefined) {
+        throw new CoreError("COVERAGE_BINDING_SCOPE_INVALID", `Cannot derive a coverage scope for greeting artifact ${artifact.id}: no participant or primary character.`, true);
+      }
+      return { character_ids: [primary], world: false, global: false };
+    }
+    default:
+      throw new CoreError("COVERAGE_BINDING_SCOPE_INVALID", `Artifact ${artifact.id} (${artifact.kind}) is not coverage-sensitive.`, true);
+  }
+}
+
+export function deriveArtifactScopeResolutionIds(state: ProjectState, artifact: ArtifactRecord, assessment: CoverageAssessment): string[] {
+  const scope = deriveArtifactCoverageScope(state, artifact);
+  const relevant = assessment.items.filter((item) => {
+    if (scope.world) return item.character_id === undefined;
+    if (scope.global) return true;
+    return item.character_id !== undefined && scope.character_ids.includes(item.character_id);
+  });
+  const ids = [...new Set(relevant.flatMap((item) => item.resolution_ids))].sort();
+  const resolutionsById = new Map(state.coverage_resolutions.map((r) => [r.id, r]));
+  for (const id of ids) {
+    const resolution = resolutionsById.get(id);
+    if (resolution === undefined || resolution.supersedes !== undefined || resolution.requirement_set_revision !== assessment.requirement_set_revision) {
+      throw new CoreError("COVERAGE_BINDING_RESOLUTION_INVALID", `Resolution ${id} is not current or not compatible with assessment ${assessment.revision}.`, true);
+    }
+  }
+  return ids;
+}
+
+export interface ActiveCoverageBindingProjection {
+  entry: BuildPlanEntry;
+  artifact: ArtifactRecord;
+  status: "current" | "missing" | "stale" | "duplicate";
+  binding?: AuthoringCoverageBinding;
+  reason?: string;
+}
+
+export function projectActiveCoverageBindings(state: ProjectState, plan: BuildPlan): ActiveCoverageBindingProjection[] {
+  const artifactsById = new Map(state.artifacts.map((a) => [a.id, a]));
+  const assessment = state.coverage_assessments.at(-1);
+  const result: ActiveCoverageBindingProjection[] = [];
+  for (const entry of plan.entries) {
+    if (!isCoverageSensitiveArtifactKind(entry.kind)) continue;
+    const artifact = artifactsById.get(entry.artifact_id);
+    if (artifact === undefined) continue;
+    const byId = state.coverage_authoring_bindings.filter((b) => b.artifact_id === entry.artifact_id);
+    if (byId.length === 0) {
+      result.push({ entry, artifact, status: "missing" });
+      continue;
+    }
+    const matches = byId.filter((b) => b.artifact_revision === entry.revision);
+    if (matches.length > 1) {
+      result.push({ entry, artifact, status: "duplicate", reason: `${matches.length} bindings match this artifact revision` });
+      continue;
+    }
+    if (matches.length === 0) {
+      result.push({ entry, artifact, status: "stale", binding: byId[0]!, reason: "artifact revision mismatch" });
+      continue;
+    }
+    const binding = matches[0]!;
+    if (assessment === undefined || assessment.pass !== "formal") {
+      result.push({ entry, artifact, status: "stale", binding, reason: "no current formal assessment" });
+      continue;
+    }
+    if (binding.assessment_id !== assessment.id || binding.assessment_revision !== assessment.revision) {
+      result.push({ entry, artifact, status: "stale", binding, reason: "assessment mismatch" });
+      continue;
+    }
+    const reqSet = state.coverage_requirement_sets.find((s) => s.id === assessment.requirement_set_id);
+    if (reqSet === undefined || binding.requirement_set_revision !== reqSet.revision) {
+      result.push({ entry, artifact, status: "stale", binding, reason: "requirement set mismatch" });
+      continue;
+    }
+    if (binding.fact_projection_revision !== coverageFactProjectionRevision(state)) {
+      result.push({ entry, artifact, status: "stale", binding, reason: "fact projection mismatch" });
+      continue;
+    }
+    let expectedResolutionIds: string[];
+    try {
+      expectedResolutionIds = deriveArtifactScopeResolutionIds(state, artifact, assessment);
+    } catch (error) {
+      if (error instanceof CoreError && error.code === "COVERAGE_BINDING_RESOLUTION_INVALID") {
+        result.push({ entry, artifact, status: "stale", binding, reason: "resolution scope invalid" });
+        continue;
+      }
+      throw error;
+    }
+    if (expectedResolutionIds.join("\u0000") !== [...binding.resolution_ids].sort().join("\u0000")) {
+      result.push({ entry, artifact, status: "stale", binding, reason: "resolution set mismatch" });
+      continue;
+    }
+    const recomputed = authoringBindingHash({
+      artifact_id: binding.artifact_id,
+      artifact_revision: binding.artifact_revision,
+      assessment_id: binding.assessment_id,
+      assessment_revision: binding.assessment_revision,
+      requirement_set_revision: binding.requirement_set_revision,
+      fact_projection_revision: binding.fact_projection_revision,
+      ...(binding.fact_review_run_id === undefined ? {} : { fact_review_run_id: binding.fact_review_run_id }),
+      resolution_ids: [...binding.resolution_ids].sort(),
+    });
+    if (recomputed !== binding.input_snapshot_hash) {
+      result.push({ entry, artifact, status: "stale", binding, reason: "input snapshot hash mismatch" });
+      continue;
+    }
+    result.push({ entry, artifact, status: "current", binding });
+  }
+  return result;
+}
+
+/**
  * Build immutable CoverageSnapshot for preview/build/publish.
  */
-export function buildCoverageSnapshot(state: ProjectState, assessment: CoverageAssessment): CoverageSnapshot {
+export function buildCoverageSnapshot(state: ProjectState, assessment: CoverageAssessment, plan: BuildPlan): CoverageSnapshot {
   const reqSet = state.coverage_requirement_sets.find((s) => s.id === assessment.requirement_set_id);
   const precheck = latestRecordedPrecheck(state);
 
@@ -725,7 +898,10 @@ export function buildCoverageSnapshot(state: ProjectState, assessment: CoverageA
     resolutionIds.push(...item.resolution_ids);
   }
 
-  const activeBindings = state.coverage_authoring_bindings.map((b) => b.id);
+  const activeBindings = projectActiveCoverageBindings(state, plan)
+    .filter((p) => p.status === "current")
+    .map((p) => p.binding!.id)
+    .sort();
 
   const snapshotObj: Omit<CoverageSnapshot, "snapshot_hash"> = {
     assessment_id: assessment.id,

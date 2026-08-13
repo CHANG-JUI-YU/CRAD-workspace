@@ -220,10 +220,13 @@ describe("audit5 batch2 coverage canonical correctness", () => {
     const set = buildDefaultRequirementSet(state, "director");
     const assessment = runFormalCoverageAssessment(state, set, "op-1", "system");
     await commitAssessment(repository, 2, set, assessment);
+    const characterContent = JSON.stringify({ kind: "character", document: { schema_version: 1, id: "alpha", display_name: "Alpha", summary: "Calm." } });
+    await repository.commit(3, (next) => ({ ...next, artifacts: [...next.artifacts, { id: "character-1", key: "character:alpha", kind: "character", name: "alpha", content: characterContent, media_type: "application/json", content_hash: contentHash(characterContent), revision: contentHash(characterContent), status: "draft", created_at: now, updated_at: now, created_by: "server", operation_id: "op-author" }] }));
     const withAssessment = await repository.read();
     const coreRevision = coverageFactProjectionRevision(withAssessment);
     expect(assessment.input_snapshot.fact_projection_revision).toBe(coreRevision);
-    const binding = createCoverageBindingForArtifact(withAssessment, withAssessment.artifacts[0]!, "server");
+    const characterArtifact = withAssessment.artifacts.find((artifact) => artifact.kind === "character")!;
+    const binding = createCoverageBindingForArtifact(withAssessment, characterArtifact, "server");
     expect(binding?.fact_projection_revision).toBe(coreRevision);
     expect(binding?.assessment_id).toBe(assessment.id);
   });

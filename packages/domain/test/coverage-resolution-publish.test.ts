@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  computeBuildPlan,
   contentHash,
   createProjectState,
   internalId,
@@ -157,7 +158,7 @@ describe("Source Coverage Assessment Batches 7-9", () => {
     const gate = validateWorkflow(state, "publish");
     expect(gate.ok).toBe(false);
     expect(gate.diagnostics.some((d) => d.code === "COVERAGE_RESOLUTION_REQUIRED")).toBe(true);
-    expect(gate.diagnostics.some((d) => d.code === "COVERAGE_AUTHORING_BINDING_STALE")).toBe(true);
+    expect(gate.diagnostics.some((d) => d.code === "COVERAGE_AUTHORING_BINDING_STALE")).toBe(false);
   });
 
   test("Batch 9: Preview and publish coverage snapshot stale detection", () => {
@@ -168,7 +169,7 @@ describe("Source Coverage Assessment Batches 7-9", () => {
     const assessment = runFormalCoverageAssessment(state, reqSet, mockOpId, "director");
     state = { ...state, coverage_assessments: [assessment] };
 
-    const snapshot = buildCoverageSnapshot(state, assessment);
+    const snapshot = buildCoverageSnapshot(state, assessment, computeBuildPlan(state));
 
     // Add a build record with snapshot
     state = {
