@@ -1,7 +1,7 @@
 import { createInterviewState, type InterviewState } from "./interview.js";
 import type { AdaptationDecision } from "./authoring-context.js";
 import { canonicalJson, contentHash, internalId, CoreError } from "./core-utilities.js";
-import { coverageRequirementIdForDimension, type CoverageAssessment, type CoverageRequirementSet, type CoverageUserDecisionRecord } from "./coverage.js";
+import { coverageRequirementIdForDimension, type CoverageAssessment, type CoverageRequirementSet, type CoverageResearchLineageLink, type CoverageUserDecisionRecord, type ResearchBatchRecord, type ResearchTaskRecord } from "./coverage.js";
 import type { OperationCommand, OperationRecord, AuditEvent } from "./operations.js";
 
 export type OperationStatus =
@@ -414,6 +414,7 @@ export interface OperationProgress {
   artifact_id?: string;
 }
 
+
 export interface OperationAttachmentRef {
   id: string;
   name: string;
@@ -450,6 +451,9 @@ export interface ProjectState {
   coverage_requirement_sets: CoverageRequirementSet[];
   coverage_assessments: CoverageAssessment[];
   coverage_user_decisions: CoverageUserDecisionRecord[];
+  coverage_research_batches: ResearchBatchRecord[];
+  coverage_research_tasks: ResearchTaskRecord[];
+  coverage_research_lineages: CoverageResearchLineageLink[];
 }
 
 export function createProjectState(projectId: string): ProjectState {
@@ -481,6 +485,9 @@ export function createProjectState(projectId: string): ProjectState {
     coverage_requirement_sets: [],
     coverage_assessments: [],
     coverage_user_decisions: [],
+    coverage_research_batches: [],
+    coverage_research_tasks: [],
+    coverage_research_lineages: [],
   };
 }
 
@@ -545,9 +552,12 @@ export function migrateProjectStateV1ToV2(state: Record<string, unknown>): Recor
     ...state,
     schema_version: 2,
     facts,
-    coverage_requirement_sets: [],
-    coverage_assessments: [],
-    coverage_user_decisions: [],
+    coverage_requirement_sets: Array.isArray(state.coverage_requirement_sets) ? state.coverage_requirement_sets : [],
+    coverage_assessments: Array.isArray(state.coverage_assessments) ? state.coverage_assessments : [],
+    coverage_user_decisions: Array.isArray(state.coverage_user_decisions) ? state.coverage_user_decisions : [],
+    coverage_research_batches: Array.isArray(state.coverage_research_batches) ? state.coverage_research_batches : [],
+    coverage_research_tasks: Array.isArray(state.coverage_research_tasks) ? state.coverage_research_tasks : [],
+    coverage_research_lineages: Array.isArray(state.coverage_research_lineages) ? state.coverage_research_lineages : [],
   };
 }
 

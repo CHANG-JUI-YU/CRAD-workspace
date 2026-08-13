@@ -12,6 +12,7 @@ import {
 } from "@st-workspace/core";
 import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
 import { canonicalizeSource, canonicalizeSourceUrl, extractSourceUrl } from "./source-canonicalizer.js";
+import { assertResearchCapability } from "./research-orchestration.js";
 
 export { canonicalizeSource, canonicalizeSourceUrl, extractSourceUrl } from "./source-canonicalizer.js";
 
@@ -19,9 +20,10 @@ export { AuthoringService, type AuthoringExecutionResult, inferAuthoringKind } f
 export { BuildService, type BuildExecutionResult } from "./build.js";
 export { ConversionService, type ConversionExecutionResult } from "./conversion.js";
 export { ImportService, type ImportExecutionResult } from "./import.js";
-export { KnowledgeService, reviewRunProjectionRevision, type FactReviewExecutionResult, type FactReviewRunExecutionResult, type KnowledgeExecutionResult } from "./knowledge.js";
+export { KnowledgeService, getTaskBoundChunksAndHints, reviewRunProjectionRevision, type FactReviewExecutionResult, type FactReviewRunExecutionResult, type KnowledgeExecutionResult, type TaskBoundChunksAndHintsResult } from "./knowledge.js";
 export { validateCurationClaims } from "./fact-curation-service.js";
 export { buildDefaultRequirementSet, coverageAssessmentFreshness, runFormalCoverageAssessment, runInitialCoverageAssessment } from "./coverage-assessment.js";
+export * from "./research-orchestration.js";
 export { ReviewService, type IssueUpdateAction, type IssueUpdateInput, type IssueUpdateResult, type ReviewExecutionResult } from "./review.js";
 export { validateWorkflow, type WorkflowDiagnostic, type WorkflowGatePhase, type WorkflowGateResult } from "./workflow-gate.js";
 export { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput, type ResolvedExecutionActors } from "./execution-context.js";
@@ -170,8 +172,8 @@ export class SourceService {
     const hasUrl = requestedUrl !== undefined;
     if (context.attachments.length > 0 || hasUrl) {
       const additions: SourceCandidate[] = context.attachments.length > 0
-        ? context.attachments.map((attachment) => ({ id: internalId("candidate"), title: attachment.name, status: "approved" as const }))
-        : [{ id: internalId("candidate"), title: requestedUrl ?? "來源", url: requestedUrl!, canonical_url: requestedUrl!, status: "approved" as const }];
+        ? context.attachments.map((attachment) => ({ id: internalId("candidate"), title: attachment.name, status: "pending" as const }))
+        : [{ id: internalId("candidate"), title: requestedUrl ?? "來源", url: requestedUrl!, canonical_url: requestedUrl!, status: "pending" as const }];
       await this.repository.commit(state.revision, (current) => {
         assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
         const selected: SourceCandidate[] = [];
@@ -185,26 +187,15 @@ export class SourceService {
           selected.push(addition);
         }
         const selectedCandidates = [...reused, ...selected];
-        const candidateIds = selectedCandidates.map((candidate) => candidate.id);
-        const selectionSnapshot: SourceSelectionSnapshot = {
-          operation_id: operationId,
-          candidate_ids: candidateIds,
-          approved_candidate_ids: candidateIds,
-          rejected_candidate_ids: [],
-          selected_at: now(),
-          selected_by: executionAgent,
-        };
         const selectedById = new Map(selectedCandidates.map((candidate) => [candidate.id, candidate]));
         return {
         ...current,
         candidates: [
           ...current.candidates.map((candidate) => {
             if (!selectedById.has(candidate.id)) return candidate;
-            if (candidate.status === "ingested") return { ...candidate, selection_snapshot: selectionSnapshot };
-            const { failure: _failure, ...withoutFailure } = candidate;
-            return { ...withoutFailure, status: "approved" as const, selection_snapshot: selectionSnapshot };
+            return candidate;
           }),
-          ...selected.map((candidate) => ({ ...candidate, selection_snapshot: selectionSnapshot })),
+          ...selected,
         ],
         };
       });
@@ -283,6 +274,7 @@ export class SourceService {
   }
 
   async selectCandidates(operationId: string, decisions: SourceSelectionDecision[], actorInput: ExecutionActorInput): Promise<SourceSelectionResult> {
+    assertResearchCapability(actorInput, "approve_source");
     const actors = resolveExecutionActors(actorInput);
     const actor = actors.executionAgent;
     const auditActor = actors.auditActor;

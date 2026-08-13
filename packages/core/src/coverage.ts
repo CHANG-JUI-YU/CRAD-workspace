@@ -378,3 +378,107 @@ export function coverageRequirementSetRevision(requirementSet: Omit<CoverageRequ
 export function coverageAssessmentRevision(assessment: Omit<CoverageAssessment, "id" | "revision" | "created_at">): string {
   return contentHash(canonicalJson({ pass: assessment.pass, requirement_set_id: assessment.requirement_set_id, requirement_set_revision: assessment.requirement_set_revision, input_snapshot: assessment.input_snapshot, items: assessment.items, operation_id: assessment.operation_id }));
 }
+
+export type ResearchBatchStatus = "open" | "completed" | "exhausted" | "stale" | "cancelled";
+export const RESEARCH_BATCH_STATUSES = ["open", "completed", "exhausted", "stale", "cancelled"] as const;
+
+export interface ResearchBatchRecord {
+  id: string;
+  assessment_id: string;
+  assessment_revision: string;
+  requirement_set_id: string;
+  requirement_set_revision: string;
+  status: ResearchBatchStatus;
+  task_ids: string[];
+  created_by: string;
+  created_at: string;
+}
+
+export const researchBatchSchema = z.object({
+  id: z.string().min(1),
+  assessment_id: z.string().min(1),
+  assessment_revision: z.string().min(1),
+  requirement_set_id: z.string().min(1),
+  requirement_set_revision: z.string().min(1),
+  status: z.enum(RESEARCH_BATCH_STATUSES),
+  task_ids: z.array(z.string().min(1)),
+  created_by: z.string().min(1),
+  created_at: z.string().datetime({ offset: true }),
+}).strict();
+
+export type ResearchTaskStatus = "queued" | "claimed" | "running" | "completed" | "exhausted" | "failed" | "stale" | "cancelled";
+export const RESEARCH_TASK_STATUSES = ["queued", "claimed", "running", "completed", "exhausted", "failed", "stale", "cancelled"] as const;
+
+export interface ResearchTaskRecord {
+  id: string;
+  batch_id: string;
+  character_id?: string;
+  requirement_ids: string[];
+  dimension_paths: string[];
+  query_seeds: string[];
+  source_constraints?: string[];
+  status: ResearchTaskStatus;
+  claim_generation: number;
+  lease_owner?: string;
+  lease_expires_at?: string;
+  attempt: number;
+  predecessor_id?: string;
+  searched_queries: string[];
+  source_families: string[];
+  exhausted_reason?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const researchTaskSchema = z.object({
+  id: z.string().min(1),
+  batch_id: z.string().min(1),
+  character_id: z.string().min(1).optional(),
+  requirement_ids: z.array(coverageRequirementIdSchema).min(1),
+  dimension_paths: z.array(z.string().min(1)),
+  query_seeds: z.array(z.string().min(1)),
+  source_constraints: z.array(z.string().min(1)).optional(),
+  status: z.enum(RESEARCH_TASK_STATUSES),
+  claim_generation: z.number().int().nonnegative(),
+  lease_owner: z.string().min(1).optional(),
+  lease_expires_at: z.string().datetime({ offset: true }).optional(),
+  attempt: z.number().int().nonnegative(),
+  predecessor_id: z.string().min(1).optional(),
+  searched_queries: z.array(z.string().min(1)),
+  source_families: z.array(z.string().min(1)),
+  exhausted_reason: z.string().min(1).optional(),
+  created_at: z.string().datetime({ offset: true }),
+  updated_at: z.string().datetime({ offset: true }),
+}).strict();
+
+export interface CoverageResearchLineageLink {
+  id: string;
+  candidate_id?: string;
+  source_id?: string;
+  task_id: string;
+  batch_id: string;
+  assessment_id: string;
+  requirement_id: string;
+  character_id?: string;
+  created_at: string;
+}
+
+export const coverageResearchLineageLinkSchema = z.object({
+  id: z.string().min(1),
+  candidate_id: z.string().min(1).optional(),
+  source_id: z.string().min(1).optional(),
+  task_id: z.string().min(1),
+  batch_id: z.string().min(1),
+  assessment_id: z.string().min(1),
+  requirement_id: coverageRequirementIdSchema,
+  character_id: z.string().min(1).optional(),
+  created_at: z.string().datetime({ offset: true }),
+}).strict();
+
+export function researchBatchRevision(batch: Omit<ResearchBatchRecord, "created_at">): string {
+  return contentHash(canonicalJson({ assessment_id: batch.assessment_id, assessment_revision: batch.assessment_revision, requirement_set_id: batch.requirement_set_id, requirement_set_revision: batch.requirement_set_revision, status: batch.status, task_ids: batch.task_ids }));
+}
+
+export function researchTaskRevision(task: Omit<ResearchTaskRecord, "created_at" | "updated_at">): string {
+  return contentHash(canonicalJson({ batch_id: task.batch_id, character_id: task.character_id, requirement_ids: task.requirement_ids, dimension_paths: task.dimension_paths, status: task.status, claim_generation: task.claim_generation, attempt: task.attempt }));
+}

@@ -3,6 +3,7 @@ import {
   contentHash,
   CoreError,
   internalId,
+  coverageRequirementById,
   type FactClaim,
   type FactDecision,
   type FactEvidenceReference,
@@ -16,6 +17,8 @@ import {
   type KnowledgeChunk,
   type OperationRecord,
   type ProjectRepository,
+  type ProjectState,
+  type ResearchTaskRecord,
   type SourceRecord,
 } from "@st-workspace/core";
 import { computeProjectProjection, createEntityMatcher } from "@st-workspace/core";
@@ -342,6 +345,39 @@ function factFromSentence(source: SourceRecord, statement: string, actor: string
     updated_at: now(),
     created_by: actor,
   };
+}
+
+export interface TaskBoundChunksAndHintsResult {
+  task: ResearchTaskRecord;
+  requirement_hints: Array<{
+    id: string;
+    path: string;
+    label: string;
+    query_terms: string[];
+  }>;
+  chunks: KnowledgeChunk[];
+}
+
+export function getTaskBoundChunksAndHints(state: ProjectState, taskId: string): TaskBoundChunksAndHintsResult {
+  const task = state.coverage_research_tasks.find((t) => t.id === taskId);
+  if (task === undefined) {
+    throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task "${taskId}" not found.`, true);
+  }
+
+  const requirementHints = task.requirement_ids.flatMap((id) => {
+    const def = coverageRequirementById(id);
+    return def === undefined ? [] : [{ id: def.id, path: def.path, label: def.label, query_terms: def.query_terms }];
+  });
+
+  const taskLineages = state.coverage_research_lineages.filter((l) => l.task_id === taskId);
+  const candidateIds = new Set(taskLineages.map((l) => l.candidate_id).filter((id): id is string => id !== undefined));
+  const sourceIds = new Set(state.sources.filter((s) => candidateIds.has(s.candidate_id)).map((s) => s.id));
+
+  const chunks = sourceIds.size > 0
+    ? state.knowledge_chunks.filter((c) => sourceIds.has(c.source_id))
+    : state.knowledge_chunks;
+
+  return { task, requirement_hints: requirementHints, chunks };
 }
 
 export class KnowledgeService {

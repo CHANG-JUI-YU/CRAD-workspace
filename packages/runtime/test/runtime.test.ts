@@ -638,9 +638,14 @@ describe("natural language runtime boundary", () => {
       actor: "director",
       attachments: [{ name: "official.txt", content: new TextEncoder().encode("resumed content") }],
     });
-    expect(second.status).toBe("completed");
+    expect(second.status).toBe("needs_input");
     expect(second.operation_id).toBe(first.operation_id);
-    expect((await repository.read()).sources[0]?.canonical_text).toBe("resumed content");
+
+    // Approve the pending candidate as director
+    const pendingCand = (await repository.read()).candidates[0]!;
+    await runtime.selectSourceCandidates([{ candidate_id: pendingCand.id, decision: "approve" }], { actor: "director" });
+    const fetched = await runtime.fetchApprovedSource(pendingCand.id, "resumed content", { actor: "director" });
+    expect(fetched.source.canonical_text).toBe("resumed content");
   });
 
   it("accepts a first-time attachment without a candidate ID", async () => {
@@ -650,8 +655,11 @@ describe("natural language runtime boundary", () => {
       actor: "director",
       attachments: [{ name: "official.md", content: new TextEncoder().encode("attached source") }],
     });
-    expect(result.status).toBe("completed");
-    expect((await repository.read()).sources[0]?.canonical_text).toBe("attached source");
+    expect(result.status).toBe("needs_input");
+    const pendingCand = (await repository.read()).candidates[0]!;
+    await runtime.selectSourceCandidates([{ candidate_id: pendingCand.id, decision: "approve" }], { actor: "director" });
+    const fetched = await runtime.fetchApprovedSource(pendingCand.id, "attached source", { actor: "director" });
+    expect(fetched.source.canonical_text).toBe("attached source");
   });
 
   it("routes authoring and review through natural language only", async () => {
@@ -1614,11 +1622,11 @@ describe("artifact workbench groups", () => {
     const fetcher = async (url: string) => ({ content: new TextEncoder().encode(`content from ${url}`), media_type: "text/plain" });
     const runtime = new WorkspaceRuntime(repository, { sourceSearchMode: "agent_managed", fetcher });
     const result = await runtime.request("加入來源 https://example.test/direct-page", { actor: "user", attachments: [] });
-    expect(result.status).toBe("completed");
+    expect(result.status).toBe("needs_input");
     const state = await repository.read();
-    expect(state.sources.length).toBe(1);
-    expect(state.sources[0]?.title).toBe("https://example.test/direct-page");
+    expect(state.candidates.length).toBe(1);
     expect(state.candidates[0]?.url).toBe("https://example.test/direct-page");
+    expect(state.candidates[0]?.status).toBe("pending");
   });
 
   it("BUG3-10: G. recovery/resume preserves source_search_mode from operation snapshot and avoids side effects", async () => {

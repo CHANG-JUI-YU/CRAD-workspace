@@ -1,6 +1,14 @@
 import { z } from "zod";
 import { decodeOperationCommand } from "./operations.js";
-import { coverageAssessmentSchema, coverageRequirementIdSchema, coverageRequirementSetSchema, coverageUserDecisionSchema } from "./coverage.js";
+import {
+  coverageAssessmentSchema,
+  coverageRequirementIdSchema,
+  coverageRequirementSetSchema,
+  coverageResearchLineageLinkSchema,
+  coverageUserDecisionSchema,
+  researchBatchSchema,
+  researchTaskSchema,
+} from "./coverage.js";
 
 const sourceCandidateSchema = z.object({
   id: z.string().min(1),
@@ -461,4 +469,7 @@ export const projectStateSchema = z.object({
   coverage_requirement_sets: z.array(coverageRequirementSetSchema).default([]),
   coverage_assessments: z.array(coverageAssessmentSchema).default([]),
   coverage_user_decisions: z.array(coverageUserDecisionSchema).default([]),
+  coverage_research_batches: z.array(researchBatchSchema).default([]),
+  coverage_research_tasks: z.array(researchTaskSchema).default([]),
+  coverage_research_lineages: z.array(coverageResearchLineageLinkSchema).default([]),
 }).strict();
