@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { coverageRequirementIdSchema } from "./coverage.js";
+import { coverageRequirementIdSchema, coverageResearchStartScopeSchema } from "./coverage.js";
 import { factDecisionSchema, templateProposalValueSchema } from "./templates.js";
 import { zhujiProposalValueSchema } from "./zhuji.js";
 import type { IssueSeverity, OperationAttachmentRef, OperationProgress, OperationStatus } from "./project-state.js";
@@ -39,6 +39,7 @@ export const coverageResearchCandidateCommandItemSchema = z.object({
 export const coverageResearchStartCommandPayloadSchema = z.object({
   assessment_id: z.string().min(1),
   assessment_revision: z.string().min(1),
+  scope: coverageResearchStartScopeSchema.optional(),
 }).strict();
 
 export const coverageResearchClaimCommandPayloadSchema = z.object({
@@ -100,6 +101,14 @@ export const coverageResearchRecoverCommandPayloadSchema = z.object({
   query_seeds: z.array(z.string().min(1)).optional(),
   source_constraints: z.array(z.string().min(1)).optional(),
   url: z.string().url().optional(),
+  text: z.string().min(1).optional(),
+  choice: z.string().min(1).optional(),
+  rationale: z.string().min(1).optional(),
+  attachment_refs: z.array(z.object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    media_type: z.string().optional(),
+  })).optional(),
 }).strict();
 
 const emptyOperationCommandPayloadSchema = z.object({}).strict();

@@ -85,6 +85,8 @@ export {
   type CoverageCenterCell,
   type CoverageCenterCellStatus,
   type CoverageCenterMatrix,
+  type CoverageCenterResolutionRef,
+  type CoverageCenterTaskRef,
   type ResearchMonitor,
   type ResearchMonitorBatchView,
   type ResearchMonitorTaskView,

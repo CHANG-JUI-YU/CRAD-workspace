@@ -3,18 +3,24 @@ import {
   executionContextFromOperation,
   internalId,
   type AuditEvent,
+  type CoverageResearchLineageLink,
+  type CoverageResearchStartScope,
+  type CoverageResearchTarget,
   type ExecutionContext,
   type OperationRecord,
   type ProjectRepository,
   type ProjectState,
+  type ResearchTaskRecord,
   type SourceCandidate,
   type SourceRecord,
 } from "@st-workspace/core";
 import {
   KnowledgeService,
+  applyDerivedResearchBatchStatus,
   chunkSource,
   claimResearchTask,
   createResearchBatchFromAssessment,
+  createResearchBatchWithScope,
   createUserSupplementSource,
   coverageAssessmentFreshness,
   deriveCoverageCenterMatrix,
@@ -23,12 +29,16 @@ import {
   deriveResearchMonitor,
   emptyDownstreamInvalidationReport,
   exhaustResearchTask,
+  isTaskInAssessmentLineage,
   previewResolutionConsequences,
   recordUserDecisionAndResolution,
+  resolveResearchTargets,
   reviseResearchTask,
   submitResearchTaskCandidates,
   KNOWLEDGE_EXTRACTOR_REVISION,
+  RESEARCH_IN_FLIGHT_STATUSES,
   type CoverageCenterMatrix,
+  type CoverageResearchStartPreviewInput,
   type DownstreamInvalidationReport,
   type ExecutionActorInput,
   type ResearchCandidateInput,
@@ -260,23 +270,49 @@ async function recordFailedOperation(
   throw error;
 }
 
-/** Start coverage research: create a batch and queued tasks for the current assessment. */
+/** Start coverage research: create a batch and queued tasks for the current assessment or specific scope. */
 export async function executeCoverageResearchStart(deps: CoverageApplicationDeps, state: ProjectState, operation: OperationRecord, actor: string): Promise<CoverageCommandOutcome> {
   const command = operation.command;
   const latestAssessment = state.coverage_assessments.at(-1);
   const assessmentId = command !== undefined && command.type === "coverage_research_start" ? command.payload.assessment_id : latestAssessment?.id;
   const assessmentRevision = command !== undefined && command.type === "coverage_research_start" ? command.payload.assessment_revision : latestAssessment?.revision;
+  const scope = command !== undefined && command.type === "coverage_research_start" ? command.payload.scope : undefined;
   if (assessmentId === undefined || assessmentRevision === undefined) {
     throw new CoreError("COVERAGE_ASSESSMENT_STALE", "No coverage assessment exists; run a formal assessment first.", true);
   }
   assertAssessmentMatches(state, assessmentId, assessmentRevision);
-  const { batch, tasks, state: mutated } = createResearchBatchFromAssessment(state, assessmentId, "director");
+  const outcome = createResearchBatchWithScope(state, assessmentId, scope, "director");
+  const summaryText = outcome.reused
+    ? "所請求的研究項目已有進行中的任務，直接重用既有工作。"
+    : `已建立研究批次，包含 ${outcome.new_task_ids.length} 個新任務。`;
+
   return {
-    state: mutated,
-    result: { batch_id: batch.id, task_ids: tasks.map((task) => task.id), next_step: "請 Source Researcher 或驅動程式 Claim 任務執行來源搜尋" },
+    state: outcome.state,
+    result: {
+      status: "completed",
+      summary: summaryText,
+      reused: outcome.reused,
+      requested_targets: outcome.requested_targets,
+      existing_task_ids: outcome.existing_task_ids,
+      new_task_ids: outcome.new_task_ids,
+      task_ids: outcome.reused ? outcome.existing_task_ids : outcome.new_task_ids,
+      ...(outcome.batch === undefined ? {} : { batch_id: outcome.batch.id }),
+      exact_affected_count: outcome.exact_affected_count,
+      next_step: outcome.reused
+        ? "研究任務已在進行中，請由 Monitor 追蹤進度"
+        : "請 Source Researcher 或驅動程式 Claim 任務執行來源搜尋",
+    },
     auditEvents: [{
       id: internalId("audit"), operation_id: operation.id, event: "coverage.research.started", actor,
-      occurred_at: now(), details: { batch_id: batch.id, task_ids: tasks.map((task) => task.id), assessment_id: assessmentId, assessment_revision: assessmentRevision },
+      occurred_at: now(), details: {
+        batch_id: outcome.batch?.id,
+        task_ids: outcome.new_task_ids,
+        existing_task_ids: outcome.existing_task_ids,
+        reused: outcome.reused,
+        assessment_id: assessmentId,
+        assessment_revision: assessmentRevision,
+        ...(scope === undefined ? {} : { scope }),
+      },
     }],
   };
 }
@@ -286,6 +322,7 @@ export async function coverageResearchStart(
   actor: string,
   assessmentId?: string,
   assessmentRevision?: string,
+  scope?: CoverageResearchStartScope,
   operationId?: string,
 ): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
@@ -296,7 +333,7 @@ export async function coverageResearchStart(
     throw new CoreError("COVERAGE_ASSESSMENT_STALE", "No coverage assessment exists; run a formal assessment first.", true);
   }
   assertAssessmentMatches(state, targetId, targetRevision);
-  const operation = coverageOperation(actor, "coverage_research_start", { assessment_id: targetId, assessment_revision: targetRevision }, "source-researcher", "researcher", operationId);
+  const operation = coverageOperation(actor, "coverage_research_start", { assessment_id: targetId, assessment_revision: targetRevision, ...(scope === undefined ? {} : { scope }) }, "source-researcher", "researcher", operationId);
 
   const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.research.started");
   if (replayed !== undefined) return replayed;
@@ -307,6 +344,63 @@ export async function coverageResearchStart(
   } catch (error) {
     return await recordFailedOperation(deps, state, operation, error);
   }
+}
+
+export async function coverageResearchStartPreview(
+  deps: CoverageApplicationDeps,
+  input: CoverageResearchStartPreviewInput,
+): Promise<{
+  scope?: CoverageResearchStartScope;
+  requested_targets: CoverageResearchTarget[];
+  existing_targets: CoverageResearchTarget[];
+  existing_task_ids: string[];
+  new_targets: CoverageResearchTarget[];
+  new_task_count: number;
+  already_covered: boolean;
+}> {
+  const state = await deps.repository.read();
+  const latestAssessment = state.coverage_assessments.at(-1);
+  const targetId = input.assessment_id ?? latestAssessment?.id;
+  const targetRevision = input.assessment_revision ?? latestAssessment?.revision;
+  if (targetId === undefined || targetRevision === undefined) {
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "No coverage assessment exists; run a formal assessment first.", true);
+  }
+  assertAssessmentMatches(state, targetId, targetRevision);
+  const assessment = state.coverage_assessments.find((a) => a.id === targetId)!;
+  const requestedTargets = resolveResearchTargets(assessment, input.scope);
+
+  const existingTargets: CoverageResearchTarget[] = [];
+  const existingTaskIds: string[] = [];
+  const newTargets: CoverageResearchTarget[] = [];
+
+  for (const target of requestedTargets) {
+    const activeTask = state.coverage_research_tasks.find((task) => {
+      if (!RESEARCH_IN_FLIGHT_STATUSES.has(task.status)) return false;
+      if ((task.character_id ?? "") !== (target.character_id ?? "")) return false;
+      if (!task.requirement_ids.includes(target.requirement_id)) return false;
+      const batch = state.coverage_research_batches.find((b) => b.id === task.batch_id);
+      return isTaskInAssessmentLineage(task, batch, assessment);
+    });
+
+    if (activeTask !== undefined) {
+      existingTargets.push(target);
+      if (!existingTaskIds.includes(activeTask.id)) {
+        existingTaskIds.push(activeTask.id);
+      }
+    } else {
+      newTargets.push(target);
+    }
+  }
+
+  return {
+    ...(input.scope === undefined ? {} : { scope: input.scope }),
+    requested_targets: requestedTargets,
+    existing_targets: existingTargets,
+    existing_task_ids: existingTaskIds,
+    new_targets: newTargets,
+    new_task_count: newTargets.length,
+    already_covered: newTargets.length === 0 && requestedTargets.length > 0,
+  };
 }
 
 /** Claim the next queued research task for a batch. */
@@ -754,26 +848,265 @@ export async function coverageSupplement(
   }
 }
 
-/** Recover an exhausted research task: revise query/constraints (successor) or route to supplement/creative. */
-export async function executeCoverageResearchRecover(deps: CoverageApplicationDeps, state: ProjectState, operation: OperationRecord, actor: string, attachments: Array<{ name: string; content: Uint8Array; media_type?: string }>): Promise<CoverageCommandOutcome> {
+/** Recover an exhausted research task: revise query/constraints (successor), manual url, supplement, or creative completion. */
+export async function executeCoverageResearchRecover(
+  deps: CoverageApplicationDeps,
+  state: ProjectState,
+  operation: OperationRecord,
+  actor: string,
+  attachments: Array<{ name: string; content: Uint8Array; media_type?: string }>,
+): Promise<CoverageCommandOutcome> {
   const command = operation.command;
-  if (command === undefined || command.type !== "coverage_research_recover") throw new CoreError("OPERATION_COMMAND_INVALID", "Missing recover payload.", true);
+  if (command === undefined || command.type !== "coverage_research_recover") {
+    throw new CoreError("OPERATION_COMMAND_INVALID", "Missing recover payload.", true);
+  }
+  const { task_id, action } = command.payload;
+  const task = state.coverage_research_tasks.find((t) => t.id === task_id);
+  if (task === undefined) {
+    throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task "${task_id}" not found.`, true);
+  }
+  if (task.status !== "exhausted") {
+    throw new CoreError("COVERAGE_RESEARCH_TASK_TERMINAL", `Research task "${task_id}" is ${task.status} and cannot be recovered; only exhausted tasks can be recovered.`, true);
+  }
+
+  const latestAssessment = state.coverage_assessments.at(-1);
+  const latestReqSet = state.coverage_requirement_sets.at(-1);
+  const batch = state.coverage_research_batches.find((b) => b.id === task.batch_id);
+  if (
+    latestAssessment === undefined ||
+    latestReqSet === undefined ||
+    !isTaskInAssessmentLineage(task, batch, latestAssessment)
+  ) {
+    throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task "${task_id}" does not belong to the current assessment lineage.`, true);
+  }
+
+  const existingSuccessor = state.coverage_research_tasks.find(
+    (t) => t.predecessor_id === task.id && !["failed", "cancelled", "stale"].includes(t.status),
+  );
+  if (existingSuccessor !== undefined) {
+    throw new CoreError("COVERAGE_RESEARCH_TASK_ALREADY_RECOVERED", `Research task "${task_id}" has already been recovered by successor task "${existingSuccessor.id}".`, true);
+  }
+
   const executionInput = executionInputFor(operation, actor, "source-researcher", "researcher");
   let mutated = state;
   let result: Record<string, unknown> = {};
-  if (command.payload.action === "revise_query" || command.payload.action === "revise_constraints") {
-    const revised = reviseResearchTask(mutated, command.payload.task_id, { ...(command.payload.query_seeds === undefined ? {} : { query_seeds: command.payload.query_seeds }), ...(command.payload.source_constraints === undefined ? {} : { source_constraints: command.payload.source_constraints }) }, executionInput);
+  let successorTaskId: string | undefined;
+  let sourceId: string | undefined;
+  let resolutionId: string | undefined;
+
+  if (action === "revise_query" || action === "revise_constraints") {
+    const revised = reviseResearchTask(
+      mutated,
+      task.id,
+      {
+        ...(command.payload.query_seeds === undefined ? {} : { query_seeds: command.payload.query_seeds }),
+        ...(command.payload.source_constraints === undefined ? {} : { source_constraints: command.payload.source_constraints }),
+      },
+      executionInput,
+    );
     mutated = revised.state;
-    result = { task: revised.task, predecessor_id: command.payload.task_id, summary: `Revised task ${command.payload.task_id}.` };
-  } else {
-    throw new CoreError("COVERAGE_RESOLUTION_REQUIRED", "Use the resolution confirm flow for supplement and creative completion recovery.", true);
+    successorTaskId = revised.task.id;
+    result = {
+      task: revised.task,
+      predecessor_id: task.id,
+      action,
+      summary: `已建立 successor 研究任務 ${revised.task.id}。`,
+    };
+  } else if (action === "manual_url") {
+    const targetUrl = command.payload.url?.trim();
+    if (!targetUrl) {
+      throw new CoreError("OPERATION_COMMAND_INVALID", "手動提供 URL 必須包含有效的 url。", true);
+    }
+    let canonicalText = `Manual URL Source: ${targetUrl}`;
+    if (deps.fetcher !== undefined) {
+      try {
+        const fetched = await deps.fetcher(targetUrl);
+        if (fetched !== undefined && fetched.content !== undefined) {
+          const decoded = new TextDecoder("utf-8").decode(fetched.content);
+          if (decoded.trim() !== "") canonicalText = decoded.trim();
+        }
+      } catch (err) {
+        throw new CoreError("OPERATION_COMMAND_INVALID", `Failed to fetch URL ${targetUrl}: ${err instanceof Error ? err.message : String(err)}`, true);
+      }
+    }
+
+    const { candidate, source, state: s1 } = createUserSupplementSource(
+      mutated,
+      canonicalText,
+      actor,
+      operation.id,
+      "text/html",
+      `Manual URL: ${targetUrl}`,
+    );
+    const sourceWithUrl: SourceRecord = {
+      ...source,
+      canonical_url: targetUrl,
+      final_url: targetUrl,
+      provenance_kind: "external_source",
+    };
+    const s1Updated: ProjectState = {
+      ...s1,
+      sources: s1.sources.map((s) => (s.id === source.id ? sourceWithUrl : s)),
+    };
+
+    const chunks = chunkSource(sourceWithUrl, KNOWLEDGE_EXTRACTOR_REVISION);
+    const s2: ProjectState = { ...s1Updated, knowledge_chunks: [...s1Updated.knowledge_chunks, ...chunks] };
+
+    // Create Lineage Links for the task's requirements
+    const newLineages: CoverageResearchLineageLink[] = [];
+    for (const reqId of task.requirement_ids) {
+      newLineages.push({
+        id: internalId("lineage"),
+        candidate_id: candidate.id,
+        source_id: sourceWithUrl.id,
+        task_id: task.id,
+        batch_id: task.batch_id,
+        assessment_id: batch?.assessment_id ?? latestAssessment.id,
+        requirement_id: reqId,
+        ...(task.character_id === undefined ? {} : { character_id: task.character_id }),
+        created_at: now(),
+      });
+    }
+
+    const updatedTask: ResearchTaskRecord = {
+      ...task,
+      status: "completed",
+      updated_at: now(),
+    };
+
+    const s3: ProjectState = {
+      ...s2,
+      coverage_research_lineages: [...s2.coverage_research_lineages, ...newLineages],
+      coverage_research_tasks: s2.coverage_research_tasks.map((t) => (t.id === task.id ? updatedTask : t)),
+    };
+
+    mutated = applyDerivedResearchBatchStatus(s3, task.batch_id);
+    sourceId = sourceWithUrl.id;
+    result = {
+      source_id: sourceWithUrl.id,
+      candidate_id: candidate.id,
+      chunk_count: chunks.length,
+      task_id: task.id,
+      action,
+      summary: `已成功攝入手動 URL 來源並提煉 ${chunks.length} 個知識分片。`,
+    };
+  } else if (action === "supplement") {
+    const textSegments: string[] = [];
+    if (command.payload.text !== undefined && command.payload.text.trim() !== "") {
+      textSegments.push(command.payload.text.trim());
+    }
+    if (command.payload.url !== undefined && command.payload.url.trim() !== "") {
+      textSegments.push(`參考網址: ${command.payload.url.trim()}`);
+    }
+    for (const attachment of attachments) {
+      const decoded = new TextDecoder("utf-8").decode(attachment.content);
+      textSegments.push(`附件 [${attachment.name}]:\n${decoded}`);
+    }
+    if (textSegments.length === 0) {
+      throw new CoreError("COVERAGE_SUPPLEMENT_REQUIRED", "補充資料必須提供文字、URL 或附件其中一項。", true);
+    }
+    const combinedText = textSegments.join("\n\n---\n\n");
+    const { candidate, source, state: s1 } = createUserSupplementSource(
+      mutated,
+      combinedText,
+      actor,
+      operation.id,
+      "text/plain",
+      `補充資料 (Task ${task.id})`,
+    );
+    const chunks = chunkSource(source, KNOWLEDGE_EXTRACTOR_REVISION);
+    const s2: ProjectState = { ...s1, knowledge_chunks: [...s1.knowledge_chunks, ...chunks] };
+
+    const newLineages: CoverageResearchLineageLink[] = [];
+    for (const reqId of task.requirement_ids) {
+      newLineages.push({
+        id: internalId("lineage"),
+        candidate_id: candidate.id,
+        source_id: source.id,
+        task_id: task.id,
+        batch_id: task.batch_id,
+        assessment_id: batch?.assessment_id ?? latestAssessment.id,
+        requirement_id: reqId,
+        ...(task.character_id === undefined ? {} : { character_id: task.character_id }),
+        created_at: now(),
+      });
+    }
+
+    const updatedTask: ResearchTaskRecord = {
+      ...task,
+      status: "completed",
+      updated_at: now(),
+    };
+
+    const s3: ProjectState = {
+      ...s2,
+      coverage_research_lineages: [...s2.coverage_research_lineages, ...newLineages],
+      coverage_research_tasks: s2.coverage_research_tasks.map((t) => (t.id === task.id ? updatedTask : t)),
+    };
+
+    mutated = applyDerivedResearchBatchStatus(s3, task.batch_id);
+    sourceId = source.id;
+    result = {
+      source_id: source.id,
+      candidate_id: candidate.id,
+      chunk_count: chunks.length,
+      task_id: task.id,
+      action,
+      summary: `已成功提供補充資料並提煉 ${chunks.length} 個知識分片。`,
+    };
+  } else if (action === "creative_completion") {
+    const choice = command.payload.choice ?? "創作補全";
+    const rationale = command.payload.rationale ?? "授權創作補全";
+    const recorded = recordUserDecisionAndResolution(
+      mutated,
+      "creative_completion",
+      task.requirement_ids,
+      choice,
+      rationale,
+      choice,
+      executionInput,
+      operation.id,
+      task.character_id,
+    );
+
+    const updatedTask: ResearchTaskRecord = {
+      ...task,
+      status: "completed",
+      updated_at: now(),
+    };
+
+    const s1: ProjectState = {
+      ...recorded.state,
+      coverage_research_tasks: recorded.state.coverage_research_tasks.map((t) => (t.id === task.id ? updatedTask : t)),
+    };
+
+    mutated = applyDerivedResearchBatchStatus(s1, task.batch_id);
+    resolutionId = recorded.resolutions[0]?.id;
+    result = {
+      resolution_ids: recorded.resolutions.map((r) => r.id),
+      decision_id: recorded.decision.id,
+      task_id: task.id,
+      action,
+      summary: "已完成創作補全授權決策。",
+    };
   }
+
   return {
     state: mutated,
     result,
     auditEvents: [{
-      id: internalId("audit"), operation_id: operation.id, event: "coverage.research.recovered", actor,
-      occurred_at: now(), details: { task_id: command.payload.task_id, action: command.payload.action, successor_task_id: (result.task as { id: string }).id },
+      id: internalId("audit"),
+      operation_id: operation.id,
+      event: "coverage.research.recovered",
+      actor,
+      occurred_at: now(),
+      details: {
+        task_id: task.id,
+        action,
+        ...(successorTaskId === undefined ? {} : { successor_task_id: successorTaskId }),
+        ...(sourceId === undefined ? {} : { source_id: sourceId }),
+        ...(resolutionId === undefined ? {} : { resolution_id: resolutionId }),
+      },
     }],
   };
 }
@@ -781,11 +1114,44 @@ export async function executeCoverageResearchRecover(deps: CoverageApplicationDe
 export async function coverageResearchRecover(
   deps: CoverageApplicationDeps,
   actor: string,
-  input: { task_id: string; action: "revise_query" | "revise_constraints" | "manual_url" | "supplement" | "creative_completion"; query_seeds?: string[]; source_constraints?: string[]; url?: string; operation_id?: string },
+  input: {
+    task_id: string;
+    action: "revise_query" | "revise_constraints" | "manual_url" | "supplement" | "creative_completion";
+    query_seeds?: string[];
+    source_constraints?: string[];
+    url?: string;
+    text?: string;
+    choice?: string;
+    rationale?: string;
+    operation_id?: string;
+  },
   attachments: Array<{ name: string; content: Uint8Array; media_type?: string }> = [],
 ): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
-  const operation = coverageOperation(actor, "coverage_research_recover", { task_id: input.task_id, action: input.action, ...(input.query_seeds === undefined ? {} : { query_seeds: input.query_seeds }), ...(input.source_constraints === undefined ? {} : { source_constraints: input.source_constraints }), ...(input.url === undefined ? {} : { url: input.url }) }, "source-researcher", "researcher", input.operation_id);
+  const attachmentRefs = attachments.map((a) => ({
+    id: internalId("attachment"),
+    name: a.name,
+    ...(a.media_type === undefined ? {} : { media_type: a.media_type }),
+  }));
+
+  const operation = coverageOperation(
+    actor,
+    "coverage_research_recover",
+    {
+      task_id: input.task_id,
+      action: input.action,
+      ...(input.query_seeds === undefined ? {} : { query_seeds: input.query_seeds }),
+      ...(input.source_constraints === undefined ? {} : { source_constraints: input.source_constraints }),
+      ...(input.url === undefined ? {} : { url: input.url }),
+      ...(input.text === undefined ? {} : { text: input.text }),
+      ...(input.choice === undefined ? {} : { choice: input.choice }),
+      ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
+      ...(attachmentRefs.length === 0 ? {} : { attachment_refs: attachmentRefs }),
+    },
+    "source-researcher",
+    "researcher",
+    input.operation_id,
+  );
 
   const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.research.recovered");
   if (replayed !== undefined) return replayed;

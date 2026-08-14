@@ -9,6 +9,44 @@ import { coverageAssessmentStaleComponents } from "./downstream-invalidation.js"
 
 export type CoverageCenterCellStatus = "missing" | "candidate_signal" | "source_covered" | "supplement" | "creative_completion" | "conflict" | "stale";
 
+export interface CoverageCenterTaskRef {
+  id: string;
+  batch_id: string;
+  assessment_id: string;
+  assessment_revision: string;
+  requirement_set_id?: string;
+  requirement_set_revision?: string;
+  status: string;
+  claim_generation: number;
+  attempt: number;
+  query_seeds: string[];
+  source_constraints?: string[];
+  searched_queries: string[];
+  source_families: string[];
+  exhausted_reason?: string;
+  predecessor_id?: string;
+  successor_id?: string;
+  is_active: boolean;
+  is_exhausted: boolean;
+  is_current: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CoverageCenterResolutionRef {
+  id: string;
+  mode: string;
+  status: string;
+  assessment_id?: string;
+  assessment_revision?: string;
+  requirement_set_revision?: string;
+  rationale: string;
+  user_decision_id?: string;
+  supersedes?: string;
+  is_current: boolean;
+  created_at: string;
+}
+
 export interface CoverageCenterCell {
   character_id?: string;
   requirement_id: string;
@@ -24,6 +62,10 @@ export interface CoverageCenterCell {
   evidence_source_ids: string[];
   resolution_ids: string[];
   research_task_ids: string[];
+  current_research_tasks: CoverageCenterTaskRef[];
+  history_research_tasks: CoverageCenterTaskRef[];
+  current_resolutions: CoverageCenterResolutionRef[];
+  history_resolutions: CoverageCenterResolutionRef[];
   reason?: string;
   missing_prerequisite?: string;
   actions: string[];
@@ -197,21 +239,102 @@ export function deriveCoverageCenterMatrix(state: ProjectState): CoverageCenterM
 
   const cells: CoverageCenterCell[] = (assessment?.items ?? []).map((item) => {
     const definition = COVERAGE_REQUIREMENT_CATALOG.find((entry) => entry.id === item.requirement_id);
-    const researchTasks = state.coverage_research_tasks.filter((task) => task.character_id === item.character_id && task.requirement_ids.includes(item.requirement_id));
-    const resolutions = currentResolutions(state, {
+    const matchingTasks = state.coverage_research_tasks.filter((task) => (task.character_id ?? "") === (item.character_id ?? "") && task.requirement_ids.includes(item.requirement_id));
+
+    const currentResearchTasks: CoverageCenterTaskRef[] = [];
+    const historyResearchTasks: CoverageCenterTaskRef[] = [];
+
+    for (const task of matchingTasks) {
+      const batch = state.coverage_research_batches.find((b) => b.id === task.batch_id);
+      const successor = state.coverage_research_tasks.find((other) => other.predecessor_id === task.id);
+      const isLineageMatch =
+        batch !== undefined &&
+        assessment !== undefined &&
+        requirementSet !== undefined &&
+        batch.assessment_id === assessment.id &&
+        batch.assessment_revision === assessment.revision &&
+        batch.requirement_set_id === requirementSet.id &&
+        batch.requirement_set_revision === requirementSet.revision;
+      const isCurrent = isLineageMatch;
+      const isActive = task.status === "queued" || task.status === "claimed" || task.status === "running";
+      const isExhausted = task.status === "exhausted";
+
+      const taskRef: CoverageCenterTaskRef = {
+        id: task.id,
+        batch_id: task.batch_id,
+        assessment_id: batch?.assessment_id ?? "",
+        assessment_revision: batch?.assessment_revision ?? "",
+        ...(batch?.requirement_set_id === undefined ? {} : { requirement_set_id: batch.requirement_set_id }),
+        ...(batch?.requirement_set_revision === undefined ? {} : { requirement_set_revision: batch.requirement_set_revision }),
+        status: task.status,
+        claim_generation: task.claim_generation,
+        attempt: task.attempt,
+        query_seeds: [...(task.query_seeds ?? [])],
+        ...(task.source_constraints === undefined ? {} : { source_constraints: [...task.source_constraints] }),
+        searched_queries: [...(task.searched_queries ?? [])],
+        source_families: [...(task.source_families ?? [])],
+        ...(task.exhausted_reason === undefined ? {} : { exhausted_reason: task.exhausted_reason }),
+        ...(task.predecessor_id === undefined ? {} : { predecessor_id: task.predecessor_id }),
+        ...(successor === undefined ? {} : { successor_id: successor.id }),
+        is_active: isActive,
+        is_exhausted: isExhausted,
+        is_current: isCurrent,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+      };
+
+      if (isCurrent) {
+        currentResearchTasks.push(taskRef);
+      } else {
+        historyResearchTasks.push(taskRef);
+      }
+    }
+
+    const allMatchingResolutions = state.coverage_resolutions.filter(
+      (res) => res.requirement_id === item.requirement_id && (res.character_id ?? "") === (item.character_id ?? ""),
+    );
+    const currentResList = currentResolutions(state, {
       requirementSetRevision: requirementSet?.revision,
       requirementId: item.requirement_id,
       characterId: item.character_id,
     });
+    const currentResIds = new Set(currentResList.map((r) => r.id));
+
+    const currentResolutionRefs: CoverageCenterResolutionRef[] = [];
+    const historyResolutionRefs: CoverageCenterResolutionRef[] = [];
+
+    for (const res of allMatchingResolutions) {
+      const isCurrent = currentResIds.has(res.id);
+      const ref: CoverageCenterResolutionRef = {
+        id: res.id,
+        mode: res.mode,
+        status: res.status,
+        ...(res.assessment_id === undefined ? {} : { assessment_id: res.assessment_id }),
+        ...(res.assessment_revision === undefined ? {} : { assessment_revision: res.assessment_revision }),
+        ...(res.requirement_set_revision === undefined ? {} : { requirement_set_revision: res.requirement_set_revision }),
+        rationale: res.rationale,
+        ...(res.user_decision_id === undefined ? {} : { user_decision_id: res.user_decision_id }),
+        ...(res.supersedes === undefined ? {} : { supersedes: res.supersedes }),
+        is_current: isCurrent,
+        created_at: res.created_at,
+      };
+      if (isCurrent) {
+        currentResolutionRefs.push(ref);
+      } else {
+        historyResolutionRefs.push(ref);
+      }
+    }
+
     const acceptedFactIds = (item.accepted_fact_ids ?? []).filter((id) => state.facts.some((fact) => fact.id === id));
     const candidateFactIds = (item.candidate_fact_ids ?? []).filter((id) => state.facts.some((fact) => fact.id === id));
     const evidenceSourceIds = [...new Set(state.facts.filter((fact) => acceptedFactIds.includes(fact.id) || candidateFactIds.includes(fact.id)).flatMap((fact) => fact.source_ids))];
-    const exhausted = researchTasks.some((task) => task.status === "exhausted");
+
+    // Only un-superseded exhausted tasks in the CURRENT lineage allow recovery actions
+    const unSupersededExhausted = currentResearchTasks.some((t) => t.is_exhausted && t.successor_id === undefined);
     const baseStatus = CELL_STATUS_MAP[item.status] ?? "missing";
     const status: CoverageCenterCellStatus = fresh ? baseStatus : "stale";
 
     const explanation = explanations.find(
-
       (exp) => exp.requirement_id === item.requirement_id && exp.character_id === item.character_id,
     );
 
@@ -222,7 +345,7 @@ export function deriveCoverageCenterMatrix(state: ProjectState): CoverageCenterM
       ...(assessment?.revision === undefined ? {} : { assessment_revision: assessment.revision }),
     };
 
-    const typedActions = deriveCoverageCellActions(status, !fresh, exhausted, cellScope);
+    const typedActions = deriveCoverageCellActions(status, !fresh, unSupersededExhausted, cellScope);
     const enabledActions = typedActions.filter((a) => a.enabled).map((a) => a.action);
 
     const cellReason = explanation?.reason ?? (status === "stale" ? (staleComponents.length > 0 ? `assessment 已過期：${staleComponents.join("、")}` : "assessment 已過期") : item.reason);
@@ -240,14 +363,17 @@ export function deriveCoverageCenterMatrix(state: ProjectState): CoverageCenterM
       accepted_fact_ids: acceptedFactIds,
       candidate_fact_ids: candidateFactIds,
       evidence_source_ids: evidenceSourceIds,
-      resolution_ids: resolutions.map((resolution) => resolution.id),
-      research_task_ids: researchTasks.map((task) => task.id),
+      resolution_ids: currentResList.map((resolution) => resolution.id),
+      research_task_ids: currentResearchTasks.map((task) => task.id),
+      current_research_tasks: currentResearchTasks,
+      history_research_tasks: historyResearchTasks,
+      current_resolutions: currentResolutionRefs,
+      history_resolutions: historyResolutionRefs,
       ...(cellReason === undefined ? {} : { reason: cellReason }),
       ...(explanation?.missing_prerequisite === undefined ? {} : { missing_prerequisite: explanation.missing_prerequisite }),
       actions: enabledActions,
       typed_actions: typedActions,
     };
-
   });
 
   return {

@@ -111,7 +111,7 @@ import {
   type StructuredPublishDiagnostics,
 } from "@st-workspace/domain";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
-import { coverageResearchCandidates as coverageResearchCandidatesQuery, coverageResearchClaim as coverageResearchClaimQuery, coverageResearchExhaust as coverageResearchExhaustQuery, coverageResearchRecover as coverageResearchRecoverQuery, coverageResearchStart as coverageResearchStartQuery, coverageResolutionConfirm as coverageResolutionConfirmQuery, coverageResolutionPreview as coverageResolutionPreviewQuery, coverageSupplement as coverageSupplementQuery, dashboardCoverage as dashboardCoverageQuery, dashboardCoverageCenter as dashboardCoverageCenterQuery, executeCoverageResearchCandidates, executeCoverageResearchClaim, executeCoverageResearchExhaust, executeCoverageResearchRecover, executeCoverageResearchStart, executeCoverageResolutionConfirm, executeCoverageSupplement, type CoverageApplicationDeps, type CoverageCommandOutcome } from "./coverage-application.js";
+import { coverageResearchCandidates as coverageResearchCandidatesQuery, coverageResearchClaim as coverageResearchClaimQuery, coverageResearchExhaust as coverageResearchExhaustQuery, coverageResearchRecover as coverageResearchRecoverQuery, coverageResearchStart as coverageResearchStartQuery, coverageResearchStartPreview as coverageResearchStartPreviewQuery, coverageResolutionConfirm as coverageResolutionConfirmQuery, coverageResolutionPreview as coverageResolutionPreviewQuery, coverageSupplement as coverageSupplementQuery, dashboardCoverage as dashboardCoverageQuery, dashboardCoverageCenter as dashboardCoverageCenterQuery, executeCoverageResearchCandidates, executeCoverageResearchClaim, executeCoverageResearchExhaust, executeCoverageResearchRecover, executeCoverageResearchStart, executeCoverageResolutionConfirm, executeCoverageSupplement, type CoverageApplicationDeps, type CoverageCommandOutcome } from "./coverage-application.js";
 import {
   artifactQueryFromDashboardQuery,
   auditQueryFromDashboardQuery,
@@ -2488,7 +2488,7 @@ export class WorkspaceRuntime {
   }
 
   async coverageRequirementSet(): Promise<CoverageRequirementSet> {
-    const state = await this.repository.read();
+        const state = await this.repository.read();
     return this.requirementSetFor(state);
   }
 
@@ -2525,8 +2525,12 @@ export class WorkspaceRuntime {
     return { assessment, requirement_set: requirementSet, current };
   }
 
-  async coverageResearchStart(actor: string, assessmentId?: string, assessmentRevision?: string): Promise<Record<string, unknown>> {
-    return coverageResearchStartQuery(this.coverageDeps(), actor, assessmentId, assessmentRevision);
+  async coverageResearchStart(actor: string, assessmentId?: string, assessmentRevision?: string, scope?: import("@st-workspace/core").CoverageResearchStartScope, operationId?: string): Promise<Record<string, unknown>> {
+    return coverageResearchStartQuery(this.coverageDeps(), actor, assessmentId, assessmentRevision, scope, operationId);
+  }
+
+  async coverageResearchStartPreview(input: import("@st-workspace/domain").CoverageResearchStartPreviewInput): Promise<Record<string, unknown>> {
+    return coverageResearchStartPreviewQuery(this.coverageDeps(), input);
   }
 
   async coverageResearchClaim(actor: string, batchId: string, leaseDurationMs?: number): Promise<Record<string, unknown>> {

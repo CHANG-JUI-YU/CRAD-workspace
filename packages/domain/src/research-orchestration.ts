@@ -6,6 +6,8 @@ import {
   isCoverageRequirementId,
   coverageRequirementById,
   type CoverageResearchLineageLink,
+  type CoverageResearchStartScope,
+  type CoverageResearchTarget,
   type ProjectState,
   type ResearchBatchRecord,
   type ResearchTaskRecord,
@@ -71,22 +73,23 @@ export function candidateRevision(candidate: Pick<SourceCandidate, "title" | "ca
 }
 
 /**
- * Group missing assessment requirements into research bundles (max 3 active parallel tasks).
+ * Group requirement items into research bundles.
  */
-export function groupMissingRequirementsIntoBundles(
-  assessmentItems: Array<{ character_id?: string; requirement_id: string; status: string }>,
+export function groupRequirementsIntoBundles(
+  items: readonly CoverageResearchTarget[] | Array<{ character_id?: string; requirement_id: string }>,
 ): Array<{ character_id?: string; requirement_ids: string[]; dimension_paths: string[]; query_seeds: string[] }> {
-  const missingItems = assessmentItems.filter((item) => item.status === "missing");
-  if (missingItems.length === 0) return [];
+  if (items.length === 0) return [];
 
   const bundles: Array<{ character_id?: string; requirement_ids: string[]; dimension_paths: string[]; query_seeds: string[] }> = [];
 
   // Group by character_id
   const byCharacter = new Map<string | undefined, string[]>();
-  for (const item of missingItems) {
+  for (const item of items) {
     const key = item.character_id;
     const list = byCharacter.get(key) ?? [];
-    list.push(item.requirement_id);
+    if (!list.includes(item.requirement_id)) {
+      list.push(item.requirement_id);
+    }
     byCharacter.set(key, list);
   }
 
@@ -138,11 +141,76 @@ export function groupMissingRequirementsIntoBundles(
   return bundles;
 }
 
-const RESEARCH_TERMINAL_STATUSES: ReadonlySet<ResearchTaskRecord["status"]> = new Set(["completed", "exhausted", "failed", "stale", "cancelled"]);
-const RESEARCH_ACTIVE_STATUSES: ReadonlySet<ResearchTaskRecord["status"]> = new Set(["claimed", "running"]);
+/**
+ * Group missing assessment requirements into research bundles (max 3 active parallel tasks).
+ */
+export function groupMissingRequirementsIntoBundles(
+  assessmentItems: Array<{ character_id?: string; requirement_id: string; status: string }>,
+): Array<{ character_id?: string; requirement_ids: string[]; dimension_paths: string[]; query_seeds: string[] }> {
+  const missingItems = assessmentItems.filter((item) => item.status === "missing");
+  return groupRequirementsIntoBundles(missingItems);
+}
+
+export const RESEARCH_TERMINAL_STATUSES: ReadonlySet<ResearchTaskRecord["status"]> = new Set(["completed", "exhausted", "failed", "stale", "cancelled"]);
+export const RESEARCH_ACTIVE_STATUSES: ReadonlySet<ResearchTaskRecord["status"]> = new Set(["claimed", "running"]);
+export const RESEARCH_IN_FLIGHT_STATUSES: ReadonlySet<ResearchTaskRecord["status"]> = new Set(["queued", "claimed", "running"]);
 
 export function isResearchTaskTerminal(status: ResearchTaskRecord["status"]): boolean {
   return RESEARCH_TERMINAL_STATUSES.has(status);
+}
+
+export function isTaskInAssessmentLineage(
+  task: ResearchTaskRecord,
+  batch: ResearchBatchRecord | undefined,
+  assessment: { id: string; revision: string; requirement_set_id: string; requirement_set_revision: string },
+): boolean {
+  if (batch === undefined) return false;
+  return (
+    batch.assessment_id === assessment.id &&
+    batch.assessment_revision === assessment.revision &&
+    batch.requirement_set_id === assessment.requirement_set_id &&
+    batch.requirement_set_revision === assessment.requirement_set_revision
+  );
+}
+
+export function resolveResearchTargets(
+  assessment: { id: string; items: Array<{ requirement_id: string; character_id?: string; status: string }> },
+  scope?: CoverageResearchStartScope,
+): CoverageResearchTarget[] {
+  if (scope === undefined || scope.kind === "assessment") {
+    const missing = assessment.items.filter((item) => item.status === "missing");
+    return missing.map((item) => ({
+      requirement_id: item.requirement_id,
+      ...(item.character_id === undefined ? {} : { character_id: item.character_id }),
+    }));
+  }
+
+  const targets: CoverageResearchTarget[] = [];
+  const seen = new Set<string>();
+  for (const t of scope.targets) {
+    if (!isCoverageRequirementId(t.requirement_id)) {
+      throw new CoreError("COVERAGE_RESEARCH_SCOPE_INVALID", `Invalid coverage requirement id "${t.requirement_id}".`, true);
+    }
+    const matchingItem = assessment.items.find(
+      (item) => item.requirement_id === t.requirement_id && (item.character_id ?? "") === (t.character_id ?? ""),
+    );
+    if (matchingItem === undefined) {
+      throw new CoreError(
+        "COVERAGE_RESEARCH_SCOPE_INVALID",
+        `Target requirement "${t.requirement_id}" (character: ${t.character_id ?? "world"}) does not exist in assessment "${assessment.id}".`,
+        true,
+      );
+    }
+    const key = `${t.character_id ?? ""}::${t.requirement_id}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      targets.push({
+        requirement_id: t.requirement_id,
+        ...(t.character_id === undefined ? {} : { character_id: t.character_id }),
+      });
+    }
+  }
+  return targets;
 }
 
 export function isResearchLeaseExpired(task: ResearchTaskRecord, referenceNowMs: number): boolean {
@@ -189,18 +257,85 @@ export function applyDerivedResearchBatchStatus(state: ProjectState, batchId: st
   };
 }
 
-export function createResearchBatchFromAssessment(
+export interface CreateResearchBatchOutcome {
+  reused: boolean;
+  requested_targets: CoverageResearchTarget[];
+  existing_task_ids: string[];
+  new_task_ids: string[];
+  batch?: ResearchBatchRecord | undefined;
+  tasks: ResearchTaskRecord[];
+  state: ProjectState;
+  exact_affected_count: number;
+}
+
+export function createResearchBatchWithScope(
   state: ProjectState,
   assessmentId: string,
+  scope: CoverageResearchStartScope | undefined,
   executionInput: ExecutionActorInput,
-): { batch: ResearchBatchRecord; tasks: ResearchTaskRecord[]; state: ProjectState } {
+): CreateResearchBatchOutcome {
   const { executionAgent } = resolveExecutionActors(executionInput);
   const assessment = state.coverage_assessments.find((a) => a.id === assessmentId);
   if (assessment === undefined) {
     throw new CoreError("COVERAGE_ASSESSMENT_STALE", `Coverage assessment "${assessmentId}" not found.`, true);
   }
 
-  const bundles = groupMissingRequirementsIntoBundles(assessment.items);
+  const requestedTargets = resolveResearchTargets(assessment, scope);
+  if (requestedTargets.length === 0) {
+    return {
+      reused: false,
+      requested_targets: [],
+      existing_task_ids: [],
+      new_task_ids: [],
+      tasks: [],
+      state,
+      exact_affected_count: 0,
+    };
+  }
+
+  const existingTaskIds: string[] = [];
+  const newTargets: CoverageResearchTarget[] = [];
+
+  for (const target of requestedTargets) {
+    // Check if there is an active task in current lineage covering target
+    const activeTask = state.coverage_research_tasks.find((task) => {
+      if (!RESEARCH_IN_FLIGHT_STATUSES.has(task.status)) return false;
+      if ((task.character_id ?? "") !== (target.character_id ?? "")) return false;
+      if (!task.requirement_ids.includes(target.requirement_id)) return false;
+      const batch = state.coverage_research_batches.find((b) => b.id === task.batch_id);
+      return isTaskInAssessmentLineage(task, batch, assessment);
+    });
+
+    if (activeTask !== undefined) {
+      if (!existingTaskIds.includes(activeTask.id)) {
+        existingTaskIds.push(activeTask.id);
+      }
+    } else {
+      newTargets.push(target);
+    }
+  }
+
+  if (newTargets.length === 0) {
+    // All requested targets already covered by active tasks
+    const activeBatch = state.coverage_research_batches.find((b) =>
+      b.assessment_id === assessment.id &&
+      b.assessment_revision === assessment.revision &&
+      b.status === "open" &&
+      b.task_ids.some((id) => existingTaskIds.includes(id)),
+    );
+    return {
+      reused: true,
+      requested_targets: requestedTargets,
+      existing_task_ids: existingTaskIds,
+      new_task_ids: [],
+      batch: activeBatch,
+      tasks: [],
+      state,
+      exact_affected_count: 0,
+    };
+  }
+
+  const bundles = groupRequirementsIntoBundles(newTargets);
   const batchId = internalId("batch");
   const taskRecords: ResearchTaskRecord[] = [];
 
@@ -243,7 +378,40 @@ export function createResearchBatchFromAssessment(
     coverage_research_tasks: [...state.coverage_research_tasks, ...taskRecords],
   };
 
-  return { batch: batchRecord, tasks: taskRecords, state: updatedState };
+  return {
+    reused: false,
+    requested_targets: requestedTargets,
+    existing_task_ids: existingTaskIds,
+    new_task_ids: taskRecords.map((t) => t.id),
+    batch: batchRecord,
+    tasks: taskRecords,
+    state: updatedState,
+    exact_affected_count: newTargets.length,
+  };
+}
+
+export function createResearchBatchFromAssessment(
+  state: ProjectState,
+  assessmentId: string,
+  executionInput: ExecutionActorInput,
+): { batch: ResearchBatchRecord; tasks: ResearchTaskRecord[]; state: ProjectState } {
+  const outcome = createResearchBatchWithScope(state, assessmentId, { kind: "assessment" }, executionInput);
+  if (outcome.batch === undefined) {
+    const assessment = state.coverage_assessments.find((a) => a.id === assessmentId);
+    const emptyBatch: ResearchBatchRecord = {
+      id: internalId("batch"),
+      assessment_id: assessmentId,
+      assessment_revision: assessment?.revision ?? "",
+      requirement_set_id: assessment?.requirement_set_id ?? "",
+      requirement_set_revision: assessment?.requirement_set_revision ?? "",
+      status: "completed",
+      task_ids: [],
+      created_by: "director",
+      created_at: now(),
+    };
+    return { batch: emptyBatch, tasks: [], state: outcome.state };
+  }
+  return { batch: outcome.batch, tasks: outcome.tasks, state: outcome.state };
 }
 
 /**
@@ -321,6 +489,24 @@ export function submitResearchTaskCandidates(
   const batch = state.coverage_research_batches.find((b) => b.id === task.batch_id);
   if (batch === undefined || batch.status !== "open") {
     throw new CoreError("COVERAGE_RESEARCH_TASK_STALE", `Research task "${taskId}" parent batch no longer allows execution.`, true);
+  }
+
+  // Pre-validate candidate target requirements BEFORE mutating any state
+  for (const input of candidateInputs) {
+    if (input.target_requirement_ids !== undefined) {
+      for (const reqId of input.target_requirement_ids) {
+        if (!isCoverageRequirementId(reqId)) {
+          throw new CoreError("COVERAGE_RESEARCH_CANDIDATE_INVALID", `Invalid coverage requirement id "${reqId}".`, true);
+        }
+        if (!task.requirement_ids.includes(reqId)) {
+          throw new CoreError(
+            "COVERAGE_RESEARCH_CANDIDATE_INVALID",
+            `Candidate target requirement "${reqId}" is not within task "${task.id}" requirement scope (${task.requirement_ids.join(", ")}).`,
+            true,
+          );
+        }
+      }
+    }
   }
 
   const newCandidates: SourceCandidate[] = [];

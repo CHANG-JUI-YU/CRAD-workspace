@@ -1,4 +1,4 @@
-import { coverageRequirementIdSchema, z, type SourceAttachment } from "@st-workspace/core";
+import { coverageRequirementIdSchema, coverageResearchStartScopeSchema, z, type CoverageResearchStartScope, type CoverageResearchTarget, type SourceAttachment } from "@st-workspace/core";
 
 const base64Pattern = /^[A-Za-z0-9+/]*={0,2}$/u;
 
@@ -190,8 +190,17 @@ export type CoverageResearchCandidateItemInput = z.infer<typeof coverageResearch
 export const coverageResearchStartInputSchema = z.object({
   assessment_id: z.string().min(1).optional(),
   assessment_revision: z.string().min(1).optional(),
+  scope: coverageResearchStartScopeSchema.optional(),
+  operation_id: z.string().min(1).optional(),
 }).strict();
 export type CoverageResearchStartInput = z.infer<typeof coverageResearchStartInputSchema>;
+
+export const coverageResearchStartPreviewInputSchema = z.object({
+  assessment_id: z.string().min(1).optional(),
+  assessment_revision: z.string().min(1).optional(),
+  scope: coverageResearchStartScopeSchema.optional(),
+}).strict();
+export type CoverageResearchStartPreviewInput = z.infer<typeof coverageResearchStartPreviewInputSchema>;
 
 export const coverageResearchClaimInputSchema = z.object({
   batch_id: z.string().min(1),
@@ -254,6 +263,38 @@ export const coverageResearchRecoverInputSchema = z.object({
   query_seeds: z.array(z.string().min(1)).optional(),
   source_constraints: z.array(z.string().min(1)).optional(),
   url: z.string().url().optional(),
+  text: z.string().min(1).optional(),
+  choice: z.string().min(1).optional(),
+  rationale: z.string().min(1).optional(),
   attachments: attachmentsSchema,
-}).strict();
+  operation_id: z.string().min(1).optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.action === "revise_query") {
+    if ((value.query_seeds ?? []).length === 0) {
+      ctx.addIssue({ code: "custom", path: ["query_seeds"], message: "修改查詢必須提供至少一個 query_seed。" });
+    }
+  } else if (value.action === "revise_constraints") {
+    if ((value.source_constraints ?? []).length === 0) {
+      ctx.addIssue({ code: "custom", path: ["source_constraints"], message: "修改來源限制必須提供至少一個 source_constraint。" });
+    }
+  } else if (value.action === "manual_url") {
+    if (value.url === undefined || value.url.trim() === "") {
+      ctx.addIssue({ code: "custom", path: ["url"], message: "手動提供 URL 必須包含有效的 url。" });
+    }
+  } else if (value.action === "supplement") {
+    const hasText = value.text !== undefined && value.text.trim() !== "";
+    const hasUrl = value.url !== undefined && value.url.trim() !== "";
+    const hasAtt = (value.attachments ?? []).length > 0;
+    if (!hasText && !hasUrl && !hasAtt) {
+      ctx.addIssue({ code: "custom", path: ["text"], message: "補充資料必須提供文字、URL 或附件其中一項。" });
+    }
+  } else if (value.action === "creative_completion") {
+    if (value.choice === undefined || value.choice.trim() === "") {
+      ctx.addIssue({ code: "custom", path: ["choice"], message: "創作補全必須提供 choice。" });
+    }
+    if (value.rationale === undefined || value.rationale.trim() === "") {
+      ctx.addIssue({ code: "custom", path: ["rationale"], message: "創作補全必須提供 rationale。" });
+    }
+  }
+});
 export type CoverageResearchRecoverInput = z.infer<typeof coverageResearchRecoverInputSchema>;

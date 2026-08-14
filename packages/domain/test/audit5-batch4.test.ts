@@ -264,7 +264,7 @@ describe("Audit 5 batch 4: coverage research lifecycle", () => {
     let count = 0;
     while (claimed !== undefined && count < 10) {
       current = claimed.state;
-      const submitted = submitResearchTaskCandidates(current, claimed.task.id, claimed.task.claim_generation, claimed.task.lease_owner!, [{ title: `Page ${count}`, canonical_url: `https://example.com/page-${count}`, snippet: "details", target_requirement_ids: ["req.appearance"] }], "researcher-1", nowMs);
+      const submitted = submitResearchTaskCandidates(current, claimed.task.id, claimed.task.claim_generation, claimed.task.lease_owner!, [{ title: `Page ${count}`, canonical_url: `https://example.com/page-${count}`, snippet: "details", target_requirement_ids: claimed.task.requirement_ids }], "researcher-1", nowMs);
       current = submitted.state;
       claimed = claimResearchTask(current, created.id, "worker-1", 60_000, nowMs);
       count += 1;

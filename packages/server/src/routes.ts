@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { CoreError, internalId, z, type AdaptationDecision, type RequestResult } from "@st-workspace/core";
-import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverageResearchCandidatesInputSchema, coverageResearchClaimInputSchema, coverageResearchExhaustInputSchema, coverageResearchRecoverInputSchema, coverageResearchStartInputSchema, coverageResolutionConfirmInputSchema, coverageResolutionPreviewInputSchema, coverageSupplementInputSchema, decodeAttachments, factReviewBatchInputSchema, imageInputSchema, imageRemoveInputSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
+import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverageResearchCandidatesInputSchema, coverageResearchClaimInputSchema, coverageResearchExhaustInputSchema, coverageResearchRecoverInputSchema, coverageResearchStartInputSchema, coverageResearchStartPreviewInputSchema, coverageResolutionConfirmInputSchema, coverageResolutionPreviewInputSchema, coverageSupplementInputSchema, decodeAttachments, factReviewBatchInputSchema, imageInputSchema, imageRemoveInputSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
 import { type AgentAdapter, type WorkspaceProjectManager, type WorkspaceRuntime, type WorkspaceWorker } from "@st-workspace/runtime";
 import { structuredError } from "./errors.js";
 import { body, compact, dashboardPathId, dashboardQuery, json, parseRequest } from "./http-utils.js";
@@ -358,10 +358,16 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         }));
         return true;
       }
+      if (request.method === "POST" && url.pathname === "/workspace/coverage/research/preview") {
+        const parsed = await body(request);
+        const input = parseRequest(coverageResearchStartPreviewInputSchema, parsed, "COVERAGE_RESEARCH_REQUIRED");
+        json(response, 200, await (await deps.getRuntime()).coverageResearchStartPreview(input));
+        return true;
+      }
       if (request.method === "POST" && url.pathname === "/workspace/coverage/research/start") {
         const parsed = await body(request);
         const input = parseRequest(coverageResearchStartInputSchema, parsed, "COVERAGE_RESEARCH_REQUIRED");
-        json(response, 200, await (await deps.getRuntime()).coverageResearchStart(deps.actor, input.assessment_id, input.assessment_revision));
+        json(response, 200, await (await deps.getRuntime()).coverageResearchStart(deps.actor, input.assessment_id, input.assessment_revision, input.scope, input.operation_id));
         return true;
       }
       if (request.method === "POST" && url.pathname === "/workspace/coverage/research/claim") {
@@ -405,7 +411,17 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         const parsed = await body(request);
         const input = parseRequest(coverageResearchRecoverInputSchema, parsed, "COVERAGE_RESEARCH_REQUIRED");
         const attachments = decodeAttachments(input.attachments);
-        json(response, 200, await (await deps.getRuntime()).coverageResearchRecover(deps.actor, { task_id: input.task_id, action: input.action, ...(input.query_seeds === undefined ? {} : { query_seeds: input.query_seeds }), ...(input.source_constraints === undefined ? {} : { source_constraints: input.source_constraints }), ...(input.url === undefined ? {} : { url: input.url }) }, attachments));
+        json(response, 200, await (await deps.getRuntime()).coverageResearchRecover(deps.actor, {
+          task_id: input.task_id,
+          action: input.action,
+          ...(input.query_seeds === undefined ? {} : { query_seeds: input.query_seeds }),
+          ...(input.source_constraints === undefined ? {} : { source_constraints: input.source_constraints }),
+          ...(input.url === undefined ? {} : { url: input.url }),
+          ...(input.text === undefined ? {} : { text: input.text }),
+          ...(input.choice === undefined ? {} : { choice: input.choice }),
+          ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
+          ...(input.operation_id === undefined ? {} : { operation_id: input.operation_id }),
+        }, attachments));
         return true;
       }
       if (request.method === "POST" && url.pathname === "/workspace/knowledge/reextract") {

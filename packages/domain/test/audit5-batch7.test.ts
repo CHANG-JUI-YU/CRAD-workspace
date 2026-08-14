@@ -414,6 +414,7 @@ describe("Audit 5 batch 7 domain", () => {
         facts: [...state.facts, fact()],
         coverage_assessments: [{ ...assessment, items }],
         coverage_resolutions: [{ id: "res-1", character_id: "alpha", requirement_id: "req.personality", mode: "creative_completion", status: "authorized", assessment_id: "assess-1", assessment_revision: assessment.revision, requirement_set_revision: "set-rev-1", rationale: "creative", user_decision_id: "ud-1", authorized_by: "director", operation_id: "op-res", created_by: "director", created_at: now }],
+        coverage_research_batches: [researchBatch()],
         coverage_research_tasks: [researchTask()],
       };
       const cell = deriveCoverageCenterMatrix(next).cells[0]!;

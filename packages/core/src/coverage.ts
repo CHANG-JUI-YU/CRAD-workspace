@@ -431,6 +431,18 @@ export interface ResearchTaskRecord {
   updated_at: string;
 }
 
+export const coverageResearchTargetSchema = z.object({
+  requirement_id: coverageRequirementIdSchema,
+  character_id: z.string().min(1).optional(),
+}).strict();
+export type CoverageResearchTarget = z.infer<typeof coverageResearchTargetSchema>;
+
+export const coverageResearchStartScopeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("assessment") }).strict(),
+  z.object({ kind: z.literal("requirements"), targets: z.array(coverageResearchTargetSchema).min(1) }).strict(),
+]);
+export type CoverageResearchStartScope = z.infer<typeof coverageResearchStartScopeSchema>;
+
 export const researchTaskSchema = z.object({
   id: z.string().min(1),
   batch_id: z.string().min(1),

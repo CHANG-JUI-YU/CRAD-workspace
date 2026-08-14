@@ -24,46 +24,359 @@ function coverageButton(label, onClick) {
   return button;
 }
 
-function startCoverageResearch(cell) {
+function startCoverageResearch(cell, isAssessmentWide) {
   var assessment = coverageAssessmentRef();
   if (assessment === undefined) return;
-  postJson("/workspace/coverage/research/start", {
+
+  var scope = (isAssessmentWide || !cell)
+    ? { kind: "assessment" }
+    : { kind: "requirements", targets: [{ requirement_id: cell.requirement_id, ...(cell.character_id ? { character_id: cell.character_id } : {}) }] };
+
+  postJson("/workspace/coverage/research/preview", {
     assessment_id: assessment.id,
     assessment_revision: assessment.revision,
-  }).then(function (result) {
-    renderMutationInvalidation(result.downstream_invalidation);
-    byId("coverage-message").textContent = "已建立研究批次。";
-    void loadCoverageData();
-    void refreshWorkflowViews();
+    scope: scope,
+  }).then(function (preview) {
+    var existingModal = byId("research-start-modal-overlay");
+    if (existingModal) existingModal.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "research-start-modal-overlay";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;";
+
+    var modal = document.createElement("div");
+    modal.style.cssText = "background:#fff;border-radius:8px;max-width:520px;width:100%;max-height:90vh;overflow-y:auto;padding:24px;box-shadow:0 4px 20px rgba(0,0,0,0.25);font-family:inherit;";
+
+    var title = document.createElement("h3");
+    title.style.cssText = "margin-top:0;margin-bottom:12px;";
+    title.textContent = isAssessmentWide ? "啟動全量缺口研究" : ("啟動研究 — " + coverageCellTitle(cell));
+    modal.appendChild(title);
+
+    var infoBox = document.createElement("div");
+    infoBox.style.cssText = "background:#f8f9fa;border-left:4px solid #0066cc;padding:12px 16px;margin-bottom:16px;font-size:0.9em;color:#333;line-height:1.6;";
+    
+    var line1 = document.createElement("div");
+    line1.textContent = "範圍：" + (isAssessmentWide ? "全評估所有缺口項目" : coverageCellTitle(cell));
+    infoBox.appendChild(line1);
+
+    var line2 = document.createElement("div");
+    line2.textContent = "請求目標數：" + (preview.requested_targets ? preview.requested_targets.length : 0) + " 個";
+    infoBox.appendChild(line2);
+
+    var line3 = document.createElement("div");
+    line3.textContent = "已有進行中任務：" + (preview.existing_targets ? preview.existing_targets.length : 0) + " 個";
+    infoBox.appendChild(line3);
+
+    var line4 = document.createElement("div");
+    line4.textContent = "預計新建任務數：" + (preview.new_task_count !== undefined ? preview.new_task_count : 0) + " 個";
+    infoBox.appendChild(line4);
+
+    if (preview.already_covered) {
+      var noteDiv = document.createElement("div");
+      noteDiv.style.cssText = "margin-top:8px;color:#856404;background:#fff3cd;padding:6px 10px;border-radius:4px;";
+      noteDiv.textContent = "注意：所有請求目標均已有正在執行的研究任務，確認後將直接重用既有工作。";
+      infoBox.appendChild(noteDiv);
+    }
+    modal.appendChild(infoBox);
+
+    var errBox = document.createElement("div");
+    errBox.style.cssText = "color:#dc3545;font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
+    modal.appendChild(errBox);
+
+    var actionRow = document.createElement("div");
+    actionRow.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+
+    var cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.textContent = "取消";
+    cancelBtn.style.cssText = "padding:8px 16px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;";
+    cancelBtn.addEventListener("click", function () { overlay.remove(); });
+    actionRow.appendChild(cancelBtn);
+
+    var submitBtn = document.createElement("button");
+    submitBtn.type = "button";
+    submitBtn.textContent = preview.already_covered ? "重用既有研究任務" : "確認啟動研究";
+    submitBtn.style.cssText = "padding:8px 16px;border:none;background:#0066cc;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;";
+
+    submitBtn.addEventListener("click", function () {
+      submitBtn.disabled = true;
+      submitBtn.textContent = "啟動中...";
+      postJson("/workspace/coverage/research/start", {
+        assessment_id: assessment.id,
+        assessment_revision: assessment.revision,
+        scope: scope,
+      }).then(function (result) {
+        overlay.remove();
+        renderMutationInvalidation(result.downstream_invalidation);
+        byId("coverage-message").textContent = result.summary || (result.reused ? "所請求的研究項目已有進行中的任務。" : "已建立研究批次。");
+        void loadCoverageData();
+        void refreshWorkflowViews();
+      }).catch(function (error) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "確認啟動研究";
+        errBox.textContent = "啟動失敗：" + (error && error.message ? error.message : String(error));
+        errBox.style.display = "block";
+      });
+    });
+
+    actionRow.appendChild(submitBtn);
+    modal.appendChild(actionRow);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
   }).catch(function (error) {
     setAreaError("coverage-message", error);
   });
 }
 
-function recoverCoverageTask(cell, action, promptText) {
-  var tasks = cell.research_tasks || [];
-  if (tasks.length === 0) {
-    setAreaError("coverage-message", "沒有可恢復的研究任務。");
+function openRecoveryDialog(cell, action) {
+  var allTasks = cell.current_research_tasks || cell.research_tasks || [];
+  var exhaustedTasks = allTasks.filter(function (t) {
+    return (t.is_exhausted || t.status === "exhausted") && !t.successor_id;
+  });
+
+  if (exhaustedTasks.length === 0) {
+    setAreaError("coverage-message", "此項目沒有可恢復的 Exhausted 任務。");
     return;
   }
-  var task = tasks[tasks.length - 1];
-  var value = window.prompt(promptText, "");
-  if (value === null) return;
-  var body = { task_id: task.id, action: action };
-  if (action === "revise_query") body.query_seeds = value.trim() === "" ? [] : [value.trim()];
-  if (action === "revise_constraints") body.source_constraints = value.trim() === "" ? [] : [value.trim()];
-  if (action === "manual_url") {
-    if (value.trim() === "") { setAreaError("coverage-message", "請提供 URL。"); return; }
-    body.url = value.trim();
-  }
-  postJson("/workspace/coverage/research/recover", body).then(function (result) {
-    renderMutationInvalidation(result.downstream_invalidation);
-    byId("coverage-message").textContent = "已建立 successor 研究任務。";
-    void loadCoverageData();
-    void refreshWorkflowViews();
-  }).catch(function (error) {
-    setAreaError("coverage-message", error);
+
+  var existingModal = byId("recovery-modal-overlay");
+  if (existingModal) existingModal.remove();
+
+  var overlay = document.createElement("div");
+  overlay.id = "recovery-modal-overlay";
+  overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;";
+
+  var modal = document.createElement("div");
+  modal.style.cssText = "background:#fff;border-radius:8px;max-width:550px;width:100%;max-height:90vh;overflow-y:auto;padding:24px;box-shadow:0 4px 20px rgba(0,0,0,0.25);font-family:inherit;";
+
+  var actionLabels = {
+    revise_query: "修改查詢 (Revise Query)",
+    revise_constraints: "修改來源限制 (Revise Constraints)",
+    manual_url: "手動提供 URL (Manual URL)",
+    supplement: "提供補充資料 (User Supplement)",
+    creative_completion: "授權創作補全 (Creative Completion)",
+  };
+
+  var title = document.createElement("h3");
+  title.style.cssText = "margin-top:0;margin-bottom:12px;";
+  title.textContent = "任務恢復 — " + (actionLabels[action] || action) + " — " + coverageCellTitle(cell);
+  modal.appendChild(title);
+
+  var errBox = document.createElement("div");
+  errBox.style.cssText = "color:#dc3545;font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
+  modal.appendChild(errBox);
+
+  var taskGroup = document.createElement("div");
+  taskGroup.style.cssText = "margin-bottom:14px;";
+  var taskLabel = document.createElement("label");
+  taskLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+  taskLabel.textContent = "選擇要恢復的 Exhausted 任務：";
+  taskGroup.appendChild(taskLabel);
+
+  var taskSelect = document.createElement("select");
+  taskSelect.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+  exhaustedTasks.forEach(function (t) {
+    var opt = document.createElement("option");
+    opt.value = t.id;
+    var reasonText = t.exhausted_reason ? (" - " + t.exhausted_reason) : "";
+    opt.textContent = "任務 " + t.id.slice(0, 8) + " (Attempt " + (t.attempt || 1) + reasonText + ")";
+    taskSelect.appendChild(opt);
   });
+  taskGroup.appendChild(taskSelect);
+  modal.appendChild(taskGroup);
+
+  var inputGroup = document.createElement("div");
+  inputGroup.style.cssText = "margin-bottom:16px;";
+
+  var queryInput = null;
+  var constraintsInput = null;
+  var urlInput = null;
+  var textInput = null;
+  var fileInput = null;
+  var choiceInput = null;
+  var rationaleInput = null;
+
+  if (action === "revise_query") {
+    var qLabel = document.createElement("label");
+    qLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+    qLabel.textContent = "新的查詢關鍵字 (Query Seeds，以逗號分隔)：";
+    queryInput = document.createElement("input");
+    queryInput.type = "text";
+    queryInput.placeholder = "例如：角色別名, 歷史戰役, 家族背景";
+    queryInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+    inputGroup.appendChild(qLabel);
+    inputGroup.appendChild(queryInput);
+  } else if (action === "revise_constraints") {
+    var cLabel = document.createElement("label");
+    cLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+    cLabel.textContent = "新的來源限制條件 (Source Constraints，以逗號分隔)：";
+    constraintsInput = document.createElement("input");
+    constraintsInput.type = "text";
+    constraintsInput.placeholder = "例如：site:wikipedia.org, official:true";
+    constraintsInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+    inputGroup.appendChild(cLabel);
+    inputGroup.appendChild(constraintsInput);
+  } else if (action === "manual_url") {
+    var uLabel = document.createElement("label");
+    uLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+    uLabel.textContent = "手動提供來源網址 (URL)：";
+    urlInput = document.createElement("input");
+    urlInput.type = "url";
+    urlInput.placeholder = "https://example.com/character-source";
+    urlInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+    inputGroup.appendChild(uLabel);
+    inputGroup.appendChild(urlInput);
+  } else if (action === "supplement") {
+    var tLabel = document.createElement("label");
+    tLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+    tLabel.textContent = "補充資料內容（純文字）：";
+    textInput = document.createElement("textarea");
+    textInput.rows = 3;
+    textInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;margin-bottom:8px;";
+    inputGroup.appendChild(tLabel);
+    inputGroup.appendChild(textInput);
+
+    var suLabel = document.createElement("label");
+    suLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+    suLabel.textContent = "參考網址 (選填)：";
+    urlInput = document.createElement("input");
+    urlInput.type = "url";
+    urlInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;margin-bottom:8px;";
+    inputGroup.appendChild(suLabel);
+    inputGroup.appendChild(urlInput);
+
+    var fLabel = document.createElement("label");
+    fLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+    fLabel.textContent = "上傳附件 (選填)：";
+    fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.style.cssText = "display:block;";
+    inputGroup.appendChild(fLabel);
+    inputGroup.appendChild(fileInput);
+  } else if (action === "creative_completion") {
+    var chLabel = document.createElement("label");
+    chLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+    chLabel.textContent = "創作補全決策 (Choice)：";
+    choiceInput = document.createElement("input");
+    choiceInput.type = "text";
+    choiceInput.value = "授權創作補全設定";
+    choiceInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;margin-bottom:8px;";
+    inputGroup.appendChild(chLabel);
+    inputGroup.appendChild(choiceInput);
+
+    var rLabel = document.createElement("label");
+    rLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+    rLabel.textContent = "決策理由 (Rationale)：";
+    rationaleInput = document.createElement("input");
+    rationaleInput.type = "text";
+    rationaleInput.value = "經多輪研究仍無公開官方來源，授權依世界觀補全。";
+    rationaleInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+    inputGroup.appendChild(rLabel);
+    inputGroup.appendChild(rationaleInput);
+  }
+
+  modal.appendChild(inputGroup);
+
+  var actionRow = document.createElement("div");
+  actionRow.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+
+  var cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.textContent = "取消";
+  cancelBtn.style.cssText = "padding:8px 16px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;";
+  cancelBtn.addEventListener("click", function () { overlay.remove(); });
+  actionRow.appendChild(cancelBtn);
+
+  var submitBtn = document.createElement("button");
+  submitBtn.type = "button";
+  submitBtn.textContent = "確認執行恢復";
+  submitBtn.style.cssText = "padding:8px 16px;border:none;background:#0066cc;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;";
+
+  submitBtn.addEventListener("click", function () {
+    var selectedTaskId = taskSelect.value;
+    var payload = { task_id: selectedTaskId, action: action };
+
+    if (action === "revise_query") {
+      var qVal = queryInput.value.trim();
+      if (!qVal) { errBox.textContent = "請輸入至少一個查詢關鍵字。"; errBox.style.display = "block"; return; }
+      payload.query_seeds = qVal.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    } else if (action === "revise_constraints") {
+      var cVal = constraintsInput.value.trim();
+      if (!cVal) { errBox.textContent = "請輸入至少一個限制條件。"; errBox.style.display = "block"; return; }
+      payload.source_constraints = cVal.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    } else if (action === "manual_url") {
+      var uVal = urlInput.value.trim();
+      if (!uVal) { errBox.textContent = "請提供有效的網址 URL。"; errBox.style.display = "block"; return; }
+      payload.url = uVal;
+    } else if (action === "creative_completion") {
+      var chVal = choiceInput.value.trim();
+      var rVal = rationaleInput.value.trim();
+      if (!chVal || !rVal) { errBox.textContent = "請填寫補全決策與理由。"; errBox.style.display = "block"; return; }
+      payload.choice = chVal;
+      payload.rationale = rVal;
+    }
+
+    errBox.style.display = "none";
+    submitBtn.disabled = true;
+    submitBtn.textContent = "執行中...";
+
+    var sendRecover = function (attachmentsPayload) {
+      if (attachmentsPayload) payload.attachments = attachmentsPayload;
+      if (action === "supplement") {
+        if (textInput && textInput.value.trim()) payload.text = textInput.value.trim();
+        if (urlInput && urlInput.value.trim()) payload.url = urlInput.value.trim();
+        if (!payload.text && !payload.url && (!payload.attachments || payload.attachments.length === 0)) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = "確認執行恢復";
+          errBox.textContent = "請至少提供文字、URL 或附件其中一項。";
+          errBox.style.display = "block";
+          return;
+        }
+      }
+
+      postJson("/workspace/coverage/research/recover", payload).then(function (result) {
+        overlay.remove();
+        renderMutationInvalidation(result.downstream_invalidation);
+        byId("coverage-message").textContent = result.summary || "已完成任務恢復操作。";
+        void loadCoverageData();
+        void refreshWorkflowViews();
+      }).catch(function (error) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "確認執行恢復";
+        errBox.textContent = "恢復失敗：" + (error && error.message ? error.message : String(error));
+        errBox.style.display = "block";
+      });
+    };
+
+    if (action === "supplement" && fileInput && fileInput.files && fileInput.files.length > 0) {
+      var file = fileInput.files[0];
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        var arrayBuffer = e.target.result;
+        var bytes = new Uint8Array(arrayBuffer);
+        var binaryStr = "";
+        for (var i = 0; i < bytes.byteLength; i++) {
+          binaryStr += String.fromCharCode(bytes[i]);
+        }
+        var base64 = window.btoa(binaryStr);
+        sendRecover([{ name: file.name, content: base64, media_type: file.type || "text/plain" }]);
+      };
+      reader.onerror = function () {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "確認執行恢復";
+        errBox.textContent = "讀取附件檔案失敗。";
+        errBox.style.display = "block";
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      sendRecover(null);
+    }
+  });
+
+  actionRow.appendChild(submitBtn);
+  modal.appendChild(actionRow);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
 }
 
 function openSupplementDialog(cell, preview) {
@@ -334,16 +647,16 @@ function renderCoverage(payload) {
     actions.className = "coverage-actions";
     (cell.actions || []).forEach(function (action) {
       if (action === "research") {
-        actions.appendChild(coverageButton("來源研究", function () { startCoverageResearch(cell); }));
+        actions.appendChild(coverageButton("來源研究", function () { startCoverageResearch(cell, false); }));
       }
       if (action === "revise_query") {
-        actions.appendChild(coverageButton("修改查詢", function () { recoverCoverageTask(cell, "revise_query", "新的 query seeds（逗號分隔）："); }));
+        actions.appendChild(coverageButton("修改查詢", function () { openRecoveryDialog(cell, "revise_query"); }));
       }
       if (action === "revise_constraints") {
-        actions.appendChild(coverageButton("修改來源限制", function () { recoverCoverageTask(cell, "revise_constraints", "新的 source constraints（逗號分隔）："); }));
+        actions.appendChild(coverageButton("修改來源限制", function () { openRecoveryDialog(cell, "revise_constraints"); }));
       }
       if (action === "manual_url") {
-        actions.appendChild(coverageButton("手動提供 URL", function () { recoverCoverageTask(cell, "manual_url", "請貼上 URL："); }));
+        actions.appendChild(coverageButton("手動提供 URL", function () { openRecoveryDialog(cell, "manual_url"); }));
       }
       if (action === "supplement") {
         actions.appendChild(coverageButton("提供補充資料", function () { previewCoverageResolution(cell, "user_supplement"); }));
@@ -393,13 +706,13 @@ function renderCellActionButton(cell, actionOpt) {
       return;
     }
     if (actionOpt.action === "research") {
-      startCoverageResearch(cell);
+      startCoverageResearch(cell, false);
     } else if (actionOpt.action === "revise_query") {
-      recoverCoverageTask(cell, "revise_query", "新的 query seeds（逗號分隔）：");
+      openRecoveryDialog(cell, "revise_query");
     } else if (actionOpt.action === "revise_constraints") {
-      recoverCoverageTask(cell, "revise_constraints", "新的 source constraints（逗號分隔）：");
+      openRecoveryDialog(cell, "revise_constraints");
     } else if (actionOpt.action === "manual_url") {
-      recoverCoverageTask(cell, "manual_url", "請貼上 URL：");
+      openRecoveryDialog(cell, "manual_url");
     } else if (actionOpt.action === "supplement") {
       previewCoverageResolution(cell, "user_supplement");
     } else if (actionOpt.action === "creative_completion") {
@@ -452,25 +765,38 @@ function coverageCenterCellElement(cell, tasks) {
   if (cell.candidate_fact_ids && cell.candidate_fact_ids.length > 0) detailParts.push("候選事實 " + cell.candidate_fact_ids.length);
   if (cell.evidence_source_ids && cell.evidence_source_ids.length > 0) detailParts.push("證據來源 " + cell.evidence_source_ids.length);
   if (cell.resolution_ids && cell.resolution_ids.length > 0) detailParts.push("resolutions " + cell.resolution_ids.length);
-  if (cell.research_task_ids && cell.research_task_ids.length > 0) detailParts.push("研究任務 " + cell.research_task_ids.length);
+  if (cell.research_task_ids && cell.research_task_ids.length > 0) detailParts.push("當前任務 " + cell.research_task_ids.length);
   details.textContent = detailParts.join(" · ");
   row.appendChild(details);
+
   var taskList = document.createElement("div");
   taskList.className = "muted";
   var taskParts = [];
-  (cell.research_task_ids || []).forEach(function (taskId) {
-    var task = null;
-    for (var i = 0; i < tasks.length; i++) {
-      if (tasks[i].id === taskId) { task = tasks[i]; break; }
-    }
-    if (task !== null) {
-      taskParts.push("任務 " + task.id.slice(0, 8) + " " + (task.projected_status || task.status) + (task.lease_owner ? "（租約 " + task.lease_owner + "）" : ""));
-    } else {
+  var currentTasks = cell.current_research_tasks || [];
+  if (currentTasks.length > 0) {
+    currentTasks.forEach(function (task) {
+      var stat = task.status;
+      var reasonText = task.exhausted_reason ? ("（" + task.exhausted_reason + "）") : "";
+      taskParts.push("當前任務 " + task.id.slice(0, 8) + " " + stat + reasonText);
+    });
+  } else {
+    (cell.research_task_ids || []).forEach(function (taskId) {
       taskParts.push("任務 " + taskId.slice(0, 8));
-    }
-  });
+    });
+  }
   taskList.textContent = taskParts.join("；");
   row.appendChild(taskList);
+
+  if (cell.history_research_tasks && cell.history_research_tasks.length > 0) {
+    var historyDiv = document.createElement("div");
+    historyDiv.style.cssText = "font-size:0.85em;color:#666;background:#fafafa;border:1px dashed #ddd;padding:4px 8px;margin-top:6px;border-radius:4px;";
+    var hList = cell.history_research_tasks.map(function (ht) {
+      return "任務 " + ht.id.slice(0, 8) + " (" + ht.status + ", rev " + ht.assessment_revision.slice(0, 6) + ")";
+    });
+    historyDiv.textContent = "歷史任務 (" + cell.history_research_tasks.length + ")：" + hList.join("；");
+    row.appendChild(historyDiv);
+  }
+
   var actions = document.createElement("div");
   actions.className = "coverage-actions";
   if (cell.typed_actions && cell.typed_actions.length > 0) {
@@ -480,16 +806,16 @@ function coverageCenterCellElement(cell, tasks) {
   } else {
     (cell.actions || []).forEach(function (action) {
       if (action === "research") {
-        actions.appendChild(coverageButton("來源研究", function () { startCoverageResearch(cell); }));
+        actions.appendChild(coverageButton("來源研究", function () { startCoverageResearch(cell, false); }));
       }
       if (action === "revise_query") {
-        actions.appendChild(coverageButton("修改查詢", function () { recoverCoverageTask(cell, "revise_query", "新的 query seeds（逗號分隔）："); }));
+        actions.appendChild(coverageButton("修改查詢", function () { openRecoveryDialog(cell, "revise_query"); }));
       }
       if (action === "revise_constraints") {
-        actions.appendChild(coverageButton("修改來源限制", function () { recoverCoverageTask(cell, "revise_constraints", "新的 source constraints（逗號分隔）："); }));
+        actions.appendChild(coverageButton("修改來源限制", function () { openRecoveryDialog(cell, "revise_constraints"); }));
       }
       if (action === "manual_url") {
-        actions.appendChild(coverageButton("手動提供 URL", function () { recoverCoverageTask(cell, "manual_url", "請貼上 URL："); }));
+        actions.appendChild(coverageButton("手動提供 URL", function () { openRecoveryDialog(cell, "manual_url"); }));
       }
       if (action === "supplement") {
         actions.appendChild(coverageButton("提供補充資料", function () { previewCoverageResolution(cell, "user_supplement"); }));
@@ -502,7 +828,6 @@ function coverageCenterCellElement(cell, tasks) {
   row.appendChild(actions);
   return row;
 }
-
 
 function renderCoverageCenter(payload) {
   currentCoverageCenter = payload;
@@ -524,6 +849,17 @@ function renderCoverageCenter(payload) {
   }
   heading.textContent = headingParts.join(" · ");
   container.appendChild(heading);
+
+  var topBar = document.createElement("div");
+  topBar.style.cssText = "margin-bottom:12px;display:flex;gap:8px;";
+  var allMissingCount = (matrix.cells || []).filter(function (c) { return c.status === "missing" || c.status === "stale"; }).length;
+  var allResearchBtn = coverageButton("啟動全量缺口研究 (" + allMissingCount + " 個缺口)", function () {
+    startCoverageResearch(null, true);
+  });
+  allResearchBtn.style.cssText = "padding:6px 14px;background:#0066cc;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:bold;";
+  topBar.appendChild(allResearchBtn);
+  container.appendChild(topBar);
+
   var grid = document.createElement("div");
   grid.className = "coverage-grid";
   var tasks = payload.monitor !== undefined && payload.monitor.tasks !== undefined ? payload.monitor.tasks : [];
@@ -623,3 +959,4 @@ async function loadCoverageCenterData() {
   }
 }
 `;
+
