@@ -6,6 +6,8 @@ import {
   type CoverageResearchLineageLink,
   type CoverageResearchStartScope,
   type CoverageResearchTarget,
+  type CoverageResolution,
+  type CoverageUserDecisionRecord,
   type ExecutionContext,
   type OperationRecord,
   type ProjectRepository,
@@ -146,8 +148,45 @@ async function checkReplayCoverageCommand(
   marker: string,
 ): Promise<CoverageCommandResult | undefined> {
   const state = await deps.repository.read();
-  const auditEvent = state.audit.find((item) => item.operation_id === operation.id && item.event === marker);
   const existingOp = state.operations.find((op) => op.id === operation.id);
+
+  // If existing operation exists and has command payload, verify consistency on retry
+  if (existingOp !== undefined && existingOp.command !== undefined && operation.command !== undefined) {
+    if (existingOp.command.type !== operation.command.type) {
+      throw new CoreError(
+        "OPERATION_COMMAND_MISMATCH",
+        `Operation "${operation.id}" exists with command type "${existingOp.command.type}", cannot be reused for "${operation.command.type}".`,
+        true,
+      );
+    }
+    const existingPayload = existingOp.command.payload as Record<string, unknown> | undefined;
+    const currentPayload = operation.command.payload as Record<string, unknown> | undefined;
+    const existingReqId = existingPayload?.requirement_id;
+    const currentReqId = currentPayload?.requirement_id;
+    if (existingReqId !== undefined && currentReqId !== undefined && existingReqId !== currentReqId) {
+      throw new CoreError(
+        "OPERATION_COMMAND_MISMATCH",
+        `Operation "${operation.id}" was initiated for requirement "${String(existingReqId)}", cannot retry with "${String(currentReqId)}".`,
+        true,
+      );
+    }
+    const existingCharId = existingPayload?.character_id;
+    const currentCharId = currentPayload?.character_id;
+    if (existingCharId !== currentCharId) {
+      throw new CoreError(
+        "OPERATION_COMMAND_MISMATCH",
+        `Operation "${operation.id}" was initiated for character "${String(existingCharId ?? "world")}", cannot retry with "${String(currentCharId ?? "world")}".`,
+        true,
+      );
+    }
+  }
+
+  // If operation failed previously, do not replay the failure result; allow execution to proceed
+  if (existingOp !== undefined && existingOp.status === "failed") {
+    return undefined;
+  }
+
+  const auditEvent = state.audit.find((item) => item.operation_id === operation.id && item.event === marker);
 
   if (auditEvent === undefined && (existingOp === undefined || existingOp.status === "running")) {
     return undefined;
@@ -670,36 +709,88 @@ export async function executeCoverageSupplement(
     throw new CoreError("OPERATION_COMMAND_INVALID", "Missing supplement payload.", true);
   }
 
-  const payload = command.payload;
+  const payload = command.payload as Record<string, any>;
   assertAssessmentMatches(state, payload.assessment_id, payload.assessment_revision);
 
   let currentState = state;
-  let resolutionId: string | undefined;
-  const existingPendingResolution = state.coverage_resolutions.find(
-    (r) => r.requirement_id === payload.requirement_id
-      && (r.character_id ?? undefined) === (payload.character_id ?? undefined)
-      && r.mode === "user_supplement"
-      && r.status === "pending",
-  );
-  if (existingPendingResolution !== undefined) {
-    resolutionId = existingPendingResolution.id;
+  const executionInput = executionInputFor(operation, actor, "director", "orchestrator");
+
+  let parentResolution: CoverageResolution | undefined;
+  let userDecisionId: string | undefined;
+  let createdDecision: CoverageUserDecisionRecord | undefined;
+  let authPendingResolution: CoverageResolution | undefined;
+
+  const explicitResolutionId = payload.pending_resolution_id ?? payload.resolution_id;
+  if (explicitResolutionId !== undefined && typeof explicitResolutionId === "string" && explicitResolutionId.trim().length > 0) {
+    const existing = state.coverage_resolutions.find((r) => r.id === explicitResolutionId);
+    if (existing === undefined) {
+      throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Resolution "${explicitResolutionId}" not found.`, true);
+    }
+    if (existing.mode !== "user_supplement" || existing.status !== "pending") {
+      throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Resolution "${explicitResolutionId}" is not a pending user_supplement resolution.`, true);
+    }
+    if (existing.requirement_id !== payload.requirement_id || (existing.character_id ?? undefined) !== (payload.character_id ?? undefined)) {
+      throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Resolution "${explicitResolutionId}" target does not match requirement "${payload.requirement_id}" (character: ${payload.character_id ?? "world"}).`, true);
+    }
+    if (existing.assessment_id !== payload.assessment_id) {
+      throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Resolution "${explicitResolutionId}" targets assessment "${existing.assessment_id}", which does not match current assessment "${payload.assessment_id}".`, true);
+    }
+    const currentReqSet = state.coverage_requirement_sets.at(-1);
+    if (currentReqSet !== undefined && existing.requirement_set_revision !== currentReqSet.revision) {
+      throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Resolution "${explicitResolutionId}" targets requirement set revision ${existing.requirement_set_revision}, which is no longer current.`, true);
+    }
+    parentResolution = existing;
+    userDecisionId = existing.user_decision_id;
   } else {
-    const executionInput = executionInputFor(operation, actor, "director", "orchestrator");
-    const recorded = recordUserDecisionAndResolution(
-      currentState,
-      "user_supplement",
-      [payload.requirement_id],
-      "提供補充資料",
-      "使用者提供補充資料以滿足覆蓋率需求",
-      "提供補充資料",
-      executionInput,
-      operation.id,
-      payload.character_id,
+    // Check if there is already an existing pending user_supplement resolution for this requirement/character
+    const existingPending = state.coverage_resolutions.find(
+      (r) =>
+        r.status === "pending" &&
+        r.mode === "user_supplement" &&
+        r.requirement_id === payload.requirement_id &&
+        r.character_id === payload.character_id &&
+        r.assessment_id === payload.assessment_id,
     );
-    currentState = recorded.state;
-    resolutionId = recorded.resolutions[0]?.id;
+
+    if (existingPending !== undefined) {
+      parentResolution = existingPending;
+      userDecisionId = existingPending.user_decision_id;
+    } else {
+      // New supplement must provide choice and rationale; NEVER use secret defaults!
+      const choice = typeof payload.choice === "string" ? payload.choice.trim() : "";
+      const rationale = typeof payload.rationale === "string" ? payload.rationale.trim() : "";
+      if (!choice || !rationale) {
+        throw new CoreError(
+          "OPERATION_COMMAND_INVALID",
+          "新補件必須提供 choice 決策與 rationale 理由，嚴禁使用預設文字。",
+          true,
+        );
+      }
+
+      const recorded = recordUserDecisionAndResolution(
+        currentState,
+        "user_supplement",
+        [payload.requirement_id],
+        choice,
+        rationale,
+        choice,
+        executionInput,
+        operation.id,
+        payload.character_id,
+      );
+      currentState = recorded.state;
+      createdDecision = recorded.decision;
+      authPendingResolution = recorded.resolutions[0];
+      parentResolution = recorded.resolutions[0];
+      userDecisionId = recorded.decision.id;
+    }
   }
 
+  if (parentResolution === undefined || userDecisionId === undefined) {
+    throw new CoreError("COVERAGE_RESOLUTION_INVALID", "Failed to resolve pending resolution lineage for supplement.", true);
+  }
+
+  // Evidence ingestion (Candidate, Source, Chunks). If this fails, no durable state has been committed!
   const supplementRes = await ingestUserSupplementEvidence(
     deps.fetcher,
     currentState,
@@ -713,6 +804,32 @@ export async function executeCoverageSupplement(
     },
   );
 
+  const evidenceBoundResolutionId = internalId("resolution");
+  const sourceRefs = [{ source_id: supplementRes.source.id, revision: supplementRes.source.revision }];
+  const evidenceBoundResolution: CoverageResolution = {
+    id: evidenceBoundResolutionId,
+    ...(payload.character_id === undefined ? {} : { character_id: payload.character_id }),
+    requirement_id: payload.requirement_id,
+    mode: "user_supplement",
+    status: "pending",
+    assessment_id: payload.assessment_id,
+    assessment_revision: payload.assessment_revision,
+    requirement_set_revision: state.coverage_requirement_sets.at(-1)?.revision ?? "",
+    rationale: parentResolution.rationale,
+    source_refs: sourceRefs,
+    user_decision_id: userDecisionId,
+    authorized_by: parentResolution.authorized_by,
+    operation_id: operation.id,
+    supersedes: parentResolution.id,
+    created_by: actor,
+    created_at: now(),
+  };
+
+  const finalState: ProjectState = {
+    ...supplementRes.state,
+    coverage_resolutions: [...supplementRes.state.coverage_resolutions, evidenceBoundResolution],
+  };
+
   const targetScope = {
     ...(payload.character_id === undefined ? {} : { character_id: payload.character_id }),
     requirement_id: payload.requirement_id,
@@ -720,8 +837,79 @@ export async function executeCoverageSupplement(
 
   const summary = `Created user supplement source ${supplementRes.source.id} with ${supplementRes.chunks.length} chunk(s).`;
 
+  const auditEvents: CoverageAuditEvent[] = [];
+  if (createdDecision !== undefined) {
+    auditEvents.push({
+      id: internalId("audit"),
+      operation_id: operation.id,
+      event: "coverage.resolution.confirmed",
+      actor,
+      occurred_at: now(),
+      details: {
+        resolution_id: authPendingResolution?.id,
+        action: "user_supplement",
+        requirement_id: payload.requirement_id,
+        character_id: payload.character_id,
+        choice: payload.choice,
+        rationale: payload.rationale,
+      },
+    });
+  }
+
+  auditEvents.push(
+    {
+      id: internalId("audit"),
+      operation_id: operation.id,
+      event: "coverage.supplement.provided",
+      actor,
+      occurred_at: now(),
+      details: {
+        source_id: supplementRes.source.id,
+        source_revision: supplementRes.source.revision,
+        candidate_id: supplementRes.candidate.id,
+        requirement_id: payload.requirement_id,
+        character_id: payload.character_id,
+        chunk_count: supplementRes.chunks.length,
+        provenance_kind: "user_supplement",
+        resolution_id: evidenceBoundResolutionId,
+        parent_resolution_id: parentResolution.id,
+        source_refs: sourceRefs,
+      },
+    },
+    {
+      id: internalId("audit"),
+      operation_id: operation.id,
+      event: "coverage.supplement.ingested",
+      actor,
+      occurred_at: now(),
+      details: {
+        source_id: supplementRes.source.id,
+        source_revision: supplementRes.source.revision,
+        requirement_id: payload.requirement_id,
+        character_id: payload.character_id,
+        chunk_count: supplementRes.chunks.length,
+        provenance_kind: "user_supplement",
+        resolution_id: evidenceBoundResolutionId,
+        source_refs: sourceRefs,
+      },
+    },
+    {
+      id: internalId("audit"),
+      operation_id: operation.id,
+      event: "knowledge.chunks.prepared",
+      actor,
+      occurred_at: now(),
+      details: {
+        request: supplementRes.source.id,
+        source_ids: [supplementRes.source.id],
+        chunk_count: supplementRes.chunks.length,
+        fact_count: 0,
+      },
+    },
+  );
+
   return {
-    state: supplementRes.state,
+    state: finalState,
     result: {
       status: "completed",
       summary,
@@ -730,57 +918,12 @@ export async function executeCoverageSupplement(
       candidate_id: supplementRes.candidate.id,
       chunk_count: supplementRes.chunks.length,
       target: targetScope,
-      ...(resolutionId === undefined ? {} : { resolution_id: resolutionId }),
+      resolution_id: evidenceBoundResolutionId,
+      authorization_resolution_id: parentResolution.id,
+      decision_id: userDecisionId,
       next_step: "至 Fact Curation / Fact Review 觀看分片並進行事實提煉",
     },
-    auditEvents: [
-      {
-        id: internalId("audit"),
-        operation_id: operation.id,
-        event: "coverage.supplement.provided",
-        actor,
-        occurred_at: now(),
-        details: {
-          source_id: supplementRes.source.id,
-          source_revision: supplementRes.source.revision,
-          candidate_id: supplementRes.candidate.id,
-          requirement_id: payload.requirement_id,
-          character_id: payload.character_id,
-          chunk_count: supplementRes.chunks.length,
-          provenance_kind: "user_supplement",
-          ...(resolutionId === undefined ? {} : { resolution_id: resolutionId }),
-        },
-      },
-      {
-        id: internalId("audit"),
-        operation_id: operation.id,
-        event: "coverage.supplement.ingested",
-        actor,
-        occurred_at: now(),
-        details: {
-          source_id: supplementRes.source.id,
-          source_revision: supplementRes.source.revision,
-          requirement_id: payload.requirement_id,
-          character_id: payload.character_id,
-          chunk_count: supplementRes.chunks.length,
-          provenance_kind: "user_supplement",
-          ...(resolutionId === undefined ? {} : { resolution_id: resolutionId }),
-        },
-      },
-      {
-        id: internalId("audit"),
-        operation_id: operation.id,
-        event: "knowledge.chunks.prepared",
-        actor,
-        occurred_at: now(),
-        details: {
-          request: supplementRes.source.id,
-          source_ids: [supplementRes.source.id],
-          chunk_count: supplementRes.chunks.length,
-          fact_count: 0,
-        },
-      },
-    ],
+    auditEvents,
   };
 }
 
@@ -791,16 +934,6 @@ export async function coverageSupplement(
   attachments: Array<{ name: string; content: Uint8Array; media_type?: string }> = [],
 ): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
-  if (input.operation_id !== undefined) {
-    const existingOp = state.operations.find((o) => o.id === input.operation_id);
-    if (existingOp !== undefined && existingOp.status === "completed") {
-      const dummyOp = coverageOperation(actor, "coverage_supplement", {}, "director", "orchestrator", input.operation_id);
-      const replayed = await checkReplayCoverageCommand(deps, dummyOp, "coverage.supplement.provided");
-      if (replayed !== undefined) return replayed;
-    }
-  }
-
-  assertAssessmentMatches(state, input.assessment_id, input.assessment_revision);
 
   const operationId = input.operation_id ?? internalId("operation");
   let savedRefs: OperationAttachmentRef[] | undefined;
@@ -816,17 +949,23 @@ export async function coverageSupplement(
     }
   }
 
+  const payload: Record<string, unknown> = {
+    assessment_id: input.assessment_id,
+    assessment_revision: input.assessment_revision,
+    requirement_id: input.requirement_id,
+    ...(input.character_id === undefined ? {} : { character_id: input.character_id }),
+    ...(input.choice === undefined ? {} : { choice: input.choice }),
+    ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
+    ...(input.pending_resolution_id === undefined ? {} : { pending_resolution_id: input.pending_resolution_id }),
+    ...(input.resolution_id === undefined ? {} : { resolution_id: input.resolution_id }),
+    ...(input.text === undefined ? {} : { text: input.text }),
+    ...(input.url === undefined ? {} : { url: input.url }),
+  };
+
   const operation = coverageOperation(
     actor,
     "coverage_supplement",
-    {
-      assessment_id: input.assessment_id,
-      assessment_revision: input.assessment_revision,
-      requirement_id: input.requirement_id,
-      ...(input.character_id === undefined ? {} : { character_id: input.character_id }),
-      ...(input.text === undefined ? {} : { text: input.text }),
-      ...(input.url === undefined ? {} : { url: input.url }),
-    },
+    payload,
     "director",
     "orchestrator",
     operationId,
@@ -835,6 +974,8 @@ export async function coverageSupplement(
 
   const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.supplement.provided");
   if (replayed !== undefined) return replayed;
+
+  assertAssessmentMatches(state, input.assessment_id, input.assessment_revision);
 
   try {
     const outcome = await executeCoverageSupplement(deps, state, operation, actor, attachments);

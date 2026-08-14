@@ -78,6 +78,10 @@ export const coverageSupplementCommandPayloadSchema = z.object({
   assessment_revision: z.string().min(1),
   requirement_id: coverageRequirementIdSchema,
   character_id: z.string().min(1).optional(),
+  choice: z.string().min(1).optional(),
+  rationale: z.string().min(1).optional(),
+  pending_resolution_id: z.string().min(1).optional(),
+  resolution_id: z.string().min(1).optional(),
   text: z.string().min(1).optional(),
   url: z.string().url().optional(),
   attachment_refs: z.array(z.object({

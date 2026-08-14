@@ -136,6 +136,8 @@ describe("Audit 7 Batch 3 - Server Re-upload & Operation Replayability (#88, #96
           assessment_revision: latestAss.revision,
           requirement_id: "req.identity",
           character_id: "alpha",
+          choice: "提供角色補充文檔",
+          rationale: "由作者提供第一手背景",
         },
         attachment_refs: [{ id: "missing-att-1", name: "initial.txt", media_type: "text/plain" }],
       },

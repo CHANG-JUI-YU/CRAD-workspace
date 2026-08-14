@@ -161,7 +161,7 @@ describe("Audit 6 Batch 2 - Runtime Layer", () => {
       {
         assessment_id: latestAss.id,
         assessment_revision: latestAss.revision,
-        requirement_id: "req.appearance",
+        requirement_id: "req.identity",
         character_id: "alpha",
         text: "Alpha has blue hair and green eyes.",
         operation_id: opId,

@@ -340,6 +340,8 @@ describe("Audit 7 Batch 1 - Runtime Typed Contract Forwarding", () => {
       assessment_revision: formal.assessment.revision,
       requirement_id: "req.personality",
       character_id: "alpha",
+      choice: "補充性格設定",
+      rationale: "由創作者補充性格資料",
       text: "補充文字內容",
       url: undefined,
       attachments: [],

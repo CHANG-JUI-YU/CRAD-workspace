@@ -739,11 +739,12 @@ export function coverageResolutionProjectionRevision(
 }
 
 export interface CoverageCellActionOption {
-  action: "research" | "supplement" | "creative_completion" | "revise_query" | "revise_constraints" | "manual_url" | "reassess" | "view_details" | "view_research_task";
+  action: "research" | "supplement" | "continue_supplement" | "creative_completion" | "revise_query" | "revise_constraints" | "manual_url" | "reassess" | "view_details" | "view_research_task";
   label: string;
   enabled: boolean;
   disabled_reason?: string;
   target_task_id?: string;
+  target_resolution_id?: string;
   prerequisite?: {
     action: string;
     target_panel?: string;
@@ -756,6 +757,37 @@ export interface CoverageCellActionOption {
     assessment_revision?: string;
   };
 }
+
+export const coverageCellActionOptionSchema = z.object({
+  action: z.enum([
+    "research",
+    "supplement",
+    "continue_supplement",
+    "creative_completion",
+    "revise_query",
+    "revise_constraints",
+    "manual_url",
+    "reassess",
+    "view_details",
+    "view_research_task",
+  ]),
+  label: z.string().min(1),
+  enabled: z.boolean(),
+  disabled_reason: z.string().min(1).optional(),
+  target_task_id: z.string().min(1).optional(),
+  target_resolution_id: z.string().min(1).optional(),
+  prerequisite: z.object({
+    action: z.string().min(1),
+    target_panel: z.string().min(1).optional(),
+    target_id: z.string().min(1).optional(),
+  }).strict().optional(),
+  scope: z.object({
+    character_id: z.string().min(1).optional(),
+    requirement_id: z.string().min(1),
+    assessment_id: z.string().min(1).optional(),
+    assessment_revision: z.string().min(1).optional(),
+  }).strict().optional(),
+}).strict();
 
 export interface CoverageRequirementExplanation {
   character_id?: string;
@@ -772,3 +804,119 @@ export interface CoverageRequirementExplanation {
   assessment_id: string;
   assessment_revision: string;
 }
+
+export type CoverageSupplementLifecycleStage =
+  | "authorized"
+  | "evidence_received"
+  | "source_chunks_ready"
+  | "fact_review"
+  | "accepted_facts"
+  | "resolution_fulfilled"
+  | "reassessment_required"
+  | "reassessed"
+  | "failed"
+  | "needs_attention";
+
+export const COVERAGE_SUPPLEMENT_LIFECYCLE_STAGES = [
+  "authorized",
+  "evidence_received",
+  "source_chunks_ready",
+  "fact_review",
+  "accepted_facts",
+  "resolution_fulfilled",
+  "reassessment_required",
+  "reassessed",
+  "failed",
+  "needs_attention",
+] as const;
+
+export type CoverageSupplementStageStatus = "in_progress" | "completed" | "failed" | "blocked";
+
+export interface CoverageSupplementLifecycleAttempt {
+  attempt_id: string;
+  operation_id: string;
+  status: string;
+  stage: CoverageSupplementLifecycleStage;
+  stage_status: CoverageSupplementStageStatus;
+  authorization_saved: boolean;
+  decision_id?: string;
+  authorization_resolution_id?: string;
+  current_resolution_id?: string;
+  fulfilled_resolution_id?: string;
+  source_refs: Array<{ source_id: string; revision: string }>;
+  chunk_ids: string[];
+  review_run_ids: string[];
+  fact_refs: Array<{ fact_id: string; fact_revision: string; decision_id: string }>;
+  failure_code?: string;
+  failure_message?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CoverageSupplementLifecycleProjection {
+  requirement_id: string;
+  character_id?: string;
+  scope: "character" | "world";
+  stage: CoverageSupplementLifecycleStage;
+  stage_status: CoverageSupplementStageStatus;
+  next_action: string;
+  requires_attention: boolean;
+  authorization_saved: boolean;
+  decision_id?: string;
+  authorization_resolution_id?: string;
+  current_resolution_id?: string;
+  fulfilled_resolution_id?: string;
+  operation_ids: string[];
+  source_refs: Array<{ source_id: string; revision: string }>;
+  review_run_ids: string[];
+  fact_refs: Array<{ fact_id: string; fact_revision: string; decision_id: string }>;
+  failure_code?: string;
+  failure_message?: string;
+  current_attempt?: CoverageSupplementLifecycleAttempt;
+  historical_attempts: CoverageSupplementLifecycleAttempt[];
+}
+
+export const coverageSupplementLifecycleAttemptSchema = z.object({
+  attempt_id: z.string().min(1),
+  operation_id: z.string().min(1),
+  status: z.string().min(1),
+  stage: z.enum(COVERAGE_SUPPLEMENT_LIFECYCLE_STAGES),
+  stage_status: z.enum(["in_progress", "completed", "failed", "blocked"]),
+  authorization_saved: z.boolean(),
+  decision_id: z.string().min(1).optional(),
+  authorization_resolution_id: z.string().min(1).optional(),
+  current_resolution_id: z.string().min(1).optional(),
+  fulfilled_resolution_id: z.string().min(1).optional(),
+  source_refs: z.array(z.object({ source_id: z.string().min(1), revision: z.string().min(1) }).strict()),
+  chunk_ids: z.array(z.string().min(1)),
+  review_run_ids: z.array(z.string().min(1)),
+  fact_refs: z.array(z.object({ fact_id: z.string().min(1), fact_revision: z.string().min(1), decision_id: z.string().min(1) }).strict()),
+  failure_code: z.string().min(1).optional(),
+  failure_message: z.string().min(1).optional(),
+  created_at: z.string().datetime({ offset: true }),
+  updated_at: z.string().datetime({ offset: true }),
+}).strict();
+
+export const coverageSupplementLifecycleProjectionSchema = z.object({
+  requirement_id: coverageRequirementIdSchema,
+  character_id: z.string().min(1).optional(),
+  scope: z.enum(["character", "world"]),
+  stage: z.enum(COVERAGE_SUPPLEMENT_LIFECYCLE_STAGES),
+  stage_status: z.enum(["in_progress", "completed", "failed", "blocked"]),
+  next_action: z.string().min(1),
+  requires_attention: z.boolean(),
+  authorization_saved: z.boolean(),
+  decision_id: z.string().min(1).optional(),
+  authorization_resolution_id: z.string().min(1).optional(),
+  current_resolution_id: z.string().min(1).optional(),
+  fulfilled_resolution_id: z.string().min(1).optional(),
+  operation_ids: z.array(z.string().min(1)),
+  source_refs: z.array(z.object({ source_id: z.string().min(1), revision: z.string().min(1) }).strict()),
+  review_run_ids: z.array(z.string().min(1)),
+  fact_refs: z.array(z.object({ fact_id: z.string().min(1), fact_revision: z.string().min(1), decision_id: z.string().min(1) }).strict()),
+  failure_code: z.string().min(1).optional(),
+  failure_message: z.string().min(1).optional(),
+  current_attempt: coverageSupplementLifecycleAttemptSchema.optional(),
+  historical_attempts: z.array(coverageSupplementLifecycleAttemptSchema),
+}).strict();
+

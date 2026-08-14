@@ -391,6 +391,10 @@ function openSupplementDialog(cell, preview) {
   var existingModal = byId("supplement-modal-overlay");
   if (existingModal) existingModal.remove();
 
+  var opId = "op-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  var lifecycle = cell.supplement_lifecycle;
+  var pendingResId = lifecycle ? lifecycle.current_resolution_id : undefined;
+
   var overlay = document.createElement("div");
   overlay.id = "supplement-modal-overlay";
   overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;";
@@ -400,12 +404,14 @@ function openSupplementDialog(cell, preview) {
 
   var title = document.createElement("h3");
   title.style.cssText = "margin-top:0;margin-bottom:12px;";
-  title.textContent = "提供補充資料 — " + coverageCellTitle(cell);
+  title.textContent = (pendingResId ? "繼續補充資料 — " : "提供補充資料 — ") + coverageCellTitle(cell);
   modal.appendChild(title);
 
   var previewBox = document.createElement("div");
   previewBox.style.cssText = "background:#f8f9fa;border-left:4px solid #0066cc;padding:10px 14px;margin-bottom:16px;font-size:0.9em;color:#333;";
-  previewBox.textContent = "操作預期影響：" + ((preview && preview.consequences) ? preview.consequences.join("；") : "確認提供補充資料後，系統將記錄決策並進行來源分片與事實提煉。");
+  previewBox.textContent = pendingResId
+    ? "此需求已有已確認之決策授權，本次提交將直接上傳補充資料並綁定至既有決策。"
+    : "操作預期影響：" + ((preview && preview.consequences) ? preview.consequences.join("；") : "確認提供補充資料後，系統將記錄決策並進行來源分片與事實提煉。");
   modal.appendChild(previewBox);
 
   var errBox = document.createElement("div");
@@ -450,18 +456,21 @@ function openSupplementDialog(cell, preview) {
   fileGroup.appendChild(fileInput);
   modal.appendChild(fileGroup);
 
-  var rationaleGroup = document.createElement("div");
-  rationaleGroup.style.cssText = "margin-bottom:16px;";
-  var rationaleLabel = document.createElement("label");
-  rationaleLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
-  rationaleLabel.textContent = "確認理由 (Rationale)：";
-  var rationaleInput = document.createElement("input");
-  rationaleInput.type = "text";
-  rationaleInput.value = "提供補充資料證據。";
-  rationaleInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
-  rationaleGroup.appendChild(rationaleLabel);
-  rationaleGroup.appendChild(rationaleInput);
-  modal.appendChild(rationaleGroup);
+  var rationaleInput = null;
+  if (!pendingResId) {
+    var rationaleGroup = document.createElement("div");
+    rationaleGroup.style.cssText = "margin-bottom:16px;";
+    var rationaleLabel = document.createElement("label");
+    rationaleLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+    rationaleLabel.textContent = "決策與確認理由 (Rationale)：";
+    rationaleInput = document.createElement("input");
+    rationaleInput.type = "text";
+    rationaleInput.value = "提供補充資料證據。";
+    rationaleInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+    rationaleGroup.appendChild(rationaleLabel);
+    rationaleGroup.appendChild(rationaleInput);
+    modal.appendChild(rationaleGroup);
+  }
 
   var actionRow = document.createElement("div");
   actionRow.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
@@ -475,13 +484,13 @@ function openSupplementDialog(cell, preview) {
 
   var submitBtn = document.createElement("button");
   submitBtn.type = "button";
-  submitBtn.textContent = "確認並提交補充資料";
+  submitBtn.textContent = pendingResId ? "確認並繼續提交補充資料" : "確認並提交補充資料";
   submitBtn.style.cssText = "padding:8px 16px;border:none;background:#0066cc;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;";
 
   submitBtn.addEventListener("click", function () {
     var textVal = textInput.value.trim();
     var urlVal = urlInput.value.trim();
-    var rationaleVal = rationaleInput.value.trim();
+    var rationaleVal = rationaleInput ? rationaleInput.value.trim() : "";
     var hasFile = fileInput.files && fileInput.files.length > 0;
 
     if (!textVal && !urlVal && !hasFile) {
@@ -490,7 +499,7 @@ function openSupplementDialog(cell, preview) {
       return;
     }
 
-    if (!rationaleVal) {
+    if (!pendingResId && !rationaleVal) {
       errBox.textContent = "請填寫確認理由。";
       errBox.style.display = "block";
       return;
@@ -501,26 +510,19 @@ function openSupplementDialog(cell, preview) {
     submitBtn.textContent = "處理中...";
 
     var processSubmission = function (attachmentsPayload) {
-      postJson("/workspace/coverage/resolution/confirm", {
+      var suppBody = {
         assessment_id: assessment.id,
         assessment_revision: assessment.revision,
         requirement_id: cell.requirement_id,
         ...(cell.character_id === undefined ? {} : { character_id: cell.character_id }),
-        action: "user_supplement",
-        choice: rationaleVal,
-        rationale: rationaleVal,
-      }).then(function () {
-        var suppBody = {
-          assessment_id: assessment.id,
-          assessment_revision: assessment.revision,
-          requirement_id: cell.requirement_id,
-          ...(cell.character_id === undefined ? {} : { character_id: cell.character_id }),
-          ...(textVal ? { text: textVal } : {}),
-          ...(urlVal ? { url: urlVal } : {}),
-          ...(attachmentsPayload ? { attachments: attachmentsPayload } : {}),
-        };
-        return postJson("/workspace/coverage/supplement", suppBody);
-      }).then(function (result) {
+        operation_id: opId,
+        ...(pendingResId ? { pending_resolution_id: pendingResId } : { choice: rationaleVal, rationale: rationaleVal }),
+        ...(textVal ? { text: textVal } : {}),
+        ...(urlVal ? { url: urlVal } : {}),
+        ...(attachmentsPayload ? { attachments: attachmentsPayload } : {}),
+      };
+
+      postJson("/workspace/coverage/supplement", suppBody).then(function (result) {
         overlay.remove();
         renderMutationInvalidation(result.downstream_invalidation);
         setCoverageNotice("已成功提交補充資料（來源 ID: " + (result.source_id || "建立中") + "，分片數: " + (result.chunk_count || 0) + "）。" + (result.next_step ? " " + result.next_step : ""));
@@ -528,8 +530,8 @@ function openSupplementDialog(cell, preview) {
         void refreshWorkflowViews();
       }).catch(function (error) {
         submitBtn.disabled = false;
-        submitBtn.textContent = "確認並提交補充資料";
-        errBox.textContent = "提交失敗：" + (error && error.message ? error.message : String(error));
+        submitBtn.textContent = pendingResId ? "確認並繼續提交補充資料" : "確認並提交補充資料";
+        errBox.textContent = "提交失敗（可直接點擊重試）：" + (error && error.message ? error.message : String(error));
         errBox.style.display = "block";
       });
     };
@@ -549,7 +551,7 @@ function openSupplementDialog(cell, preview) {
       };
       reader.onerror = function () {
         submitBtn.disabled = false;
-        submitBtn.textContent = "確認並提交補充資料";
+        submitBtn.textContent = pendingResId ? "確認並繼續提交補充資料" : "確認並提交補充資料";
         errBox.textContent = "讀取附件檔案失敗。";
         errBox.style.display = "block";
       };
@@ -747,6 +749,49 @@ function coverageCenterCellElement(cell, tasks) {
     });
     historyDiv.textContent = "歷史任務 (" + cell.history_research_tasks.length + ")：" + hList.join("；");
     row.appendChild(historyDiv);
+  }
+
+  if (cell.supplement_lifecycle) {
+    var sl = cell.supplement_lifecycle;
+    var lifeDiv = document.createElement("div");
+    lifeDiv.style.cssText = "font-size:0.85em;background:#f0f7ff;border:1px solid #cce5ff;padding:6px 10px;margin-top:6px;border-radius:4px;color:#004085;";
+
+    var stageLine = document.createElement("div");
+    stageLine.style.cssText = "font-weight:bold;margin-bottom:2px;";
+    stageLine.textContent = "補件生命週期：階段 [" + sl.stage + "] · 狀態 [" + sl.stage_status + "]" + (sl.requires_attention ? " · 需要處理" : "");
+    lifeDiv.appendChild(stageLine);
+
+    if (sl.next_action) {
+      var nextLine = document.createElement("div");
+      nextLine.textContent = "下一步：" + sl.next_action;
+      lifeDiv.appendChild(nextLine);
+    }
+
+    if (sl.failure_message) {
+      var failLine = document.createElement("div");
+      failLine.style.cssText = "color:#721c24;font-weight:bold;margin-top:2px;";
+      failLine.textContent = "失敗診斷：" + sl.failure_message + (sl.authorization_saved ? "（授權決策已保存，可直接繼續補件）" : "");
+      lifeDiv.appendChild(failLine);
+    }
+
+    if (sl.current_attempt) {
+      var curLine = document.createElement("div");
+      curLine.style.cssText = "margin-top:2px;color:#555;";
+      curLine.textContent = "當前補件嘗試：" + sl.current_attempt.attempt_id.slice(0, 8) + " (" + sl.current_attempt.stage + ", " + sl.current_attempt.status + ")";
+      lifeDiv.appendChild(curLine);
+    }
+
+    if (sl.historical_attempts && sl.historical_attempts.length > 0) {
+      var histLine = document.createElement("div");
+      histLine.style.cssText = "margin-top:2px;color:#777;";
+      var hStrs = sl.historical_attempts.map(function (ha) {
+        return ha.attempt_id.slice(0, 8) + " (" + ha.stage + ", " + ha.status + ")";
+      });
+      histLine.textContent = "歷史補件嘗試 (" + sl.historical_attempts.length + ")：" + hStrs.join("；");
+      lifeDiv.appendChild(histLine);
+    }
+
+    row.appendChild(lifeDiv);
   }
 
   var actions = document.createElement("div");

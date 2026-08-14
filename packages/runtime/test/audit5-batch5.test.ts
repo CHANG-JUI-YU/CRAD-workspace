@@ -300,6 +300,8 @@ describe("Audit 5 batch 5: coverage production orchestration", () => {
       assessment_revision: assessmentRevision,
       requirement_id: "req.background",
       character_id: "alpha",
+      choice: "提供背景補充資料",
+      rationale: "由作者補充背景設定",
       text: "The character grew up in the northern hills.",
     }, []);
     expect(result.source_id).toBeDefined();

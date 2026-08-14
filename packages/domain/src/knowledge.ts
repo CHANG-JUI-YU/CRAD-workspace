@@ -58,6 +58,7 @@ import {
 import { buildCurationCandidateBatch, curationRunIdForOperation } from "./fact-curation-service.js";
 import { buildFactReviewContext, prepareFactReviewRun, reviewProjectionRevision, unresolvedRevisionMismatch, type FactReviewContextOptions } from "./fact-review-service.js";
 import { applyLegacyFactReview } from "./fact-review-legacy-adapter.js";
+import { fulfillEligibleUserSupplementResolutions } from "./coverage-assessment.js";
 
 export interface KnowledgeExecutionResult {
   chunks: string[];
@@ -1013,43 +1014,76 @@ export class KnowledgeService {
           status: derivedCommit.runStatus,
           ...(complete ? { completed_at: now() } : {}),
         };
-        return {
+        const nextFacts = current.facts.map((fact) => {
+          const update = updates.get(fact.id);
+          if (update === undefined) return fact;
+          const addedEvidence = update.decision.evidence.map(evidenceText);
+          const nextFact: FactRecord = {
+            ...fact,
+            status: update.record.decision === "accepted" ? "accepted" : update.record.decision === "rejected" ? "rejected" : update.record.decision === "conflict" ? "conflict" : "candidate",
+            entity_refs: update.entity_refs,
+            ...(update.coverage_targets === undefined ? {} : { coverage_targets: update.coverage_targets }),
+            evidence: [...new Set([...fact.evidence, ...addedEvidence])],
+            ...(update.evidence.length > 0 ? { evidence_refs: [...(fact.evidence_refs ?? []), ...update.evidence] } : {}),
+            ...(update.coverage.length > 0 ? { coverage: update.coverage } : {}),
+            fact_revision: (fact.fact_revision ?? 0) + 1,
+            candidate_occurrence_id: candidateOccurrenceForFact(fact),
+            review_run_id: run!.id,
+            decision_id: update.record.id,
+            updated_at: now(),
+          };
+          const withEvidenceRevision: FactRecord = addedEvidence.length > 0 || update.evidence.length > 0
+            ? { ...nextFact, evidence_revision: evidenceRevision(nextFact, current.sources) }
+            : nextFact;
+          if (update.record.decision === "accepted") return { ...withEvidenceRevision, accepted_fact_revision: acceptedFactRevision(withEvidenceRevision) };
+          const { accepted_fact_revision: _acceptedRevision, ...withoutAcceptedRevision } = withEvidenceRevision;
+          return withoutAcceptedRevision;
+        });
+
+        const preFulfillmentState: ProjectState = {
           ...current,
           ...(current.project_status === "published" ? { project_status: "ready" as const } : {}),
-          facts: current.facts.map((fact) => {
-            const update = updates.get(fact.id);
-            if (update === undefined) return fact;
-            const addedEvidence = update.decision.evidence.map(evidenceText);
-            const nextFact: FactRecord = {
-              ...fact,
-              status: update.record.decision === "accepted" ? "accepted" : update.record.decision === "rejected" ? "rejected" : update.record.decision === "conflict" ? "conflict" : "candidate",
-              entity_refs: update.entity_refs,
-              ...(update.coverage_targets === undefined ? {} : { coverage_targets: update.coverage_targets }),
-              evidence: [...new Set([...fact.evidence, ...addedEvidence])],
-              ...(update.evidence.length > 0 ? { evidence_refs: [...(fact.evidence_refs ?? []), ...update.evidence] } : {}),
-              ...(update.coverage.length > 0 ? { coverage: update.coverage } : {}),
-              fact_revision: (fact.fact_revision ?? 0) + 1,
-              candidate_occurrence_id: candidateOccurrenceForFact(fact),
-              review_run_id: run!.id,
-              decision_id: update.record.id,
-              updated_at: now(),
-            };
-            const withEvidenceRevision: FactRecord = addedEvidence.length > 0 || update.evidence.length > 0
-              ? { ...nextFact, evidence_revision: evidenceRevision(nextFact, current.sources) }
-              : nextFact;
-            if (update.record.decision === "accepted") return { ...withEvidenceRevision, accepted_fact_revision: acceptedFactRevision(withEvidenceRevision) };
-            const { accepted_fact_revision: _acceptedRevision, ...withoutAcceptedRevision } = withEvidenceRevision;
-            return withoutAcceptedRevision;
-          }),
+          facts: nextFacts,
           fact_review_runs: current.fact_review_runs.map((item) => item.id === run!.id ? updatedRun : item),
           fact_review_decisions: decisionsForRun,
+        };
+
+        const { fulfilled, state: postFulfillmentState } = fulfillEligibleUserSupplementResolutions(
+          preFulfillmentState,
+          execution ?? reviewerIdentity,
+          operationId,
+        );
+
+        const fulfillmentAudit = fulfilled.map((fRes) => ({
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "coverage.resolution.fulfilled",
+          actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: {
+            resolution_id: fRes.id,
+            supersedes: fRes.supersedes,
+            requirement_id: fRes.requirement_id,
+            character_id: fRes.character_id,
+            source_refs: fRes.source_refs,
+            fact_refs: fRes.fact_refs,
+          },
+        }));
+
+        return {
+          ...postFulfillmentState,
           operations: current.operations.map((item) => item.id === operationId
             ? updateOperation(item, { status: derivedCommit.operationStatus, progress: [...item.progress, ...targetIds.map((id) => ({ item_id: id, status: "completed" as const, message: "Fact review decision applied." }))], result_summary: derivedCommit.summary })
             : item),
-          audit: [...current.audit, {
-            id: internalId("audit"), operation_id: operationId, event: "fact.review.batch.applied", actor, occurred_at: now(), project_revision: current.revision + 1,
-            details: { review_run_id: run!.id, reviewer_identity: reviewerIdentity, agent_id: reviewerIdentity, candidate_occurrence_ids: records.map((record) => record.candidate_occurrence_id), decisions: records.map((record) => ({ id: record.id, fact_id: record.fact_id, decision: record.decision, reason: record.reason })), applied: records.length, skipped: skippedCount, conflict: conflictCount, expected_projection_revision: actualProjectionRevision },
-          }],
+          audit: [
+            ...current.audit,
+            {
+              id: internalId("audit"), operation_id: operationId, event: "fact.review.batch.applied", actor, occurred_at: now(), project_revision: current.revision + 1,
+              details: { review_run_id: run!.id, reviewer_identity: reviewerIdentity, agent_id: reviewerIdentity, candidate_occurrence_ids: records.map((record) => record.candidate_occurrence_id), decisions: records.map((record) => ({ id: record.id, fact_id: record.fact_id, decision: record.decision, reason: record.reason })), applied: records.length, skipped: skippedCount, conflict: conflictCount, expected_projection_revision: actualProjectionRevision },
+            },
+            ...fulfillmentAudit,
+          ],
         };
       });
     } catch (error) {

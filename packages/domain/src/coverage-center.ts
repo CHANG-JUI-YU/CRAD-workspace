@@ -1,10 +1,14 @@
 import {
   COVERAGE_REQUIREMENT_CATALOG,
   type CoverageCellActionOption,
+  type CoverageSupplementLifecycleAttempt,
+  type CoverageSupplementLifecycleProjection,
+  type CoverageSupplementLifecycleStage,
+  type CoverageSupplementStageStatus,
   type ProjectState,
   type ResearchTaskRecord,
 } from "@st-workspace/core";
-import { coverageAssessmentFreshness, currentResolutions, deriveCoverageRequirementExplanations } from "./coverage-assessment.js";
+import { coverageAssessmentFreshness, currentResolutions, deriveCoverageRequirementExplanations, isCurrentResolution } from "./coverage-assessment.js";
 import { coverageAssessmentStaleComponents } from "./downstream-invalidation.js";
 import {
   deriveAssessmentWideResearchProjection,
@@ -74,6 +78,7 @@ export interface CoverageCenterCell {
   history_research_tasks: CoverageCenterTaskRef[];
   current_resolutions: CoverageCenterResolutionRef[];
   history_resolutions: CoverageCenterResolutionRef[];
+  supplement_lifecycle?: CoverageSupplementLifecycleProjection;
   reason?: string;
   missing_prerequisite?: string;
   research_eligibility?: CoverageRequirementResearchEligibility;
@@ -154,14 +159,209 @@ const CELL_STATUS_MAP: Readonly<Record<string, CoverageCenterCellStatus>> = {
   conflicted: "conflict",
 };
 
+export function deriveSupplementLifecycleProjection(
+  state: ProjectState,
+  requirementId: string,
+  characterId?: string,
+): CoverageSupplementLifecycleProjection | undefined {
+  const reqSet = state.coverage_requirement_sets.at(-1);
+  const currentReqSetRevision = reqSet?.revision;
+  const assessment = state.coverage_assessments.at(-1);
+
+  const allResolutions = state.coverage_resolutions.filter(
+    (r) => r.requirement_id === requirementId && (r.character_id ?? undefined) === (characterId ?? undefined) && r.mode === "user_supplement",
+  );
+
+  const relatedOps = state.operations.filter((op) => {
+    if (op.command?.type === "coverage_supplement") {
+      const p = op.command.payload as Record<string, unknown> | undefined;
+      if (p?.requirement_id === requirementId && (p?.character_id ?? undefined) === (characterId ?? undefined)) {
+        return true;
+      }
+    }
+    return false;
+  });
+
+  if (allResolutions.length === 0 && relatedOps.length === 0) {
+    return undefined;
+  }
+
+  const currentResList = currentResolutions(state, {
+    requirementSetRevision: currentReqSetRevision,
+    requirementId,
+    characterId,
+  }).filter((r) => r.mode === "user_supplement");
+
+  const currentRes = currentResList.at(-1);
+  const isFulfilled = currentRes?.status === "fulfilled";
+  const hasPending = currentRes?.status === "pending";
+
+  const attempts: CoverageSupplementLifecycleAttempt[] = [];
+
+  for (const op of relatedOps) {
+    const opAudit = state.audit.filter((a) => a.operation_id === op.id);
+    const opSourceId = (opAudit.find((a) => a.event === "coverage.supplement.provided" || a.event === "coverage.supplement.ingested")?.details?.source_id as string | undefined);
+    const opSource = opSourceId ? state.sources.find((s) => s.id === opSourceId) : undefined;
+    const opSourceRefs = opSource ? [{ source_id: opSource.id, revision: opSource.revision }] : [];
+    const opChunks = opSourceId ? state.knowledge_chunks.filter((c) => c.source_id === opSourceId).map((c) => c.id) : [];
+    const opRes = allResolutions.find((r) => r.operation_id === op.id || (r.source_refs ?? []).some((sr) => sr.source_id === opSourceId));
+
+    let attStage: CoverageSupplementLifecycleStage = "failed";
+    let attStageStatus: CoverageSupplementStageStatus = "failed";
+
+    if (op.status === "failed") {
+      attStage = "failed";
+      attStageStatus = "failed";
+    } else if (opRes?.status === "fulfilled") {
+      attStage = "resolution_fulfilled";
+      attStageStatus = "completed";
+    } else if (opChunks.length > 0) {
+      attStage = "source_chunks_ready";
+      attStageStatus = "completed";
+    } else if (opSource !== undefined) {
+      attStage = "evidence_received";
+      attStageStatus = "completed";
+    } else if (opRes?.status === "pending") {
+      attStage = "authorized";
+      attStageStatus = "completed";
+    }
+
+    const reviewRunIds = [...new Set(state.facts.filter((f) => opSourceId && f.source_ids.includes(opSourceId) && f.review_run_id).map((f) => f.review_run_id!))];
+    const factRefs = (opRes?.fact_refs ?? []);
+
+    attempts.push({
+      attempt_id: op.id,
+      operation_id: op.id,
+      status: op.status,
+      stage: attStage,
+      stage_status: attStageStatus,
+      authorization_saved: opRes !== undefined || (op.status === "failed" && allResolutions.some((r) => r.requirement_id === requirementId && isCurrentResolution(state, r, currentReqSetRevision))),
+      ...(opRes?.user_decision_id === undefined ? {} : { decision_id: opRes.user_decision_id }),
+      ...(opRes?.status === "pending" ? { current_resolution_id: opRes.id } : {}),
+      ...(opRes?.status === "fulfilled" ? { fulfilled_resolution_id: opRes.id } : {}),
+      source_refs: opSourceRefs.length > 0 ? opSourceRefs : (opRes?.source_refs ?? []),
+      chunk_ids: opChunks,
+      review_run_ids: reviewRunIds,
+      fact_refs: factRefs,
+      ...(op.status === "failed" ? { failure_message: op.result_summary ?? "補件操作失敗" } : {}),
+      created_at: op.created_at,
+      updated_at: op.updated_at,
+    });
+  }
+
+  const latestOp = relatedOps.at(-1);
+  const currentAttempt = attempts.find((a) => a.operation_id === latestOp?.id) ?? attempts.at(-1);
+  const historicalAttempts = attempts.filter((a) => a.attempt_id !== currentAttempt?.attempt_id);
+
+  let stage: CoverageSupplementLifecycleStage = "authorized";
+  let stageStatus: CoverageSupplementStageStatus = "in_progress";
+  let nextAction = "提供補充資料";
+  let requiresAttention = false;
+
+  const assessmentItem = assessment?.items.find((it) => it.requirement_id === requirementId && (it.character_id ?? undefined) === (characterId ?? undefined));
+
+  const authResolution = allResolutions.find((r) => isCurrentResolution(state, r, currentReqSetRevision) && (!r.supersedes || state.coverage_user_decisions.some((d) => d.id === r.user_decision_id)));
+  const authSaved = authResolution !== undefined || allResolutions.some((r) => isCurrentResolution(state, r, currentReqSetRevision));
+
+  const boundSources = (currentRes?.source_refs ?? []);
+  const boundSourceIds = boundSources.map((s) => s.source_id);
+  const boundChunks = state.knowledge_chunks.filter((c) => boundSourceIds.includes(c.source_id));
+  const candidateFacts = state.facts.filter((f) => f.source_ids.some((id) => boundSourceIds.includes(id)) && (f.suggested_coverage_targets ?? []).includes(requirementId));
+  const acceptedFacts = state.facts.filter((f) => f.source_ids.some((id) => boundSourceIds.includes(id)) && f.status === "accepted" && (f.coverage_targets ?? []).includes(requirementId));
+  const reviewRuns = state.fact_review_runs.filter((r) => r.source_revisions.some((sr) => boundSourceIds.includes(sr.source_id)));
+
+  const latestFailedOp = relatedOps.slice().reverse().find((op) => op.status === "failed");
+  const isFailed = latestFailedOp !== undefined && (latestOp?.id === latestFailedOp.id || !currentRes);
+
+  if (isFulfilled) {
+    if (assessmentItem?.status === "covered_by_user_supplement" && (assessmentItem.resolution_ids ?? []).includes(currentRes.id)) {
+      stage = "reassessed";
+      stageStatus = "completed";
+      nextAction = "檢視細節與 Provenance";
+      requiresAttention = false;
+    } else {
+      stage = "reassessment_required";
+      stageStatus = "completed";
+      nextAction = "重新執行 Formal Assessment";
+      requiresAttention = true;
+    }
+  } else if (isFailed) {
+    stage = "failed";
+    stageStatus = "failed";
+    requiresAttention = true;
+    nextAction = authSaved ? "繼續補件（重新提交證據）" : "重新提供補充資料";
+  } else if (acceptedFacts.length > 0) {
+    stage = "accepted_facts";
+    stageStatus = "in_progress";
+    nextAction = "等待 Fact Review 結案自動 fulfillment";
+    requiresAttention = false;
+  } else if (reviewRuns.length > 0 || candidateFacts.length > 0) {
+    stage = "fact_review";
+    stageStatus = "in_progress";
+    nextAction = "至 Fact Review 進行事實裁決";
+    requiresAttention = false;
+  } else if (boundChunks.length > 0) {
+    stage = "source_chunks_ready";
+    stageStatus = "completed";
+    nextAction = "至 Fact Curation / Fact Review 觀看分片並進行事實提煉";
+    requiresAttention = false;
+  } else if (boundSources.length > 0) {
+    stage = "evidence_received";
+    stageStatus = "completed";
+    nextAction = "準備來源分片";
+    requiresAttention = false;
+  } else if (hasPending) {
+    stage = "authorized";
+    stageStatus = "in_progress";
+    nextAction = "繼續補件（上傳補充資料證據）";
+    requiresAttention = true;
+  }
+
+  const allOpIds = [...new Set(relatedOps.map((op) => op.id))];
+  const allSourceRefs = currentRes?.source_refs ?? (boundSources.length > 0 ? boundSources : []);
+  const allReviewRunIds = [...new Set(reviewRuns.map((r) => r.id))];
+  const allFactRefs = currentRes?.fact_refs ?? [];
+
+  return {
+    requirement_id: requirementId,
+    ...(characterId === undefined ? {} : { character_id: characterId }),
+    scope: characterId === undefined ? "world" : "character",
+    stage,
+    stage_status: stageStatus,
+    next_action: nextAction,
+    requires_attention: requiresAttention,
+    authorization_saved: authSaved,
+    ...(currentRes?.user_decision_id === undefined ? {} : { decision_id: currentRes.user_decision_id }),
+    ...(authResolution?.id === undefined ? {} : { authorization_resolution_id: authResolution.id }),
+    ...(currentRes?.id === undefined ? {} : { current_resolution_id: currentRes.id }),
+    ...(isFulfilled ? { fulfilled_resolution_id: currentRes.id } : {}),
+    operation_ids: allOpIds,
+    source_refs: allSourceRefs,
+    review_run_ids: allReviewRunIds,
+    fact_refs: allFactRefs,
+    ...(isFailed && latestFailedOp ? { failure_message: latestFailedOp.result_summary ?? "補件操作失敗" } : {}),
+    ...(currentAttempt === undefined ? {} : { current_attempt: currentAttempt }),
+    historical_attempts: historicalAttempts,
+  };
+}
+
 export function deriveCoverageCellActions(
   cellStatus: CoverageCenterCellStatus,
   eligibility: CoverageAssessmentEligibility,
   exhausted: boolean,
   scope: { character_id?: string; requirement_id: string; assessment_id?: string; assessment_revision?: string },
   inFlightTaskIds: string[] = [],
+  supplementLifecycle?: CoverageSupplementLifecycleProjection,
 ): CoverageCellActionOption[] {
   const options: CoverageCellActionOption[] = [];
+
+  const hasPendingSupplement = supplementLifecycle !== undefined && supplementLifecycle.current_resolution_id !== undefined && (
+    supplementLifecycle.stage !== "reassessed" &&
+    supplementLifecycle.stage !== "reassessment_required" &&
+    supplementLifecycle.stage !== "resolution_fulfilled"
+  );
+  const supplementLabel = hasPendingSupplement ? "繼續補件" : "提供補充資料";
+  const supplementResolutionId = supplementLifecycle?.current_resolution_id;
 
   if (!eligibility.actionable) {
     const reasonText = eligibility.reason ?? "Coverage Assessment 尚不具備 mutation 資格";
@@ -190,9 +390,10 @@ export function deriveCoverageCellActions(
     });
     options.push({
       action: "supplement",
-      label: "提供補充資料",
+      label: supplementLabel,
       enabled: false,
       disabled_reason: reasonText,
+      ...(supplementResolutionId === undefined ? {} : { target_resolution_id: supplementResolutionId }),
       prerequisite: { action: "reassess", target_panel: reassessTargetPanel },
       scope,
     });
@@ -223,9 +424,10 @@ export function deriveCoverageCellActions(
     });
     options.push({
       action: "supplement",
-      label: "提供補充資料",
+      label: supplementLabel,
       enabled: false,
       disabled_reason: "需求已解決，若要重新變更請由 Detail 面板或重新評估進程操作",
+      ...(supplementResolutionId === undefined ? {} : { target_resolution_id: supplementResolutionId }),
       scope,
     });
     options.push({
@@ -249,6 +451,24 @@ export function deriveCoverageCellActions(
     return options;
   }
 
+  if (supplementLifecycle?.stage === "reassessment_required") {
+    options.push({
+      action: "reassess",
+      label: "重新執行 Formal Assessment",
+      enabled: true,
+      prerequisite: { action: "reassess", target_panel: "coverage" },
+      scope,
+    });
+    options.push({
+      action: "supplement",
+      label: "已完成補件 (待重新評估)",
+      enabled: false,
+      disabled_reason: "已完成補充資料 fulfillment，請重新執行 Formal Assessment",
+      scope,
+    });
+    return options;
+  }
+
   if (inFlightTaskIds.length > 0) {
     const primaryTaskId = inFlightTaskIds[0]!;
     options.push({
@@ -259,7 +479,7 @@ export function deriveCoverageCellActions(
       prerequisite: { action: "view_task", target_panel: "research-monitor", target_id: primaryTaskId },
       scope,
     });
-    options.push({ action: "supplement", label: "提供補充資料", enabled: true, scope });
+    options.push({ action: "supplement", label: supplementLabel, enabled: true, ...(supplementResolutionId === undefined ? {} : { target_resolution_id: supplementResolutionId }), scope });
     options.push({ action: "creative_completion", label: "授權創作補全", enabled: true, scope });
     return options;
   }
@@ -268,11 +488,11 @@ export function deriveCoverageCellActions(
     options.push({ action: "revise_query", label: "修改查詢", enabled: true, scope });
     options.push({ action: "revise_constraints", label: "修改來源限制", enabled: true, scope });
     options.push({ action: "manual_url", label: "手動提供 URL", enabled: true, scope });
-    options.push({ action: "supplement", label: "提供補充資料", enabled: true, scope });
+    options.push({ action: "supplement", label: supplementLabel, enabled: true, ...(supplementResolutionId === undefined ? {} : { target_resolution_id: supplementResolutionId }), scope });
     options.push({ action: "creative_completion", label: "授權創作補全", enabled: true, scope });
   } else {
     options.push({ action: "research", label: "來源研究", enabled: true, scope });
-    options.push({ action: "supplement", label: "提供補充資料", enabled: true, scope });
+    options.push({ action: "supplement", label: supplementLabel, enabled: true, ...(supplementResolutionId === undefined ? {} : { target_resolution_id: supplementResolutionId }), scope });
     options.push({ action: "creative_completion", label: "授權創作補全", enabled: true, scope });
   }
 
@@ -399,7 +619,8 @@ export function deriveCoverageCenterMatrix(state: ProjectState): CoverageCenterM
       ...(assessment?.revision === undefined ? {} : { assessment_revision: assessment.revision }),
     };
 
-    const typedActions = deriveCoverageCellActions(status, eligibility, unSupersededExhausted, cellScope, inFlightTaskIds);
+    const supplementLifecycle = deriveSupplementLifecycleProjection(state, item.requirement_id, item.character_id);
+    const typedActions = deriveCoverageCellActions(status, eligibility, unSupersededExhausted, cellScope, inFlightTaskIds, supplementLifecycle);
     const enabledActions = typedActions.filter((a) => a.enabled).map((a) => a.action);
 
     const researchEligibility =
@@ -431,6 +652,7 @@ export function deriveCoverageCenterMatrix(state: ProjectState): CoverageCenterM
       history_research_tasks: historyResearchTasks,
       current_resolutions: currentResolutionRefs,
       history_resolutions: historyResolutionRefs,
+      ...(supplementLifecycle === undefined ? {} : { supplement_lifecycle: supplementLifecycle }),
       ...(cellReason === undefined ? {} : { reason: cellReason }),
       ...(explanation?.missing_prerequisite === undefined ? {} : { missing_prerequisite: explanation.missing_prerequisite }),
       ...(researchEligibility === undefined ? {} : { research_eligibility: researchEligibility }),

@@ -553,6 +553,134 @@ export function fulfillUserSupplementResolution(
 }
 
 /**
+ * Pure domain reconciliation that checks all current pending user_supplement resolutions,
+ * matches eligible accepted facts with exact provenance, and produces fulfilled successor resolutions.
+ */
+export function fulfillEligibleUserSupplementResolutions(
+  state: ProjectState,
+  executionInput: ExecutionActorInput,
+  operationId: string,
+): { fulfilled: CoverageResolution[]; state: ProjectState } {
+  const { auditActor } = resolveExecutionActors(executionInput);
+  const reqSet = state.coverage_requirement_sets.at(-1);
+  if (reqSet === undefined) return { fulfilled: [], state };
+
+  const authoritativeRun = latestAuthoritativeRun(state);
+  if (authoritativeRun === undefined) return { fulfilled: [], state };
+
+  const matcher = createEntityMatcher(state);
+  const currentReqSetRevision = reqSet.revision;
+  const currentResolutionsList = currentResolutions(state, { requirementSetRevision: currentReqSetRevision });
+  const pendingSupplements = currentResolutionsList.filter((r) => r.mode === "user_supplement" && r.status === "pending");
+
+  if (pendingSupplements.length === 0) {
+    return { fulfilled: [], state };
+  }
+
+  const fulfilled: CoverageResolution[] = [];
+  let updatedResolutions = [...state.coverage_resolutions];
+
+  for (const pending of pendingSupplements) {
+    // Must have bound source_refs
+    if (!pending.source_refs || pending.source_refs.length === 0) continue;
+
+    // Check that source_refs exist in state.sources with matching revision
+    const validSources = pending.source_refs.every((ref) => {
+      const source = state.sources.find((s) => s.id === ref.source_id);
+      return source !== undefined && source.revision === ref.revision;
+    });
+    if (!validSources) continue;
+
+    const pendingSourceIds = new Set(pending.source_refs.map((ref) => ref.source_id));
+
+    // Find accepted facts matching exact provenance and coverage requirement
+    const eligibleFacts: FactRecord[] = [];
+    const factRefs: Array<{ fact_id: string; fact_revision: string; decision_id: string }> = [];
+
+    for (const fact of state.facts) {
+      if (fact.status !== "accepted" || !fact.accepted_fact_revision) continue;
+      if (!(fact.coverage_targets ?? []).includes(pending.requirement_id)) continue;
+      if (!provenanceCurrent(state, fact)) continue;
+
+      // Character scope check
+      if (pending.character_id !== undefined) {
+        if (!factReferencesEntity(fact, matcher, pending.character_id)) continue;
+      } else {
+        const isWorld = fact.classification === "world" || (fact.coverage ?? []).includes(WORLD_COVERAGE_DIMENSION);
+        if (!isWorld) continue;
+      }
+
+      // Source provenance match: fact's evidence refs must match resolution source_refs
+      const factRefsList = fact.evidence_refs ?? [];
+      const factSourceIds = fact.source_ids ?? [];
+      const hasMatchingEvidenceRef = factRefsList.length > 0 && factRefsList.every((ref) => pendingSourceIds.has(ref.source_id));
+      const hasMatchingSourceId = factRefsList.length === 0 && factSourceIds.length > 0 && factSourceIds.every((id) => pendingSourceIds.has(id));
+      if (!hasMatchingEvidenceRef && !hasMatchingSourceId) continue;
+
+      // Match accepted decision in authoritative run
+      const decision = latestDecisionForOccurrence(state.fact_review_decisions, authoritativeRun.id, candidateOccurrenceForFact(fact));
+      if (
+        decision === undefined ||
+        decision.decision !== "accepted" ||
+        decision.resulting_fact_revision !== fact.fact_revision
+      ) {
+        continue;
+      }
+
+      eligibleFacts.push(fact);
+      factRefs.push({
+        fact_id: fact.id,
+        fact_revision: fact.accepted_fact_revision,
+        decision_id: decision.id,
+      });
+    }
+
+    const definition = coverageRequirementById(pending.requirement_id);
+    const minFacts = definition?.satisfaction?.min_accepted_facts ?? 1;
+    if (eligibleFacts.length >= minFacts) {
+      // Idempotency: check if already superseded by a fulfilled successor
+      const alreadyFulfilled = updatedResolutions.some((r) => r.supersedes === pending.id && r.status === "fulfilled");
+      if (!alreadyFulfilled) {
+        const successorId = internalId("resolution");
+        const successor: CoverageResolution = {
+          id: successorId,
+          ...(pending.character_id === undefined ? {} : { character_id: pending.character_id }),
+          requirement_id: pending.requirement_id,
+          mode: "user_supplement",
+          status: "fulfilled",
+          assessment_id: pending.assessment_id,
+          assessment_revision: pending.assessment_revision,
+          requirement_set_revision: pending.requirement_set_revision,
+          rationale: pending.rationale,
+          source_refs: pending.source_refs,
+          fact_refs: factRefs,
+          user_decision_id: pending.user_decision_id,
+          authorized_by: pending.authorized_by,
+          operation_id: operationId,
+          supersedes: pending.id,
+          created_by: auditActor,
+          created_at: now(),
+        };
+        fulfilled.push(successor);
+        updatedResolutions.push(successor);
+      }
+    }
+  }
+
+  if (fulfilled.length === 0) {
+    return { fulfilled: [], state };
+  }
+
+  return {
+    fulfilled,
+    state: {
+      ...state,
+      coverage_resolutions: updatedResolutions,
+    },
+  };
+}
+
+/**
  * Check if source-derived / user-supplement facts are valid, reviewed, and consistent.
  */
 export function sourceFactsReady(state: ProjectState): boolean {

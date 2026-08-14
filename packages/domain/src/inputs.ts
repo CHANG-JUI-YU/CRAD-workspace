@@ -255,11 +255,18 @@ export const coverageResolutionConfirmInputSchema = coverageResolutionScopeSchem
 export type CoverageResolutionConfirmInput = z.infer<typeof coverageResolutionConfirmInputSchema>;
 
 export const coverageSupplementInputSchema = coverageResolutionScopeSchema.extend({
+  choice: z.string().min(1).optional(),
+  rationale: z.string().min(1).optional(),
+  pending_resolution_id: z.string().min(1).optional(),
+  resolution_id: z.string().min(1).optional(),
   text: z.string().trim().min(1).optional(),
   url: z.string().url().optional(),
   attachments: attachmentsSchema,
 }).strict().superRefine((value, ctx) => {
-  if (value.text === undefined && value.url === undefined && (value.attachments ?? []).length === 0) {
+  const hasText = value.text !== undefined && value.text.trim().length > 0;
+  const hasUrl = value.url !== undefined && value.url.trim().length > 0;
+  const hasAtt = (value.attachments ?? []).length > 0;
+  if (!hasText && !hasUrl && !hasAtt) {
     ctx.addIssue({ code: "custom", path: ["text"], message: "至少提供補充文字、URL 或附件其中一項。" });
   }
 });
