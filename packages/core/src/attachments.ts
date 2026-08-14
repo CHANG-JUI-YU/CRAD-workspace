@@ -5,9 +5,17 @@ import type { OperationAttachmentRef } from "./project-state.js";
 import type { SourceAttachment } from "./core-utilities.js";
 import { CoreError, internalId } from "./core-utilities.js";
 
+export interface AttachmentInspectionRef {
+  id: string;
+  name: string;
+  media_type?: string;
+  available: boolean;
+}
+
 export interface AttachmentStore {
   save(operationId: string, attachments: readonly SourceAttachment[]): Promise<OperationAttachmentRef[]>;
   load(operationId: string, refs: readonly OperationAttachmentRef[]): Promise<SourceAttachment[]>;
+  inspect(operationId: string, refs: readonly OperationAttachmentRef[]): Promise<AttachmentInspectionRef[]>;
 }
 export class InMemoryAttachmentStore implements AttachmentStore {
   private readonly store = new Map<string, Array<{ ref: OperationAttachmentRef; content: Uint8Array }>>();
@@ -18,7 +26,9 @@ export class InMemoryAttachmentStore implements AttachmentStore {
       name: attachment.name,
       ...(attachment.media_type === undefined ? {} : { media_type: attachment.media_type }),
     }));
-    this.store.set(operationId, attachments.map((attachment, index) => ({ ref: refs[index]!, content: attachment.content })));
+    const existing = this.store.get(operationId) ?? [];
+    const additions = attachments.map((attachment, index) => ({ ref: refs[index]!, content: attachment.content }));
+    this.store.set(operationId, [...existing, ...additions]);
     return refs;
   }
 
@@ -28,6 +38,19 @@ export class InMemoryAttachmentStore implements AttachmentStore {
       const entry = entries.find((candidate) => candidate.ref.id === ref.id);
       if (entry === undefined) throw new CoreError("ATTACHMENT_NOT_FOUND", `Attachment ${ref.id} of operation ${operationId} is not available in this runtime.`, false);
       return { name: entry.ref.name, content: entry.content, ...(entry.ref.media_type === undefined ? {} : { media_type: entry.ref.media_type }) };
+    });
+  }
+
+  async inspect(operationId: string, refs: readonly OperationAttachmentRef[]): Promise<AttachmentInspectionRef[]> {
+    const entries = this.store.get(operationId) ?? [];
+    return refs.map((ref) => {
+      const found = entries.some((candidate) => candidate.ref.id === ref.id);
+      return {
+        id: ref.id,
+        name: ref.name,
+        ...(ref.media_type === undefined ? {} : { media_type: ref.media_type }),
+        available: found,
+      };
     });
   }
 }
@@ -85,6 +108,29 @@ export class FileAttachmentStore implements AttachmentStore {
           throw new CoreError("ATTACHMENT_NOT_FOUND", `Attachment ${ref.id} of operation ${operationId} is missing from the attachment store.`, false);
         }
         throw error;
+      }
+    }));
+  }
+
+  async inspect(operationId: string, refs: readonly OperationAttachmentRef[]): Promise<AttachmentInspectionRef[]> {
+    const directory = this.directoryFor(operationId);
+    const { stat } = await import("node:fs/promises");
+    return Promise.all(refs.map(async (ref) => {
+      try {
+        await stat(path.join(directory, ref.id));
+        return {
+          id: ref.id,
+          name: ref.name,
+          ...(ref.media_type === undefined ? {} : { media_type: ref.media_type }),
+          available: true,
+        };
+      } catch {
+        return {
+          id: ref.id,
+          name: ref.name,
+          ...(ref.media_type === undefined ? {} : { media_type: ref.media_type }),
+          available: false,
+        };
       }
     }));
   }

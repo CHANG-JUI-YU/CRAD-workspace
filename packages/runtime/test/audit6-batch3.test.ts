@@ -142,7 +142,13 @@ describe("Audit 6 Batch 3 - Runtime Research Preview and Recovery", () => {
     const state = buildAssessmentState();
     const repository = new MemoryProjectRepository(state.id, state);
     const knowledge = new KnowledgeService(repository);
-    const deps: CoverageApplicationDeps = { repository, knowledge };
+    const fetcher = async (url: string) => ({
+      final_url: url,
+      content: new TextEncoder().encode(`Content for ${url}`),
+      media_type: "text/html",
+      title: `Doc for ${url}`,
+    });
+    const deps: CoverageApplicationDeps = { repository, knowledge, fetcher };
 
     const latestAss = state.coverage_assessments.at(-1)!;
 

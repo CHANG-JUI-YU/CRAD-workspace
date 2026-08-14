@@ -238,6 +238,21 @@ export interface DashboardCandidateView {
   selection_snapshot?: SourceCandidate["selection_snapshot"];
 }
 
+export interface OperationAttachmentStatusView {
+  id: string;
+  name: string;
+  media_type?: string;
+  available?: boolean;
+}
+
+export interface OperationReplayability {
+  state: "replayable" | "requires_reupload" | "non_replayable";
+  reason_code?: string;
+  reason?: string;
+  attachment_count: number;
+  attachments: OperationAttachmentStatusView[];
+}
+
 export interface DashboardOperationView {
   id: string;
   kind: OperationRecord["kind"];
@@ -250,6 +265,7 @@ export interface DashboardOperationView {
   attempt?: number;
   last_error?: string;
   error_class?: "recoverable" | "fatal";
+  replayability?: OperationReplayability;
   created_at: string;
   updated_at: string;
   progress_count: number;
@@ -547,8 +563,81 @@ function mapCandidate(candidate: SourceCandidate): DashboardCandidateView {
   };
 }
 
+function deriveOperationReplayability(
+  operation: OperationRecord,
+  errorClass: "recoverable" | "fatal" | undefined,
+): OperationReplayability {
+  const refs = operation.command?.attachment_refs ?? [];
+  const attachments: OperationAttachmentStatusView[] = refs.map((ref) => ({
+    id: ref.id,
+    name: ref.name,
+    ...(ref.media_type === undefined ? {} : { media_type: ref.media_type }),
+    available: true,
+  }));
+
+  const hasMissingAttachments = operation.status === "needs_input" && (operation.question?.includes("ATTACHMENT_REUPLOAD_REQUIRED") === true);
+
+  if (operation.status === "completed" || operation.status === "cancelled") {
+    return {
+      state: "non_replayable",
+      reason_code: "OPERATION_TERMINAL",
+      reason: "操作已結束，不可再次執行。",
+      attachment_count: attachments.length,
+      attachments,
+    };
+  }
+
+  if (hasMissingAttachments) {
+    return {
+      state: "requires_reupload",
+      reason_code: "ATTACHMENTS_MISSING",
+      reason: "缺少附件檔案，需重新上傳後才能繼續。",
+      attachment_count: attachments.length,
+      attachments: attachments.map((att) => ({ ...att, available: false })),
+    };
+  }
+
+  if (operation.status === "needs_input") {
+    return {
+      state: "non_replayable",
+      reason_code: "USER_INPUT_REQUIRED",
+      reason: "需要使用者回答問題或確認決策。",
+      attachment_count: attachments.length,
+      attachments,
+    };
+  }
+
+  if (operation.status === "failed") {
+    if (errorClass === "fatal") {
+      return {
+        state: "non_replayable",
+        reason_code: "OPERATION_FAILED_FATAL",
+        reason: "操作發生不可恢復之錯誤，需人工重新發起。",
+        attachment_count: attachments.length,
+        attachments,
+      };
+    }
+    return {
+      state: "replayable",
+      reason_code: "RETRY_AVAILABLE",
+      reason: "操作可安全重試。",
+      attachment_count: attachments.length,
+      attachments,
+    };
+  }
+
+  return {
+    state: "replayable",
+    reason_code: "IN_FLIGHT_RESUMABLE",
+    reason: "操作可繼續執行。",
+    attachment_count: attachments.length,
+    attachments,
+  };
+}
+
 function mapOperation(operation: OperationRecord, classes: ReadonlyMap<string, "recoverable" | "fatal">, includeDetail = false): DashboardOperationView | DashboardOperationDetail {
   const errorClass = classes.get(operation.id);
+  const replayability = deriveOperationReplayability(operation, errorClass);
   const base: DashboardOperationView = {
     id: operation.id,
     kind: operation.kind,
@@ -561,6 +650,7 @@ function mapOperation(operation: OperationRecord, classes: ReadonlyMap<string, "
     ...(operation.attempt === undefined ? {} : { attempt: operation.attempt }),
     ...(operation.last_error === undefined ? {} : { last_error: operation.last_error }),
     ...(errorClass === undefined ? {} : { error_class: errorClass }),
+    replayability,
     created_at: operation.created_at,
     updated_at: operation.updated_at,
     progress_count: operation.progress.length,

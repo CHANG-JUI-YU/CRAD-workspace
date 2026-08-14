@@ -21,6 +21,18 @@ function visibleAgents(agentAdapter: AgentAdapter): { default_agent: string; age
   return { default_agent: "director", agents: agentAdapter.list() };
 }
 
+const operationAttachmentReuploadSchema = z.object({
+  operation_id: z.string().min(1),
+  replacements: z.array(z.object({
+    missing_ref_id: z.string().optional(),
+    original_ref_id: z.string().optional(),
+    name: z.string().min(1),
+    content_base64: z.string().optional(),
+    content: z.string().optional(),
+    media_type: z.string().optional(),
+  })).min(1),
+}).strict();
+
 export async function handleRestRequest(request: IncomingMessage, response: ServerResponse, url: URL, deps: WorkspaceRouteDeps): Promise<boolean> {
       if (request.method === "GET" && url.pathname === "/workspace/status") {
         if (deps.projectManager === undefined) {
@@ -469,6 +481,24 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         const parsed = await body(request);
         const { operation_id } = parseRequest(operationIdSchema, parsed, "OPERATION_ID_REQUIRED");
         json(response, 200, await (await deps.getRuntime()).recoverOperation(operation_id, { actor: deps.actor, attachments: [] }));
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/operation/attachments/reupload") {
+        const parsed = await body(request);
+        const input = parseRequest(operationAttachmentReuploadSchema, parsed, "OPERATION_ID_REQUIRED");
+        const replacements = input.replacements.map((r) => {
+          const rawBase64 = r.content_base64 ?? r.content ?? "";
+          const content = Buffer.from(rawBase64, "base64");
+          const missingRefId = r.missing_ref_id ?? r.original_ref_id;
+          return {
+            ...(missingRefId === undefined ? {} : { missing_ref_id: missingRefId }),
+            name: r.name,
+            content,
+            ...(r.media_type === undefined ? {} : { media_type: r.media_type }),
+          };
+        });
+        const runtime = await deps.getRuntime();
+        json(response, 200, await runtime.reuploadOperationAttachments(input.operation_id, replacements, { actor: deps.actor, attachments: [] }));
         return true;
       }
       if (request.method === "POST" && url.pathname === "/workspace/operation/fail") {

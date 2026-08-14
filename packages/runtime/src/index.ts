@@ -35,6 +35,7 @@ import {
   z,
   type BlueprintPrecheckDimension,
   type OperationRecord,
+  type OperationAttachmentRef,
   type ArtifactRecord,
   type AdaptationDecision,
   type AttachmentStore,
@@ -956,6 +957,96 @@ export class WorkspaceRuntime {
     return result;
   }
 
+  /**
+   * Re-upload missing or replacement attachments for an operation requiring re-upload,
+   * updating canonical attachment refs while preserving the same operation id and lineage.
+   */
+  async reuploadOperationAttachments(
+    operationId: string,
+    replacements: Array<{ missing_ref_id?: string; original_ref_id?: string; name: string; content: Uint8Array; media_type?: string }>,
+    context: WorkspaceContext = { actor: "user", attachments: [] },
+  ): Promise<RequestResult> {
+    const state = await this.repository.read();
+    const operation = state.operations.find((item) => item.id === operationId);
+    if (operation === undefined) {
+      throw new CoreError("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist.`, true);
+    }
+    if (operation.status !== "needs_input" && operation.status !== "failed") {
+      throw new CoreError("OPERATION_NOT_RECOVERABLE", `Operation ${operationId} is ${operation.status} and does not require attachment re-upload.`, true);
+    }
+    if (replacements.length === 0) {
+      throw new CoreError("ATTACHMENT_REQUIRED", "請至少提供一個要重新上傳的附件。", true);
+    }
+
+    const savedRefs = await this.attachmentStore.save(
+      operationId,
+      replacements.map((r) => ({ name: r.name, content: r.content, ...(r.media_type === undefined ? {} : { media_type: r.media_type }) })),
+    );
+
+    const existingRefs = operation.command?.attachment_refs ?? [];
+    let updatedRefs: OperationAttachmentRef[];
+
+    if (existingRefs.length === 0) {
+      updatedRefs = savedRefs;
+    } else {
+      updatedRefs = [...existingRefs];
+      for (let i = 0; i < replacements.length; i += 1) {
+        const replacement = replacements[i]!;
+        const targetId = replacement.missing_ref_id ?? replacement.original_ref_id;
+        const newRef = savedRefs[i]!;
+        if (targetId !== undefined) {
+          const index = updatedRefs.findIndex((r) => r.id === targetId);
+          if (index >= 0) {
+            updatedRefs[index] = newRef;
+          } else {
+            updatedRefs.push(newRef);
+          }
+        } else if (i < updatedRefs.length) {
+          updatedRefs[i] = newRef;
+        } else {
+          updatedRefs.push(newRef);
+        }
+      }
+    }
+
+    const actor = context.actor.trim().length > 0 ? context.actor : operation.actor ?? "user";
+    const auditDetails = {
+      operation_id: operationId,
+      replaced_count: replacements.length,
+      original_refs: existingRefs.map((r) => ({ id: r.id, name: r.name })),
+      replacement_refs: savedRefs.map((r) => ({ id: r.id, name: r.name, ...(r.media_type === undefined ? {} : { media_type: r.media_type }) })),
+    };
+
+    const latest = await this.repository.read();
+    await this.repository.commit(latest.revision, (current) => ({
+      ...current,
+      operations: current.operations.map((item) => {
+        if (item.id !== operationId) return item;
+        const { question: _q, last_error: _err, ...rest } = item;
+        return {
+          ...rest,
+          status: "running" as const,
+          updated_at: now(),
+          ...(item.command === undefined ? {} : { command: { ...item.command, attachment_refs: updatedRefs } }),
+        };
+      }),
+      audit: [
+        ...current.audit,
+        {
+          id: internalId("audit"),
+          operation_id: operationId,
+          event: "operation.attachments.reuploaded",
+          actor,
+          occurred_at: now(),
+          project_revision: current.revision + 1,
+          details: auditDetails,
+        },
+      ],
+    }));
+
+    return this.recoverOperation(operationId, { ...context, actor });
+  }
+
   private leaseHeldBy(operation: OperationRecord | undefined, lease: Readonly<{ owner: string; token: string; generation?: number }>): boolean {
     if (operation === undefined) return false;
     if (operation.lease_owner !== lease.owner || operation.lease_token !== lease.token) return false;
@@ -1054,6 +1145,7 @@ export class WorkspaceRuntime {
     return {
       repository: this.repository,
       knowledge: this.knowledge,
+      attachmentStore: this.attachmentStore,
       ...(this.fetcher === undefined ? {} : { fetcher: this.fetcher }),
     };
   }
@@ -1062,8 +1154,21 @@ export class WorkspaceRuntime {
     const deps = this.coverageDeps();
     const state = await this.repository.read();
     if (this.hasAuditMarker(operation.id, marker, state)) return { ...responseFromOperation(await this.completeReplayedOperation(operation)), downstream_invalidation: emptyDownstreamInvalidationReport() };
-    const attachments = await this.loadOperationAttachments(operation, operation.command) ?? [];
-    const outcome = await apply(deps, state, operation, operation.actor ?? "worker", attachments);
+    const storedAttachments = await this.loadOperationAttachments(operation, operation.command);
+    if (storedAttachments === undefined) {
+      const question = "ATTACHMENT_REUPLOAD_REQUIRED: 此操作缺少所需附件內容，請重新上傳附件。";
+      await this.markNeedsInput(operation, question);
+      return {
+        operation_id: operation.id,
+        status: "needs_input",
+        summary: question,
+        completed: [],
+        blocked: [operation.id],
+        downstream_invalidation: emptyDownstreamInvalidationReport(),
+        question,
+      };
+    }
+    const outcome = await apply(deps, state, operation, operation.actor ?? "worker", storedAttachments);
     await this.repository.commit(state.revision, (current) => ({
       ...current,
       ...outcome.state,

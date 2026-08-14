@@ -51,12 +51,19 @@ import {
   type ResolutionConsequencesPreview,
   type SourceFetcher,
 } from "@st-workspace/domain";
+import { type AttachmentStore, type OperationAttachmentRef } from "@st-workspace/core";
 import { now } from "./operation-runner.js";
+import {
+  fetchAndValidateUrlContent,
+  ingestUserSupplementEvidence,
+  type UrlIngestionProjection,
+} from "./coverage-supplement-service.js";
 
 export interface CoverageApplicationDeps {
   repository: ProjectRepository;
   knowledge: KnowledgeService;
   fetcher?: SourceFetcher;
+  attachmentStore?: AttachmentStore;
 }
 
 export interface CoverageAuditEvent extends Omit<AuditEvent, "project_revision"> {}
@@ -106,6 +113,7 @@ function coverageOperation(
   agentId: string,
   role: string,
   existingOperationId?: string,
+  attachmentRefs?: OperationAttachmentRef[],
 ): OperationRecord {
   return {
     id: existingOperationId ?? internalId("operation"),
@@ -116,7 +124,12 @@ function coverageOperation(
     created_at: now(),
     updated_at: now(),
     progress: [],
-    command: { version: 1, type, payload },
+    command: {
+      version: 1,
+      type,
+      payload,
+      ...(attachmentRefs === undefined || attachmentRefs.length === 0 ? {} : { attachment_refs: attachmentRefs }),
+    },
     execution_snapshot: {
       execution_agent_id: agentId,
       execution_agent_role: role,
@@ -660,88 +673,64 @@ export async function executeCoverageSupplement(
   const payload = command.payload;
   assertAssessmentMatches(state, payload.assessment_id, payload.assessment_revision);
 
-  const textSegments: string[] = [];
-  if (payload.text !== undefined && payload.text.trim() !== "") {
-    textSegments.push(payload.text.trim());
-  }
-
-  if (payload.url !== undefined && payload.url.trim() !== "") {
-    let urlText = `Source URL: ${payload.url.trim()}`;
-    if (deps.fetcher !== undefined) {
-      try {
-        const fetched = await deps.fetcher(payload.url.trim());
-        if (fetched !== undefined && fetched.content !== undefined) {
-          const decoded = new TextDecoder("utf-8").decode(fetched.content);
-          if (decoded.trim() !== "") {
-            urlText = decoded.trim();
-          }
-        }
-      } catch (err) {
-        throw new CoreError("OPERATION_COMMAND_INVALID", `Failed to fetch URL ${payload.url}: ${err instanceof Error ? err.message : String(err)}`, true);
-      }
-    }
-    textSegments.push(urlText);
-  }
-
-  if (attachments.length > 0) {
-    const decoder = new TextDecoder("utf-8", { fatal: true });
-    for (const att of attachments) {
-      const mediaType = att.media_type ?? "text/plain";
-      if (!mediaType.startsWith("text/") && mediaType !== "application/json" && mediaType !== "application/xml" && mediaType !== "") {
-        throw new CoreError("OPERATION_COMMAND_INVALID", `Unsupported attachment media_type "${mediaType}" for file "${att.name}".`, true);
-      }
-      try {
-        const decoded = decoder.decode(att.content);
-        if (decoded.trim() !== "") {
-          textSegments.push(`Attachment (${att.name}):\n${decoded.trim()}`);
-        }
-      } catch {
-        throw new CoreError("OPERATION_COMMAND_INVALID", `Attachment "${att.name}" is not valid UTF-8 text.`, true);
-      }
-    }
-  }
-
-  const combinedText = textSegments.join("\n\n");
-  if (combinedText.trim() === "") {
-    throw new CoreError("OPERATION_COMMAND_INVALID", "User supplement must contain text, a valid URL, or valid text attachment.", true);
-  }
-
-  // Atomically create Candidate and Source
-  const { candidate, source, state: stateWithSource } = createUserSupplementSource(
-    state,
-    combinedText,
-    actor,
-    operation.id,
-    attachments[0]?.media_type ?? "text/plain",
-    attachments[0]?.name ?? "User supplement",
+  let currentState = state;
+  let resolutionId: string | undefined;
+  const existingPendingResolution = state.coverage_resolutions.find(
+    (r) => r.requirement_id === payload.requirement_id
+      && (r.character_id ?? undefined) === (payload.character_id ?? undefined)
+      && r.mode === "user_supplement"
+      && r.status === "pending",
   );
+  if (existingPendingResolution !== undefined) {
+    resolutionId = existingPendingResolution.id;
+  } else {
+    const executionInput = executionInputFor(operation, actor, "director", "orchestrator");
+    const recorded = recordUserDecisionAndResolution(
+      currentState,
+      "user_supplement",
+      [payload.requirement_id],
+      "提供補充資料",
+      "使用者提供補充資料以滿足覆蓋率需求",
+      "提供補充資料",
+      executionInput,
+      operation.id,
+      payload.character_id,
+    );
+    currentState = recorded.state;
+    resolutionId = recorded.resolutions[0]?.id;
+  }
 
-  // Synchronously chunk source in memory
-  const chunks = chunkSource(source, KNOWLEDGE_EXTRACTOR_REVISION);
-
-  // Update state with chunks atomically
-  const stateWithChunks: ProjectState = {
-    ...stateWithSource,
-    knowledge_chunks: [...stateWithSource.knowledge_chunks, ...chunks],
-  };
+  const supplementRes = await ingestUserSupplementEvidence(
+    deps.fetcher,
+    currentState,
+    operation.id,
+    actor,
+    {
+      ...(payload.text === undefined ? {} : { text: payload.text }),
+      ...(payload.url === undefined ? {} : { url: payload.url }),
+      attachments,
+      defaultTitle: "User supplement",
+    },
+  );
 
   const targetScope = {
     ...(payload.character_id === undefined ? {} : { character_id: payload.character_id }),
     requirement_id: payload.requirement_id,
   };
 
-  const summary = `Created user supplement source ${source.id} with ${chunks.length} chunk(s).`;
+  const summary = `Created user supplement source ${supplementRes.source.id} with ${supplementRes.chunks.length} chunk(s).`;
 
   return {
-    state: stateWithChunks,
+    state: supplementRes.state,
     result: {
       status: "completed",
       summary,
-      source_id: source.id,
-      source_revision: source.revision,
-      candidate_id: candidate.id,
-      chunk_count: chunks.length,
+      source_id: supplementRes.source.id,
+      source_revision: supplementRes.source.revision,
+      candidate_id: supplementRes.candidate.id,
+      chunk_count: supplementRes.chunks.length,
       target: targetScope,
+      ...(resolutionId === undefined ? {} : { resolution_id: resolutionId }),
       next_step: "至 Fact Curation / Fact Review 觀看分片並進行事實提煉",
     },
     auditEvents: [
@@ -752,13 +741,14 @@ export async function executeCoverageSupplement(
         actor,
         occurred_at: now(),
         details: {
-          source_id: source.id,
-          source_revision: source.revision,
-          candidate_id: candidate.id,
+          source_id: supplementRes.source.id,
+          source_revision: supplementRes.source.revision,
+          candidate_id: supplementRes.candidate.id,
           requirement_id: payload.requirement_id,
           character_id: payload.character_id,
-          chunk_count: chunks.length,
+          chunk_count: supplementRes.chunks.length,
           provenance_kind: "user_supplement",
+          ...(resolutionId === undefined ? {} : { resolution_id: resolutionId }),
         },
       },
       {
@@ -768,12 +758,13 @@ export async function executeCoverageSupplement(
         actor,
         occurred_at: now(),
         details: {
-          source_id: source.id,
-          source_revision: source.revision,
+          source_id: supplementRes.source.id,
+          source_revision: supplementRes.source.revision,
           requirement_id: payload.requirement_id,
           character_id: payload.character_id,
-          chunk_count: chunks.length,
+          chunk_count: supplementRes.chunks.length,
           provenance_kind: "user_supplement",
+          ...(resolutionId === undefined ? {} : { resolution_id: resolutionId }),
         },
       },
       {
@@ -783,9 +774,9 @@ export async function executeCoverageSupplement(
         actor,
         occurred_at: now(),
         details: {
-          request: source.id,
-          source_ids: [source.id],
-          chunk_count: chunks.length,
+          request: supplementRes.source.id,
+          source_ids: [supplementRes.source.id],
+          chunk_count: supplementRes.chunks.length,
           fact_count: 0,
         },
       },
@@ -811,11 +802,19 @@ export async function coverageSupplement(
 
   assertAssessmentMatches(state, input.assessment_id, input.assessment_revision);
 
-  const attachmentRefs = attachments.map((a) => ({
-    id: internalId("attachment"),
-    name: a.name,
-    ...(a.media_type === undefined ? {} : { media_type: a.media_type }),
-  }));
+  const operationId = input.operation_id ?? internalId("operation");
+  let savedRefs: OperationAttachmentRef[] | undefined;
+  if (attachments.length > 0) {
+    if (deps.attachmentStore !== undefined) {
+      savedRefs = await deps.attachmentStore.save(operationId, attachments);
+    } else {
+      savedRefs = attachments.map((a) => ({
+        id: internalId("attachment"),
+        name: a.name,
+        ...(a.media_type === undefined ? {} : { media_type: a.media_type }),
+      }));
+    }
+  }
 
   const operation = coverageOperation(
     actor,
@@ -827,11 +826,11 @@ export async function coverageSupplement(
       ...(input.character_id === undefined ? {} : { character_id: input.character_id }),
       ...(input.text === undefined ? {} : { text: input.text }),
       ...(input.url === undefined ? {} : { url: input.url }),
-      ...(attachmentRefs.length === 0 ? {} : { attachment_refs: attachmentRefs }),
     },
     "director",
     "orchestrator",
-    input.operation_id,
+    operationId,
+    savedRefs,
   );
 
   const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.supplement.provided");
@@ -914,31 +913,20 @@ export async function executeCoverageResearchRecover(
     if (!targetUrl) {
       throw new CoreError("OPERATION_COMMAND_INVALID", "手動提供 URL 必須包含有效的 url。", true);
     }
-    let canonicalText = `Manual URL Source: ${targetUrl}`;
-    if (deps.fetcher !== undefined) {
-      try {
-        const fetched = await deps.fetcher(targetUrl);
-        if (fetched !== undefined && fetched.content !== undefined) {
-          const decoded = new TextDecoder("utf-8").decode(fetched.content);
-          if (decoded.trim() !== "") canonicalText = decoded.trim();
-        }
-      } catch (err) {
-        throw new CoreError("OPERATION_COMMAND_INVALID", `Failed to fetch URL ${targetUrl}: ${err instanceof Error ? err.message : String(err)}`, true);
-      }
-    }
+    const urlResult = await fetchAndValidateUrlContent(deps.fetcher, targetUrl);
 
     const { candidate, source, state: s1 } = createUserSupplementSource(
       mutated,
-      canonicalText,
+      urlResult.text,
       actor,
       operation.id,
-      "text/html",
-      `Manual URL: ${targetUrl}`,
+      urlResult.media_type,
+      urlResult.title || `Manual URL: ${targetUrl}`,
     );
     const sourceWithUrl: SourceRecord = {
       ...source,
-      canonical_url: targetUrl,
-      final_url: targetUrl,
+      canonical_url: urlResult.canonical_url,
+      final_url: urlResult.final_url,
       provenance_kind: "external_source",
     };
     const s1Updated: ProjectState = {
@@ -988,43 +976,51 @@ export async function executeCoverageResearchRecover(
       summary: `已成功攝入手動 URL 來源並提煉 ${chunks.length} 個知識分片。`,
     };
   } else if (action === "supplement") {
-    const textSegments: string[] = [];
-    if (command.payload.text !== undefined && command.payload.text.trim() !== "") {
-      textSegments.push(command.payload.text.trim());
+    const choice = command.payload.choice?.trim();
+    const rationale = command.payload.rationale?.trim();
+    if (!choice || !rationale) {
+      throw new CoreError("OPERATION_COMMAND_INVALID", "選擇補充資料恢復時必須提供 choice 與 rationale。", true);
     }
-    if (command.payload.url !== undefined && command.payload.url.trim() !== "") {
-      textSegments.push(`參考網址: ${command.payload.url.trim()}`);
-    }
-    for (const attachment of attachments) {
-      const decoded = new TextDecoder("utf-8").decode(attachment.content);
-      textSegments.push(`附件 [${attachment.name}]:\n${decoded}`);
-    }
-    if (textSegments.length === 0) {
-      throw new CoreError("COVERAGE_SUPPLEMENT_REQUIRED", "補充資料必須提供文字、URL 或附件其中一項。", true);
-    }
-    const combinedText = textSegments.join("\n\n---\n\n");
-    const { candidate, source, state: s1 } = createUserSupplementSource(
+
+    const recorded = recordUserDecisionAndResolution(
       mutated,
-      combinedText,
-      actor,
+      "user_supplement",
+      task.requirement_ids,
+      choice,
+      rationale,
+      choice,
+      executionInput,
       operation.id,
-      "text/plain",
-      `補充資料 (Task ${task.id})`,
+      task.character_id,
     );
-    const chunks = chunkSource(source, KNOWLEDGE_EXTRACTOR_REVISION);
-    const s2: ProjectState = { ...s1, knowledge_chunks: [...s1.knowledge_chunks, ...chunks] };
+
+    const supplementRes = await ingestUserSupplementEvidence(
+      deps.fetcher,
+      recorded.state,
+      operation.id,
+      actor,
+      {
+        ...(command.payload.text === undefined ? {} : { text: command.payload.text }),
+        ...(command.payload.url === undefined ? {} : { url: command.payload.url }),
+        attachments,
+        defaultTitle: `補充資料 (Task ${task.id})`,
+      },
+    );
 
     const newLineages: CoverageResearchLineageLink[] = [];
-    for (const reqId of task.requirement_ids) {
+    for (let i = 0; i < task.requirement_ids.length; i += 1) {
+      const reqId = task.requirement_ids[i]!;
+      const resolution = recorded.resolutions.find((r) => r.requirement_id === reqId);
       newLineages.push({
         id: internalId("lineage"),
-        candidate_id: candidate.id,
-        source_id: source.id,
+        candidate_id: supplementRes.candidate.id,
+        source_id: supplementRes.source.id,
         task_id: task.id,
         batch_id: task.batch_id,
         assessment_id: batch?.assessment_id ?? latestAssessment.id,
         requirement_id: reqId,
         ...(task.character_id === undefined ? {} : { character_id: task.character_id }),
+        ...(resolution === undefined ? {} : { resolution_id: resolution.id }),
         created_at: now(),
       });
     }
@@ -1036,20 +1032,22 @@ export async function executeCoverageResearchRecover(
     };
 
     const s3: ProjectState = {
-      ...s2,
-      coverage_research_lineages: [...s2.coverage_research_lineages, ...newLineages],
-      coverage_research_tasks: s2.coverage_research_tasks.map((t) => (t.id === task.id ? updatedTask : t)),
+      ...supplementRes.state,
+      coverage_research_lineages: [...supplementRes.state.coverage_research_lineages, ...newLineages],
+      coverage_research_tasks: supplementRes.state.coverage_research_tasks.map((t) => (t.id === task.id ? updatedTask : t)),
     };
 
     mutated = applyDerivedResearchBatchStatus(s3, task.batch_id);
-    sourceId = source.id;
+    sourceId = supplementRes.source.id;
+    resolutionId = recorded.resolutions[0]?.id;
     result = {
-      source_id: source.id,
-      candidate_id: candidate.id,
-      chunk_count: chunks.length,
+      source_id: supplementRes.source.id,
+      candidate_id: supplementRes.candidate.id,
+      chunk_count: supplementRes.chunks.length,
       task_id: task.id,
+      resolution_ids: recorded.resolutions.map((r) => r.id),
       action,
-      summary: `已成功提供補充資料並提煉 ${chunks.length} 個知識分片。`,
+      summary: `已成功提供補充資料並提煉 ${supplementRes.chunks.length} 個知識分片。`,
     };
   } else if (action === "creative_completion") {
     const choice = command.payload.choice ?? "創作補全";
@@ -1115,11 +1113,19 @@ export async function coverageResearchRecover(
   attachments: Array<{ name: string; content: Uint8Array; media_type?: string }> = [],
 ): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
-  const attachmentRefs = attachments.map((a) => ({
-    id: internalId("attachment"),
-    name: a.name,
-    ...(a.media_type === undefined ? {} : { media_type: a.media_type }),
-  }));
+  const operationId = input.operation_id ?? internalId("operation");
+  let savedRefs: OperationAttachmentRef[] | undefined;
+  if (attachments.length > 0) {
+    if (deps.attachmentStore !== undefined) {
+      savedRefs = await deps.attachmentStore.save(operationId, attachments);
+    } else {
+      savedRefs = attachments.map((a) => ({
+        id: internalId("attachment"),
+        name: a.name,
+        ...(a.media_type === undefined ? {} : { media_type: a.media_type }),
+      }));
+    }
+  }
 
   const operation = coverageOperation(
     actor,
@@ -1133,11 +1139,11 @@ export async function coverageResearchRecover(
       ...(input.text === undefined ? {} : { text: input.text }),
       ...(input.choice === undefined ? {} : { choice: input.choice }),
       ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
-      ...(attachmentRefs.length === 0 ? {} : { attachment_refs: attachmentRefs }),
     },
     "source-researcher",
     "researcher",
-    input.operation_id,
+    operationId,
+    savedRefs,
   );
 
   const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.research.recovered");

@@ -475,6 +475,7 @@ export interface CoverageResearchLineageLink {
   assessment_id: string;
   requirement_id: string;
   character_id?: string;
+  resolution_id?: string;
   created_at: string;
 }
 
@@ -487,6 +488,7 @@ export const coverageResearchLineageLinkSchema = z.object({
   assessment_id: z.string().min(1),
   requirement_id: coverageRequirementIdSchema,
   character_id: z.string().min(1).optional(),
+  resolution_id: z.string().min(1).optional(),
   created_at: z.string().datetime({ offset: true }),
 }).strict();
 

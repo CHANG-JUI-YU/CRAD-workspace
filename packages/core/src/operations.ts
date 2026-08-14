@@ -84,16 +84,8 @@ export const coverageSupplementCommandPayloadSchema = z.object({
     id: z.string().min(1),
     name: z.string().min(1),
     media_type: z.string().optional(),
-  })).optional(),
-}).strict().superRefine((value, context) => {
-  const hasText = value.text !== undefined && value.text.trim() !== "";
-  const hasUrl = value.url !== undefined && value.url.trim() !== "";
-  const hasAttachment = value.attachment_refs !== undefined && value.attachment_refs.length > 0;
-  if (!hasText && !hasUrl && !hasAttachment) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "A user supplement requires text, a URL, or an attachment.", path: ["text"] });
-  }
-});
-
+  }).strict()).optional(),
+}).strict();
 
 export const coverageResearchRecoverCommandPayloadSchema = z.object({
   task_id: z.string().min(1),
@@ -108,7 +100,7 @@ export const coverageResearchRecoverCommandPayloadSchema = z.object({
     id: z.string().min(1),
     name: z.string().min(1),
     media_type: z.string().optional(),
-  })).optional(),
+  }).strict()).optional(),
 }).strict();
 
 const emptyOperationCommandPayloadSchema = z.object({}).strict();
@@ -177,13 +169,43 @@ function migrateLegacyOperationCommand(value: unknown): Record<string, unknown> 
   const type = record.type === "source_selection" ? "source_select" : record.type;
   const normalized: Record<string, unknown> = { ...record, version: 1, ...(type === undefined ? {} : { type }) };
   if (type === "source_select" && Array.isArray(record.payload)) normalized.payload = { decisions: record.payload };
+  const payloadRecord = operationCommandRecord(normalized.payload);
+  if (payloadRecord !== undefined && Array.isArray(payloadRecord.attachment_refs)) {
+    if (normalized.attachment_refs === undefined) {
+      normalized.attachment_refs = payloadRecord.attachment_refs;
+    }
+    const { attachment_refs: _unused, ...restPayload } = payloadRecord;
+    normalized.payload = restPayload;
+  }
   return normalized;
 }
 
 export function decodeOperationCommand(value: unknown): OperationCommand {
   const migrated = migrateLegacyOperationCommand(value);
   const parsed = operationCommandSchema.safeParse(migrated);
-  if (parsed.success) return parsed.data;
+  if (parsed.success) {
+    const data = parsed.data;
+    if (data.type === "coverage_supplement") {
+      const p = data.payload as { text?: string; url?: string };
+      const refs = data.attachment_refs;
+      const hasText = p.text !== undefined && p.text.trim() !== "";
+      const hasUrl = p.url !== undefined && p.url.trim() !== "";
+      const hasRefs = refs !== undefined && refs.length > 0;
+      if (!hasText && !hasUrl && !hasRefs) {
+        return {
+          version: 1,
+          type: "invalid",
+          payload: {
+            code: "OPERATION_COMMAND_INVALID",
+            message: "Coverage supplement must contain text, url, or attachment_refs.",
+            recoverable: true,
+            original_type: data.type,
+          },
+        };
+      }
+    }
+    return data;
+  }
   const original = operationCommandRecord(value)?.type;
   return {
     version: 1,

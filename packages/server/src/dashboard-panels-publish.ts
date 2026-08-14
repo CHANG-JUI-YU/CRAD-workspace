@@ -915,6 +915,98 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         };
       }
 
+      function openReuploadModal(operation) {
+        var overlay = document.createElement("div");
+        overlay.id = "reupload-modal-overlay";
+        overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;";
+
+        var modal = document.createElement("div");
+        modal.style.cssText = "background:#fff;border-radius:8px;max-width:500px;width:100%;padding:24px;box-shadow:0 4px 20px rgba(0,0,0,0.25);font-family:inherit;";
+
+        var title = document.createElement("h3");
+        title.style.cssText = "margin-top:0;margin-bottom:12px;";
+        title.textContent = "重新上傳附件 — Operation " + operation.id;
+        modal.appendChild(title);
+
+        var desc = document.createElement("p");
+        desc.style.cssText = "font-size:0.9em;color:#555;margin-bottom:12px;";
+        desc.textContent = "此操作需要附件檔案才能繼續重播。請選取對應的檔案進行補傳：";
+        modal.appendChild(desc);
+
+        var errBox = document.createElement("div");
+        errBox.style.cssText = "color:#dc3545;font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
+        modal.appendChild(errBox);
+
+        var fileInput = document.createElement("input");
+        fileInput.type = "file";
+        fileInput.multiple = true;
+        fileInput.style.cssText = "display:block;margin-bottom:16px;width:100%;";
+        modal.appendChild(fileInput);
+
+        var actionRow = document.createElement("div");
+        actionRow.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+
+        var cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.textContent = "取消";
+        cancelBtn.style.cssText = "padding:8px 16px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;";
+        cancelBtn.addEventListener("click", function () { overlay.remove(); });
+        actionRow.appendChild(cancelBtn);
+
+        var submitBtn = document.createElement("button");
+        submitBtn.type = "button";
+        submitBtn.textContent = "確認上傳並繼續重播";
+        submitBtn.style.cssText = "padding:8px 16px;border:none;background:#0066cc;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;";
+
+        submitBtn.addEventListener("click", async function () {
+          var files = fileInput.files;
+          if (!files || files.length === 0) {
+            errBox.textContent = "請選擇至少一個檔案。";
+            errBox.style.display = "block";
+            return;
+          }
+          errBox.style.display = "none";
+          submitBtn.disabled = true;
+          submitBtn.textContent = "讀取中...";
+
+          var replacements = [];
+          for (var i = 0; i < files.length; i += 1) {
+            var file = files[i];
+            var buffer = await file.arrayBuffer();
+            var bytes = new Uint8Array(buffer);
+            var binary = "";
+            for (var b = 0; b < bytes.byteLength; b += 1) binary += String.fromCharCode(bytes[b]);
+            var b64 = window.btoa(binary);
+            replacements.push({
+              name: file.name,
+              content_base64: b64,
+              media_type: file.type || "text/plain",
+            });
+          }
+
+          submitBtn.textContent = "上傳中...";
+          try {
+            var res = await postJson("/workspace/operation/attachments/reupload", {
+              operation_id: operation.id,
+              replacements: replacements,
+            });
+            overlay.remove();
+            await loadOperationData();
+            if (res && res.summary) setNotice("success", res.summary);
+          } catch (e) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = "確認上傳並繼續重播";
+            errBox.textContent = "上傳失敗：" + (e.message || String(e));
+            errBox.style.display = "block";
+          }
+        });
+
+        actionRow.appendChild(submitBtn);
+        modal.appendChild(actionRow);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+      }
+
       function renderOperationList(operations) {
         var target = byId("operation-list");
         var filter = byId("operation-filter").value;
@@ -949,15 +1041,38 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
             if (isRecord(lastProgress) && firstString(lastProgress, ["message"])) labelParts.push("step: " + firstString(lastProgress, ["message"]));
           }
           if (operation.status === "needs_input" && operation.question) labelParts.push("問題: " + operation.question);
-          if (operation.status !== "cancelled" && operation.error_class === "recoverable") labelParts.push("可安全重試");
-          if (operation.status !== "cancelled" && operation.error_class === "fatal") labelParts.push("需人工重送");
+
+          var replayState = operation.replayability ? operation.replayability.state : (operation.error_class === "recoverable" ? "replayable" : "non_replayable");
+          if (replayState === "replayable") labelParts.push("可重播");
+          else if (replayState === "requires_reupload") labelParts.push("需要重新上傳附件");
+          else if (replayState === "non_replayable" && operation.replayability && operation.replayability.reason) labelParts.push(operation.replayability.reason);
+
+          if (operation.replayability && operation.replayability.attachment_count > 0) {
+            var attNames = operation.replayability.attachments.map(function (a) { return a.name; }).join(", ");
+            labelParts.push("附件 (" + operation.replayability.attachment_count + "): " + attNames);
+          }
+
           if (operation.last_error) labelParts.push("error: " + operation.last_error);
           label.textContent = labelParts.join(" · ");
           row.append(badge, label);
+
           var actions = document.createElement("span");
           actions.className = "inline-actions";
           var status = operation.status || "unknown";
-          if (status === "needs_input") {
+
+          if (replayState === "requires_reupload") {
+            var reuploadBtn = document.createElement("button");
+            reuploadBtn.type = "button";
+            reuploadBtn.textContent = "重新上傳附件";
+            reuploadBtn.addEventListener("click", (function (op) {
+              return function () { openReuploadModal(op); };
+            })(operation));
+            var cancelReuploadBtn = document.createElement("button");
+            cancelReuploadBtn.type = "button";
+            cancelReuploadBtn.textContent = "取消";
+            cancelReuploadBtn.addEventListener("click", confirmCancel(operation.id));
+            actions.append(reuploadBtn, cancelReuploadBtn);
+          } else if (status === "needs_input") {
             var answer = document.createElement("input");
             answer.type = "text";
             answer.placeholder = "回答此問題…";
@@ -965,14 +1080,23 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
             send.type = "button";
             send.textContent = "送出";
             send.addEventListener("click", answerNeedsInput(operation.id, answer));
-            actions.append(answer, send);
-          } else if (status === "failed") {
-            if (operation.error_class !== "fatal") {
-              var retry = document.createElement("button");
-              retry.type = "button";
-              retry.textContent = "重試";
-              retry.addEventListener("click", retryOperation(operation.id));
-              actions.append(retry);
+            var cancelBtn = document.createElement("button");
+            cancelBtn.type = "button";
+            cancelBtn.textContent = "取消";
+            cancelBtn.addEventListener("click", confirmCancel(operation.id));
+            actions.append(answer, send, cancelBtn);
+          } else if (replayState === "replayable") {
+            var retry = document.createElement("button");
+            retry.type = "button";
+            retry.textContent = "重試";
+            retry.addEventListener("click", retryOperation(operation.id));
+            actions.append(retry);
+            if (status === "created" || status === "resolving" || status === "running" || status === "partial") {
+              var cancel = document.createElement("button");
+              cancel.type = "button";
+              cancel.textContent = "取消";
+              cancel.addEventListener("click", confirmCancel(operation.id));
+              actions.append(cancel);
             }
           } else if (status === "cancelled") {
             var newReq = document.createElement("button");
@@ -987,11 +1111,11 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
             });
             actions.append(newReq);
           } else if (status === "created" || status === "resolving" || status === "running" || status === "partial") {
-            var cancel = document.createElement("button");
-            cancel.type = "button";
-            cancel.textContent = "取消";
-            cancel.addEventListener("click", confirmCancel(operation.id));
-            actions.append(cancel);
+            var cancelOnly = document.createElement("button");
+            cancelOnly.type = "button";
+            cancelOnly.textContent = "取消";
+            cancelOnly.addEventListener("click", confirmCancel(operation.id));
+            actions.append(cancelOnly);
           }
           row.append(actions);
           target.append(row);

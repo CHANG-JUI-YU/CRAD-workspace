@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { coverageSupplementCommandPayloadSchema } from "../src/operations.js";
+import { coverageSupplementCommandPayloadSchema, decodeOperationCommand } from "../src/operations.js";
 
 describe("Audit 6 Batch 2 - Core Operations Schema", () => {
   it("#40: validates coverageSupplementCommandPayloadSchema with text-only", () => {
@@ -35,13 +35,17 @@ describe("Audit 6 Batch 2 - Core Operations Schema", () => {
     expect(parsed.success).toBe(true);
   });
 
-  it("#40: rejects coverageSupplementCommandPayloadSchema when no text, url, or attachment_refs provided", () => {
-    const parsed = coverageSupplementCommandPayloadSchema.safeParse({
-      assessment_id: "assess-1",
-      assessment_revision: "rev-1",
-      requirement_id: "req.background_story",
-      character_id: "char-1",
+  it("#40: rejects coverage_supplement when no text, url, or attachment_refs provided", () => {
+    const decoded = decodeOperationCommand({
+      version: 1,
+      type: "coverage_supplement",
+      payload: {
+        assessment_id: "assess-1",
+        assessment_revision: "rev-1",
+        requirement_id: "req.background_story",
+        character_id: "char-1",
+      },
     });
-    expect(parsed.success).toBe(false);
+    expect(decoded.type).toBe("invalid");
   });
 });
