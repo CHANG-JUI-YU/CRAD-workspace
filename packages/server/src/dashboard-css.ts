@@ -210,6 +210,29 @@ export const DASHBOARD_CSS = `  <style>
       gap: 0.5rem;
       margin-bottom: 0.4rem;
     }
+    .diagnostic-highlight {
+      outline: 3px solid #c98a00;
+      outline-offset: 2px;
+      background: #fff8e1;
+    }
+    .diagnostic-nav {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin-left: 0.5rem;
+    }
+    .diagnostic-nav-count {
+      font-size: 0.82rem;
+      color: #607585;
+      min-width: 3.5rem;
+      text-align: center;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .diagnostic-highlight {
+        outline-width: 3px;
+        scroll-behavior: auto;
+      }
+    }
     .field-list {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));

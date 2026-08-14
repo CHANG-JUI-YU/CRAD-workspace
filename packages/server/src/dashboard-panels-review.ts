@@ -404,6 +404,10 @@ export const DASHBOARD_PANELS_REVIEW_JS = `      function renderQuality(snapshot
           if (!isRecord(source)) continue;
           var sourceRow = document.createElement("div");
           sourceRow.className = "fact-row";
+          if (firstString(source, ["id"])) {
+            sourceRow.setAttribute("data-object-kind", "source");
+            sourceRow.setAttribute("data-object-id", firstString(source, ["id"]));
+          }
           var sourceParts = [];
           sourceParts.push(firstString(source, ["title"]) || "?");
           if (source.media_type) sourceParts.push(source.media_type);
@@ -429,6 +433,10 @@ export const DASHBOARD_PANELS_REVIEW_JS = `      function renderQuality(snapshot
           if (!isRecord(fact)) continue;
           var factRow = document.createElement("div");
           factRow.className = "fact-row";
+          if (firstString(fact, ["id"])) {
+            factRow.setAttribute("data-object-kind", "fact");
+            factRow.setAttribute("data-object-id", firstString(fact, ["id"]));
+          }
           var factBadge = document.createElement("span");
           factBadge.className = "status-badge " + statusClass(fact.status || "candidate");
           factBadge.textContent = firstString(fact, ["status"]) || "?";
@@ -466,6 +474,10 @@ export const DASHBOARD_PANELS_REVIEW_JS = `      function renderQuality(snapshot
         }
         var runHeading = document.createElement("div");
         runHeading.className = "fact-row";
+        if (firstString(latestRun, ["id"])) {
+          runHeading.setAttribute("data-object-kind", "review-run");
+          runHeading.setAttribute("data-object-id", firstString(latestRun, ["id"]));
+        }
         var runBadge = document.createElement("span");
         runBadge.className = "status-badge " + statusClass(firstString(latestRun, ["status"]) || "open");
         runBadge.textContent = "run " + (firstString(latestRun, ["status"]) || "open");

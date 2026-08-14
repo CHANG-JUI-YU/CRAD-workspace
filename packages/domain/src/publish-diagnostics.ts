@@ -4,13 +4,14 @@ export type PublishDiagnosticAffectedKind = "artifact" | "fact" | "source" | "co
 
 export interface PublishDiagnosticAffected {
   kind: PublishDiagnosticAffectedKind;
-  id: string;
+  id?: string;
   character_id?: string;
   requirement_id?: string;
 }
 
 export interface PublishDiagnosticTarget {
   panel: string;
+  kind?: PublishDiagnosticAffectedKind;
   id?: string;
   character_id?: string;
   requirement_id?: string;
@@ -22,6 +23,7 @@ export interface PublishDiagnosticRow {
   message: string;
   affected: PublishDiagnosticAffected[];
   next_action: string;
+  targets?: PublishDiagnosticTarget[];
   target?: PublishDiagnosticTarget;
 }
 
@@ -82,19 +84,48 @@ export function deriveStructuredPublishDiagnostics(diagnostics: readonly Workflo
         message: diagnostic.message,
         affected: [],
         next_action: "在 Readiness 面板檢視診斷",
+        targets: [{ panel: "readiness" }],
         target: { panel: "readiness" },
       });
       continue;
     }
+    const coverageRefs = diagnostic.coverage_refs ?? [];
+    if (coverageRefs.length > 0) {
+      const affected: PublishDiagnosticAffected[] = coverageRefs.map((ref) => (
+        ref.character_id === undefined
+          ? { kind: "coverage_cell", requirement_id: ref.requirement_id }
+          : { kind: "coverage_cell", character_id: ref.character_id, requirement_id: ref.requirement_id }
+      ));
+      const targets: PublishDiagnosticTarget[] = coverageRefs.map((ref) => (
+        ref.character_id === undefined
+          ? { panel: mapping.panel, kind: "coverage_cell", requirement_id: ref.requirement_id }
+          : { panel: mapping.panel, kind: "coverage_cell", character_id: ref.character_id, requirement_id: ref.requirement_id }
+      ));
+      rows.push({
+        code: diagnostic.code,
+        severity: diagnostic.severity,
+        message: diagnostic.message,
+        affected,
+        next_action: mapping.nextAction,
+        targets,
+        ...(targets[0] === undefined ? {} : { target: targets[0] }),
+      });
+      continue;
+    }
     const ids = diagnostic.artifact_ids ?? diagnostic.fact_ids ?? diagnostic.source_ids ?? [];
-    const affected: PublishDiagnosticAffected[] = ids.map((id) => ({ kind: mapping.affectedKind, id }));
+    const objectKind: PublishDiagnosticAffectedKind = mapping.affectedKind === "coverage_cell" ? "fact" : mapping.affectedKind;
+    const affected: PublishDiagnosticAffected[] = ids.map((id) => ({ kind: objectKind, id }));
+    const targets: PublishDiagnosticTarget[] = ids.map((id) => ({ panel: mapping.panel, kind: objectKind, id }));
     rows.push({
       code: diagnostic.code,
       severity: diagnostic.severity,
       message: diagnostic.message,
       affected,
       next_action: mapping.nextAction,
-      ...(affected[0] === undefined ? { target: { panel: mapping.panel } } : { target: { panel: mapping.panel, id: affected[0].id } }),
+      ...(targets.length === 0
+        ? { targets: [{ panel: mapping.panel }] }
+        : { targets }),
+      ...(targets[0] === undefined ? { target: { panel: mapping.panel } } : { target: targets[0] }),
     });
   }
   return { rows, has_unknown: hasUnknown };

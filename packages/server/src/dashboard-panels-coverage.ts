@@ -667,7 +667,7 @@ function renderCellActionButton(cell, actionOpt) {
 function coverageCenterCellElement(cell, tasks) {
   var row = document.createElement("div");
   row.className = "coverage-cell";
-  row.id = "coverage-cell-" + (cell.character_id ? cell.character_id : "world") + "-" + cell.requirement_id.replace(/\./g, "-");
+  row.id = coverageCellId(cell.character_id, cell.requirement_id);
   row.setAttribute("data-cell-id", (cell.character_id || "world") + "__" + cell.requirement_id);
   row.setAttribute("data-scope", cell.scope || (cell.character_id ? "character" : "world"));
   if (cell.character_id) row.setAttribute("data-character-id", cell.character_id);

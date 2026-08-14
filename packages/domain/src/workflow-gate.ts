@@ -13,6 +13,7 @@ export interface WorkflowDiagnostic {
   artifact_ids?: string[];
   fact_ids?: string[];
   source_ids?: string[];
+  coverage_refs?: Array<{ character_id?: string; requirement_id: string }>;
 }
 
 export interface WorkflowGateResult {
@@ -567,6 +568,9 @@ function reportCoverageReadiness(state: ProjectState, diagnostics: WorkflowDiagn
       code: "COVERAGE_RESOLUTION_REQUIRED",
       message: `Unresolved coverage requirements remain: ${missingStr}. Director/User resolution or source coverage is required.`,
       severity: "error",
+      coverage_refs: res.missing.map((m) => (
+        m.character_id === undefined ? { requirement_id: m.requirement_id } : { character_id: m.character_id, requirement_id: m.requirement_id }
+      )),
     });
   }
 

@@ -154,14 +154,13 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         return hints[code] || "";
       }
 
-      function navigateDiagnosticTarget(target) {
-        if (target === undefined || target === null) return;
+      function panelAnchorId(panel) {
         var panelIds = {
           sources: "source-list",
           artifacts: "artifact-list",
           facts: "fact-list",
           "fact-review": "fact-review-run",
-          coverage: "coverage-heading",
+          coverage: "coverage-center",
           precheck: "precheck-matrix",
           interview: "interview-heading",
           readiness: "readiness-list",
@@ -169,12 +168,101 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
           builds: "build-heading",
           publishes: "readiness-list"
         };
-        var anchor = null;
-        if (target.id) anchor = byId(target.id);
-        if (anchor === null || anchor === undefined) anchor = byId(panelIds[target.panel] || "readiness-list");
-        if (anchor !== null && anchor !== undefined) {
-          anchor.scrollIntoView({ behavior: "smooth", block: "start" });
+        return panelIds[panel] || "readiness-list";
+      }
+
+      function coverageCellId(characterId, requirementId) {
+        return "coverage-cell-" + (characterId || "world") + "-" + String(requirementId).split(".").join("-");
+      }
+
+      function findDiagnosticObjectElement(target) {
+        if (target === undefined || target === null) return null;
+        if (target.kind === "coverage_cell") {
+          if (target.requirement_id === undefined || target.requirement_id === null) return null;
+          var cell = byId(coverageCellId(target.character_id, target.requirement_id));
+          if (cell !== null && cell !== undefined) return cell;
+          return null;
         }
+        if (target.kind === undefined || target.id === undefined || target.id === null) return null;
+        var matches = document.querySelectorAll("[data-object-kind]");
+        for (var i = 0; i < matches.length; i += 1) {
+          if (matches[i].getAttribute("data-object-kind") === target.kind && matches[i].getAttribute("data-object-id") === target.id) {
+            return matches[i];
+          }
+        }
+        return null;
+      }
+
+      var lastDiagnosticHighlight = null;
+
+      function clearDiagnosticHighlight() {
+        if (lastDiagnosticHighlight !== null && lastDiagnosticHighlight !== undefined) {
+          lastDiagnosticHighlight.classList.remove("diagnostic-highlight");
+          lastDiagnosticHighlight.removeAttribute("data-diagnostic-code");
+          lastDiagnosticHighlight = null;
+        }
+      }
+
+      function reducedMotion() {
+        return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      }
+
+      function switchPanel(panel) {
+        var anchor = byId(panelAnchorId(panel));
+        if (anchor === null || anchor === undefined) return;
+        anchor.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" });
+      }
+
+      function revealDiagnosticTarget(target, code) {
+        if (target === undefined || target === null) return;
+        var element = findDiagnosticObjectElement(target);
+        if (element === null) element = byId(panelAnchorId(target.panel));
+        if (element === null || element === undefined) element = byId("readiness-list");
+        if (element === null || element === undefined) return;
+        clearDiagnosticHighlight();
+        element.classList.add("diagnostic-highlight");
+        element.setAttribute("data-diagnostic-code", code || target.panel || "");
+        element.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" });
+        if (typeof element.focus === "function") {
+          try {
+            element.focus({ preventScroll: true });
+          } catch (focusError) {
+            element.focus();
+          }
+        }
+        lastDiagnosticHighlight = element;
+      }
+
+      function navigateDiagnosticTarget(target) {
+        revealDiagnosticTarget(target);
+      }
+
+      function makeDiagnosticNavGroup(rowState) {
+        var group = document.createElement("span");
+        group.className = "diagnostic-nav";
+        var count = document.createElement("span");
+        count.className = "diagnostic-nav-count";
+        count.textContent = "1 / " + rowState.targets.length;
+        var prev = document.createElement("button");
+        prev.type = "button";
+        prev.textContent = "上一個";
+        prev.setAttribute("aria-label", "上一個受影響物件");
+        prev.addEventListener("click", function () {
+          rowState.index = (rowState.index - 1 + rowState.targets.length) % rowState.targets.length;
+          count.textContent = (rowState.index + 1) + " / " + rowState.targets.length;
+          revealDiagnosticTarget(rowState.targets[rowState.index], rowState.code);
+        });
+        var next = document.createElement("button");
+        next.type = "button";
+        next.textContent = "下一個";
+        next.setAttribute("aria-label", "下一個受影響物件");
+        next.addEventListener("click", function () {
+          rowState.index = (rowState.index + 1) % rowState.targets.length;
+          count.textContent = (rowState.index + 1) + " / " + rowState.targets.length;
+          revealDiagnosticTarget(rowState.targets[rowState.index], rowState.code);
+        });
+        group.append(prev, count, next);
+        return group;
       }
 
       function renderPublishDiagnostics(structured) {
@@ -215,11 +303,20 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
           if (row.next_action) detailParts.push("下一步：" + row.next_action);
           detail.textContent = detailParts.join("；");
           line.append(detail);
-          if (row.target !== undefined && row.target !== null) {
+          var targets = Array.isArray(row.targets) && row.targets.length > 0
+            ? row.targets.slice()
+            : (row.target !== undefined && row.target !== null ? [row.target] : [{ panel: "readiness" }]);
+          if (targets.length > 1) {
+            line.append(makeDiagnosticNavGroup({ targets: targets, index: 0, code: row.code }));
+          } else {
             var go = document.createElement("button");
             go.type = "button";
             go.textContent = "前往";
-            go.addEventListener("click", function () { navigateDiagnosticTarget(row.target); });
+            go.setAttribute("aria-label", "前往受影響物件或面板");
+            var singleTarget = targets[0];
+            go.addEventListener("click", (function (immutableTarget, immutableCode) {
+              return function () { revealDiagnosticTarget(immutableTarget, immutableCode); };
+            })(singleTarget, row.code));
             line.append(go);
           }
           target.append(line);
@@ -296,6 +393,11 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
           var revisions = Array.isArray(group.revisions) ? group.revisions : [current];
           var row = document.createElement("div");
           row.className = "artifact-row";
+          var artifactId = firstString(current, ["id"]);
+          if (artifactId) {
+            row.setAttribute("data-object-kind", "artifact");
+            row.setAttribute("data-object-id", artifactId);
+          }
           var badge = document.createElement("span");
           badge.className = "status-badge " + statusClass(firstString(current, ["status"]) || "draft");
           badge.textContent = firstString(current, ["kind"]) || "?";
