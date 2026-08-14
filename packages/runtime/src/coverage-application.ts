@@ -7,9 +7,12 @@ import {
   type OperationRecord,
   type ProjectRepository,
   type ProjectState,
+  type SourceCandidate,
+  type SourceRecord,
 } from "@st-workspace/core";
 import {
   KnowledgeService,
+  chunkSource,
   claimResearchTask,
   createResearchBatchFromAssessment,
   createUserSupplementSource,
@@ -24,6 +27,7 @@ import {
   recordUserDecisionAndResolution,
   reviseResearchTask,
   submitResearchTaskCandidates,
+  KNOWLEDGE_EXTRACTOR_REVISION,
   type CoverageCenterMatrix,
   type DownstreamInvalidationReport,
   type ExecutionActorInput,
@@ -48,69 +52,57 @@ export interface CoverageCommandOutcome {
   auditEvents: CoverageAuditEvent[];
 }
 
+export interface CoverageCommandResult {
+  operation_id: string;
+  status: string;
+  summary: string;
+  action: string;
+  target?: { character_id?: string; requirement_id?: string };
+  source_id?: string;
+  source_revision?: string;
+  chunk_count?: number;
+  completed: string[];
+  blocked: string[];
+  downstream_invalidation: DownstreamInvalidationReport;
+  next_step?: string;
+  replayed?: boolean;
+  batch_id?: string;
+  task_ids?: string[];
+  candidate_id?: string;
+  [key: string]: unknown;
+}
+
 function assertAssessmentMatches(state: ProjectState, assessmentId: string, assessmentRevision: string): void {
   const latestAssessment = state.coverage_assessments.at(-1);
   if (latestAssessment === undefined || latestAssessment.id !== assessmentId || latestAssessment.revision !== assessmentRevision) {
-    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "The coverage assessment changed or is not the current assessment; reload and retry.", true);
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "[COVERAGE_ASSESSMENT_STALE] The coverage assessment changed or is not the current assessment; reload and retry.", true);
   }
   if (latestAssessment.pass !== "formal") {
-    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "The coverage assessment pass is not formal; run a formal assessment first.", true);
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "[COVERAGE_ASSESSMENT_STALE] The coverage assessment pass is not formal; run a formal assessment first.", true);
   }
   const currentReqSet = state.coverage_requirement_sets.at(-1);
   if (currentReqSet === undefined || currentReqSet.id !== latestAssessment.requirement_set_id || currentReqSet.revision !== latestAssessment.requirement_set_revision) {
-    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "The requirement set changed since the coverage assessment was performed.", true);
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "[COVERAGE_ASSESSMENT_STALE] The requirement set changed since the coverage assessment was performed.", true);
   }
   if (!coverageAssessmentFreshness(state, latestAssessment)) {
-    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "The coverage assessment is stale due to changed inputs (blueprint, sources, facts, or review run).", true);
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "[COVERAGE_ASSESSMENT_STALE] The coverage assessment is stale due to changed inputs (blueprint, sources, facts, or review run).", true);
   }
 }
-
 
 function executionInputFor(operation: OperationRecord, actor: string, agentId: string, role: string): ExecutionContext {
   return executionContextFromOperation(operation, { auditActor: actor, executionAgent: { id: agentId, role } });
 }
 
-/** Shared replay-safe command: checks the audit marker before re-applying the mutation. */
-export async function replayCoverageCommand(
-  deps: CoverageApplicationDeps,
-  operation: OperationRecord,
-  marker: string,
-  apply: () => Promise<CoverageCommandOutcome>,
-): Promise<{ operation_id: string; status: string; summary: string; completed: string[]; blocked: string[]; downstream_invalidation: DownstreamInvalidationReport }> {
-  const state = await deps.repository.read();
-  const alreadyApplied = state.audit.some((item) => item.operation_id === operation.id && item.event === marker);
-  if (alreadyApplied) {
-    return { operation_id: operation.id, status: "completed", summary: "Coverage command already applied.", completed: [], blocked: [], downstream_invalidation: emptyDownstreamInvalidationReport() };
-  }
-  const outcome = await apply();
-  await deps.repository.commit(outcome.state.revision, (current) => ({
-    ...current,
-    ...outcome.state,
-    audit: [...current.audit, ...outcome.auditEvents.map((event) => ({ ...event, project_revision: current.revision + 1 }))],
-  }));
-  const after = await deps.repository.read();
-  return { operation_id: operation.id, status: "completed", summary: "Coverage command applied.", completed: [operation.id], blocked: [], downstream_invalidation: deriveDownstreamInvalidation(state, after) };
-}
-
-async function commitCommand(
-  deps: CoverageApplicationDeps,
-  state: ProjectState,
-  operation: OperationRecord,
-  outcome: CoverageCommandOutcome,
-): Promise<{ operation_id: string; status: string; summary: string; completed: string[]; blocked: string[]; downstream_invalidation: DownstreamInvalidationReport }> {
-  await deps.repository.commit(state.revision, (current) => ({
-    ...current,
-    ...outcome.state,
-    operations: [...outcome.state.operations, operation],
-    audit: [...outcome.state.audit, ...outcome.auditEvents.map((event) => ({ ...event, project_revision: current.revision + 1 }))],
-  }));
-  const after = await deps.repository.read();
-  return { operation_id: operation.id, status: "completed", summary: "Coverage command applied.", completed: [operation.id], blocked: [], downstream_invalidation: deriveDownstreamInvalidation(state, after) };
-}
-
-function coverageOperation(actor: string | undefined, type: string, payload: Record<string, unknown>, agentId: string, role: string): OperationRecord {
+function coverageOperation(
+  actor: string | undefined,
+  type: string,
+  payload: Record<string, unknown>,
+  agentId: string,
+  role: string,
+  existingOperationId?: string,
+): OperationRecord {
   return {
-    id: internalId("operation"),
+    id: existingOperationId ?? internalId("operation"),
     kind: "knowledge",
     request: type,
     ...(actor === undefined ? {} : { actor }),
@@ -129,6 +121,145 @@ function coverageOperation(actor: string | undefined, type: string, payload: Rec
   } as unknown as OperationRecord;
 }
 
+async function checkReplayCoverageCommand(
+  deps: CoverageApplicationDeps,
+  operation: OperationRecord,
+  marker: string,
+): Promise<CoverageCommandResult | undefined> {
+  const state = await deps.repository.read();
+  const auditEvent = state.audit.find((item) => item.operation_id === operation.id && item.event === marker);
+  const existingOp = state.operations.find((op) => op.id === operation.id);
+
+  if (auditEvent === undefined && (existingOp === undefined || existingOp.status === "running")) {
+    return undefined;
+  }
+
+  const source = state.sources.find(
+    (s) => s.selection_snapshot?.operation_id === operation.id || (auditEvent?.details?.source_id !== undefined && s.id === auditEvent.details.source_id),
+  );
+  const chunks = source !== undefined
+    ? state.knowledge_chunks.filter((c) => c.source_id === source.id)
+    : [];
+
+  const resolution = state.coverage_resolutions.find(
+    (r) => auditEvent?.details?.resolution_id !== undefined && r.id === auditEvent.details.resolution_id,
+  );
+
+  const batch = state.coverage_research_batches.find(
+    (b) => auditEvent?.details?.batch_id !== undefined && b.id === auditEvent.details.batch_id,
+  );
+
+  const target = auditEvent?.details?.requirement_id !== undefined
+    ? {
+        ...(auditEvent.details.character_id === undefined ? {} : { character_id: auditEvent.details.character_id as string }),
+        requirement_id: auditEvent.details.requirement_id as string,
+      }
+    : undefined;
+
+  return {
+    operation_id: operation.id,
+    status: existingOp?.status ?? "completed",
+    summary: existingOp?.result_summary ?? "Coverage command already applied.",
+    action: operation.command?.type ?? "coverage",
+    ...(target === undefined ? {} : { target }),
+    ...(source === undefined ? {} : { source_id: source.id, source_revision: source.revision }),
+    chunk_count: chunks.length,
+    completed: [operation.id],
+    blocked: [],
+    downstream_invalidation: emptyDownstreamInvalidationReport(),
+    replayed: true,
+    ...(batch === undefined ? {} : { batch_id: batch.id, task_ids: batch.task_ids }),
+    ...(resolution === undefined ? {} : { resolution_id: resolution.id }),
+  };
+}
+
+async function commitCommand(
+  deps: CoverageApplicationDeps,
+  state: ProjectState,
+  operation: OperationRecord,
+  outcome: CoverageCommandOutcome,
+): Promise<CoverageCommandResult> {
+  const summaryText = (outcome.result.summary as string | undefined) ?? "Coverage command applied.";
+  const statusStr = (outcome.result.status as string | undefined) ?? "completed";
+
+  const completedOp: OperationRecord = {
+    ...operation,
+    status: statusStr as any,
+    result_summary: summaryText,
+    updated_at: now(),
+    progress: [
+      ...operation.progress,
+      { item_id: operation.id, status: statusStr as any, message: summaryText },
+    ],
+  };
+
+  await deps.repository.commit(state.revision, (current) => {
+    const existingIndex = current.operations.findIndex((op) => op.id === operation.id);
+    const updatedOperations = existingIndex >= 0
+      ? current.operations.map((op, idx) => (idx === existingIndex ? completedOp : op))
+      : [...current.operations, completedOp];
+
+    return {
+      ...current,
+      ...outcome.state,
+      operations: updatedOperations,
+      audit: [
+        ...current.audit,
+        ...outcome.auditEvents.map((event) => ({ ...event, project_revision: current.revision + 1 })),
+      ],
+    };
+  });
+
+  const after = await deps.repository.read();
+  return {
+    operation_id: operation.id,
+    status: statusStr,
+    summary: summaryText,
+    action: operation.command?.type ?? "coverage",
+    ...(outcome.result.target === undefined ? {} : { target: outcome.result.target as any }),
+    ...(outcome.result.source_id === undefined ? {} : { source_id: outcome.result.source_id as string }),
+    ...(outcome.result.source_revision === undefined ? {} : { source_revision: outcome.result.source_revision as string }),
+    ...(outcome.result.chunk_count === undefined ? {} : { chunk_count: outcome.result.chunk_count as number }),
+    completed: [operation.id],
+    blocked: [],
+    downstream_invalidation: deriveDownstreamInvalidation(state, after),
+    ...(outcome.result.next_step === undefined ? {} : { next_step: outcome.result.next_step as string }),
+    ...(outcome.result.batch_id === undefined ? {} : { batch_id: outcome.result.batch_id as string }),
+    ...(outcome.result.task_ids === undefined ? {} : { task_ids: outcome.result.task_ids as string[] }),
+    ...outcome.result,
+  };
+}
+
+async function recordFailedOperation(
+  deps: CoverageApplicationDeps,
+  state: ProjectState,
+  operation: OperationRecord,
+  error: unknown,
+): Promise<never> {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const failedOp: OperationRecord = {
+    ...operation,
+    status: "failed",
+    result_summary: errorMessage,
+    updated_at: now(),
+  };
+  try {
+    await deps.repository.commit(state.revision, (current) => {
+      const existingIndex = current.operations.findIndex((op) => op.id === operation.id);
+      const updatedOps = existingIndex >= 0
+        ? current.operations.map((op, idx) => (idx === existingIndex ? failedOp : op))
+        : [...current.operations, failedOp];
+      return {
+        ...current,
+        operations: updatedOps,
+      };
+    });
+  } catch {
+    // Ignore secondary commit error so primary error is thrown
+  }
+  throw error;
+}
+
 /** Start coverage research: create a batch and queued tasks for the current assessment. */
 export async function executeCoverageResearchStart(deps: CoverageApplicationDeps, state: ProjectState, operation: OperationRecord, actor: string): Promise<CoverageCommandOutcome> {
   const command = operation.command;
@@ -142,7 +273,7 @@ export async function executeCoverageResearchStart(deps: CoverageApplicationDeps
   const { batch, tasks, state: mutated } = createResearchBatchFromAssessment(state, assessmentId, "director");
   return {
     state: mutated,
-    result: { batch_id: batch.id, task_ids: tasks.map((task) => task.id) },
+    result: { batch_id: batch.id, task_ids: tasks.map((task) => task.id), next_step: "請 Source Researcher 或驅動程式 Claim 任務執行來源搜尋" },
     auditEvents: [{
       id: internalId("audit"), operation_id: operation.id, event: "coverage.research.started", actor,
       occurred_at: now(), details: { batch_id: batch.id, task_ids: tasks.map((task) => task.id), assessment_id: assessmentId, assessment_revision: assessmentRevision },
@@ -150,7 +281,13 @@ export async function executeCoverageResearchStart(deps: CoverageApplicationDeps
   };
 }
 
-export async function coverageResearchStart(deps: CoverageApplicationDeps, actor: string, assessmentId?: string, assessmentRevision?: string): Promise<Record<string, unknown>> {
+export async function coverageResearchStart(
+  deps: CoverageApplicationDeps,
+  actor: string,
+  assessmentId?: string,
+  assessmentRevision?: string,
+  operationId?: string,
+): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
   const latestAssessment = state.coverage_assessments.at(-1);
   const targetId = assessmentId ?? latestAssessment?.id;
@@ -159,12 +296,18 @@ export async function coverageResearchStart(deps: CoverageApplicationDeps, actor
     throw new CoreError("COVERAGE_ASSESSMENT_STALE", "No coverage assessment exists; run a formal assessment first.", true);
   }
   assertAssessmentMatches(state, targetId, targetRevision);
-  const operation = coverageOperation(actor, "coverage_research_start", { assessment_id: targetId, assessment_revision: targetRevision }, "source-researcher", "researcher");
-  const outcome = await executeCoverageResearchStart(deps, state, operation, actor);
-  const result = await commitCommand(deps, state, operation, outcome);
-  return { ...result, ...outcome.result };
-}
+  const operation = coverageOperation(actor, "coverage_research_start", { assessment_id: targetId, assessment_revision: targetRevision }, "source-researcher", "researcher", operationId);
 
+  const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.research.started");
+  if (replayed !== undefined) return replayed;
+
+  try {
+    const outcome = await executeCoverageResearchStart(deps, state, operation, actor);
+    return await commitCommand(deps, state, operation, outcome);
+  } catch (error) {
+    return await recordFailedOperation(deps, state, operation, error);
+  }
+}
 
 /** Claim the next queued research task for a batch. */
 export async function executeCoverageResearchClaim(deps: CoverageApplicationDeps, state: ProjectState, operation: OperationRecord, actor: string): Promise<CoverageCommandOutcome> {
@@ -174,7 +317,7 @@ export async function executeCoverageResearchClaim(deps: CoverageApplicationDeps
   if (claimed === undefined) {
     return {
       state,
-      result: { task: undefined },
+      result: { task: undefined, summary: "No queued tasks available to claim." },
       auditEvents: [{
         id: internalId("audit"), operation_id: operation.id, event: "coverage.research.claimed", actor,
         occurred_at: now(), details: { batch_id: command.payload.batch_id, task_id: undefined },
@@ -183,7 +326,7 @@ export async function executeCoverageResearchClaim(deps: CoverageApplicationDeps
   }
   return {
     state: claimed.state,
-    result: { task: claimed.task },
+    result: { task: claimed.task, summary: `Claimed task ${claimed.task.id}.` },
     auditEvents: [{
       id: internalId("audit"), operation_id: operation.id, event: "coverage.research.claimed", actor,
       occurred_at: now(), details: { batch_id: command.payload.batch_id, task_id: claimed.task.id, claim_generation: claimed.task.claim_generation },
@@ -191,12 +334,25 @@ export async function executeCoverageResearchClaim(deps: CoverageApplicationDeps
   };
 }
 
-export async function coverageResearchClaim(deps: CoverageApplicationDeps, actor: string, batchId: string, leaseDurationMs?: number): Promise<Record<string, unknown>> {
+export async function coverageResearchClaim(
+  deps: CoverageApplicationDeps,
+  actor: string,
+  batchId: string,
+  leaseDurationMs?: number,
+  operationId?: string,
+): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
-  const operation = coverageOperation(actor, "coverage_research_claim", { batch_id: batchId, ...(leaseDurationMs === undefined ? {} : { lease_duration_ms: leaseDurationMs }) }, "source-researcher", "researcher");
-  const outcome = await executeCoverageResearchClaim(deps, state, operation, actor);
-  const result = await commitCommand(deps, state, operation, outcome);
-  return { ...result, ...outcome.result };
+  const operation = coverageOperation(actor, "coverage_research_claim", { batch_id: batchId, ...(leaseDurationMs === undefined ? {} : { lease_duration_ms: leaseDurationMs }) }, "source-researcher", "researcher", operationId);
+
+  const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.research.claimed");
+  if (replayed !== undefined) return replayed;
+
+  try {
+    const outcome = await executeCoverageResearchClaim(deps, state, operation, actor);
+    return await commitCommand(deps, state, operation, outcome);
+  } catch (error) {
+    return await recordFailedOperation(deps, state, operation, error);
+  }
 }
 
 /** Submit research candidates for a claimed task. */
@@ -212,12 +368,34 @@ export async function executeCoverageResearchCandidates(deps: CoverageApplicatio
     executionInputFor(operation, actor, "source-researcher", "researcher"),
     Date.now(),
   );
+
+  const task = state.coverage_research_tasks.find((t) => t.id === command.payload.task_id);
+  const batchId = task?.batch_id;
+  const derivedBatch = batchId !== undefined ? submitted.state.coverage_research_batches.find((b) => b.id === batchId) : undefined;
+  const batchStatus = derivedBatch?.status ?? "open";
+  const batchTasks = batchId !== undefined ? submitted.state.coverage_research_tasks.filter((t) => t.batch_id === batchId) : [];
+  const batchHasBlocker = batchTasks.some((t) => t.status === "exhausted" || t.status === "failed");
+
+  const opStatus = batchStatus === "completed" ? "completed" : (batchHasBlocker ? "needs_input" : "completed");
+  const summaryText = batchStatus === "completed"
+    ? "研究批次全數任務已完成。"
+    : (batchHasBlocker ? "研究批次部分任務陷入瓶頸，需要手動介入。" : "研究任務候選已提交，批次尚有任務執行中。");
+
   return {
     state: submitted.state,
-    result: { candidates: submitted.candidates, lineages: submitted.lineages },
+    result: {
+      status: opStatus,
+      summary: summaryText,
+      batch_id: batchId,
+      batch_status: batchStatus,
+      batch_completed: batchStatus === "completed",
+      batch_has_blockers: batchHasBlocker,
+      candidates: submitted.candidates,
+      lineages: submitted.lineages,
+    },
     auditEvents: [{
       id: internalId("audit"), operation_id: operation.id, event: "coverage.research.candidates.submitted", actor,
-      occurred_at: now(), details: { task_id: command.payload.task_id, candidate_ids: submitted.candidates.map((item) => item.id) },
+      occurred_at: now(), details: { task_id: command.payload.task_id, candidate_ids: submitted.candidates.map((item) => item.id), batch_id: batchId, batch_status: batchStatus },
     }],
   };
 }
@@ -229,12 +407,20 @@ export async function coverageResearchCandidates(
   claimGeneration: number,
   leaseOwner: string,
   candidates: Array<{ title: string; url?: string | undefined; canonical_url?: string | undefined; snippet?: string | undefined; domain?: string | undefined; official?: boolean | undefined; target_requirement_ids?: string[] | undefined }>,
-): Promise<Record<string, unknown>> {
+  operationId?: string,
+): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
-  const operation = coverageOperation(actor, "coverage_research_candidates", { task_id: taskId, claim_generation: claimGeneration, lease_owner: leaseOwner, candidates }, "source-researcher", "researcher");
-  const outcome = await executeCoverageResearchCandidates(deps, state, operation, actor);
-  const result = await commitCommand(deps, state, operation, outcome);
-  return { ...result, ...outcome.result };
+  const operation = coverageOperation(actor, "coverage_research_candidates", { task_id: taskId, claim_generation: claimGeneration, lease_owner: leaseOwner, candidates }, "source-researcher", "researcher", operationId);
+
+  const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.research.candidates.submitted");
+  if (replayed !== undefined) return replayed;
+
+  try {
+    const outcome = await executeCoverageResearchCandidates(deps, state, operation, actor);
+    return await commitCommand(deps, state, operation, outcome);
+  } catch (error) {
+    return await recordFailedOperation(deps, state, operation, error);
+  }
 }
 
 /** Mark a research task exhausted. */
@@ -254,7 +440,7 @@ export async function executeCoverageResearchExhaust(deps: CoverageApplicationDe
   );
   return {
     state: exhausted.state,
-    result: { task: exhausted.task },
+    result: { task: exhausted.task, summary: `Exhausted task ${command.payload.task_id}.` },
     auditEvents: [{
       id: internalId("audit"), operation_id: operation.id, event: "coverage.research.exhausted", actor,
       occurred_at: now(), details: { task_id: command.payload.task_id, exhausted_reason: command.payload.exhausted_reason },
@@ -271,12 +457,20 @@ export async function coverageResearchExhaust(
   searchedQueries: string[],
   sourceFamilies: string[],
   exhaustedReason: string,
-): Promise<Record<string, unknown>> {
+  operationId?: string,
+): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
-  const operation = coverageOperation(actor, "coverage_research_exhaust", { task_id: taskId, claim_generation: claimGeneration, lease_owner: leaseOwner, searched_queries: searchedQueries, source_families: sourceFamilies, exhausted_reason: exhaustedReason }, "source-researcher", "researcher");
-  const outcome = await executeCoverageResearchExhaust(deps, state, operation, actor);
-  const result = await commitCommand(deps, state, operation, outcome);
-  return { ...result, ...outcome.result };
+  const operation = coverageOperation(actor, "coverage_research_exhaust", { task_id: taskId, claim_generation: claimGeneration, lease_owner: leaseOwner, searched_queries: searchedQueries, source_families: sourceFamilies, exhausted_reason: exhaustedReason }, "source-researcher", "researcher", operationId);
+
+  const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.research.exhausted");
+  if (replayed !== undefined) return replayed;
+
+  try {
+    const outcome = await executeCoverageResearchExhaust(deps, state, operation, actor);
+    return await commitCommand(deps, state, operation, outcome);
+  } catch (error) {
+    return await recordFailedOperation(deps, state, operation, error);
+  }
 }
 
 /** Read-only preview of resolution consequences (two-phase confirmation, phase 1). */
@@ -287,28 +481,47 @@ export async function coverageResolutionPreview(deps: CoverageApplicationDeps, i
   return previewResolutionConsequences(state, assessment, input.requirement_id, input.character_id, input.action);
 }
 
-/** Confirm a coverage resolution (phase 2: immutable decision + resolution). */
+/** Confirm resolution for a coverage item: user_supplement or creative_completion. */
 export async function executeCoverageResolutionConfirm(deps: CoverageApplicationDeps, state: ProjectState, operation: OperationRecord, actor: string): Promise<CoverageCommandOutcome> {
   const command = operation.command;
-  if (command === undefined || command.type !== "coverage_resolution_confirm") throw new CoreError("OPERATION_COMMAND_INVALID", "Missing resolution payload.", true);
-  assertAssessmentMatches(state, command.payload.assessment_id, command.payload.assessment_revision);
-  const recorded = recordUserDecisionAndResolution(
+  if (command === undefined || command.type !== "coverage_resolution_confirm") throw new CoreError("OPERATION_COMMAND_INVALID", "Missing resolution confirm payload.", true);
+  const payload = command.payload;
+  assertAssessmentMatches(state, payload.assessment_id, payload.assessment_revision);
+  const res = recordUserDecisionAndResolution(
     state,
-    command.payload.action,
-    [command.payload.requirement_id],
-    command.payload.choice,
-    command.payload.rationale,
-    command.payload.choice,
-    executionInputFor(operation, actor, "director", "orchestrator"),
+    payload.action,
+    [payload.requirement_id],
+    payload.choice,
+    payload.rationale,
+    payload.choice,
+    actor,
     operation.id,
-    command.payload.character_id,
+    payload.character_id,
   );
+
+  const resolution = res.resolutions[0];
+  const targetScope = {
+    ...(payload.character_id === undefined ? {} : { character_id: payload.character_id }),
+    requirement_id: payload.requirement_id,
+  };
+  const summary = `Confirmed ${payload.action} resolution for ${payload.requirement_id}.`;
+
   return {
-    state: recorded.state,
-    result: { decision: recorded.decision, resolutions: recorded.resolutions },
+    state: res.state,
+    result: {
+      status: "completed",
+      summary,
+      resolution_id: resolution?.id,
+      resolutions: res.resolutions,
+      decision: res.decision,
+      target: targetScope,
+      next_step: payload.action === "user_supplement"
+        ? "下一步：請上傳補充資料證據以進行來源分片與事實提煉"
+        : "下一步：重新執行 Formal Coverage Assessment 以推導創作補全狀態",
+    },
     auditEvents: [{
       id: internalId("audit"), operation_id: operation.id, event: "coverage.resolution.confirmed", actor,
-      occurred_at: now(), details: { action: command.payload.action, requirement_id: command.payload.requirement_id, character_id: command.payload.character_id, decision_id: recorded.decision.id, resolution_ids: recorded.resolutions.map((item) => item.id) },
+      occurred_at: now(), details: { resolution_id: resolution?.id, action: payload.action, requirement_id: payload.requirement_id, character_id: payload.character_id },
     }],
   };
 }
@@ -316,56 +529,229 @@ export async function executeCoverageResolutionConfirm(deps: CoverageApplication
 export async function coverageResolutionConfirm(
   deps: CoverageApplicationDeps,
   actor: string,
-  input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; action: "user_supplement" | "creative_completion"; choice: string; rationale: string },
-): Promise<Record<string, unknown>> {
+  input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; action: "user_supplement" | "creative_completion"; choice: string; rationale: string; operation_id?: string },
+): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
   assertAssessmentMatches(state, input.assessment_id, input.assessment_revision);
-  const operation = coverageOperation(actor, "coverage_resolution_confirm", { assessment_id: input.assessment_id, assessment_revision: input.assessment_revision, requirement_id: input.requirement_id, ...(input.character_id === undefined ? {} : { character_id: input.character_id }), action: input.action, choice: input.choice, rationale: input.rationale }, "director", "orchestrator");
-  const outcome = await executeCoverageResolutionConfirm(deps, state, operation, actor);
-  const result = await commitCommand(deps, state, operation, outcome);
-  return { ...result, ...outcome.result };
+  const operation = coverageOperation(
+    actor,
+    "coverage_resolution_confirm",
+    { assessment_id: input.assessment_id, assessment_revision: input.assessment_revision, requirement_id: input.requirement_id, ...(input.character_id === undefined ? {} : { character_id: input.character_id }), action: input.action, choice: input.choice, rationale: input.rationale },
+    "director",
+    "orchestrator",
+    input.operation_id,
+  );
+
+  const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.resolution.confirmed");
+  if (replayed !== undefined) return replayed;
+
+  try {
+    const outcome = await executeCoverageResolutionConfirm(deps, state, operation, actor);
+    return await commitCommand(deps, state, operation, outcome);
+  } catch (error) {
+    return await recordFailedOperation(deps, state, operation, error);
+  }
 }
 
-/** Guided user supplement ingestion: text, URL or attachment becomes a user-supplied source. */
-export async function executeCoverageSupplement(deps: CoverageApplicationDeps, state: ProjectState, operation: OperationRecord, actor: string, attachments: Array<{ name: string; content: Uint8Array; media_type?: string }>): Promise<CoverageCommandOutcome> {
+/** Ingest user supplement: create Candidate, Source, Knowledge Chunks atomically in one commit. */
+export async function executeCoverageSupplement(
+  deps: CoverageApplicationDeps,
+  state: ProjectState,
+  operation: OperationRecord,
+  actor: string,
+  attachments: Array<{ name: string; content: Uint8Array; media_type?: string }> = [],
+): Promise<CoverageCommandOutcome> {
   const command = operation.command;
-  if (command === undefined || command.type !== "coverage_supplement") throw new CoreError("OPERATION_COMMAND_INVALID", "Missing supplement payload.", true);
-  assertAssessmentMatches(state, command.payload.assessment_id, command.payload.assessment_revision);
-  let text: string | undefined = command.payload.text;
-  if (text === undefined && command.payload.url !== undefined && deps.fetcher !== undefined) {
-    const fetched = await deps.fetcher(command.payload.url);
-    const decoder = new TextDecoder("utf-8");
-    text = decoder.decode(fetched.content).slice(0, 200_000);
+  if (command === undefined || command.type !== "coverage_supplement") {
+    throw new CoreError("OPERATION_COMMAND_INVALID", "Missing supplement payload.", true);
   }
-  if (text === undefined && attachments.length > 0) {
-    text = new TextDecoder("utf-8").decode(attachments[0]!.content).slice(0, 200_000);
+
+  const payload = command.payload;
+  assertAssessmentMatches(state, payload.assessment_id, payload.assessment_revision);
+
+  const textSegments: string[] = [];
+  if (payload.text !== undefined && payload.text.trim() !== "") {
+    textSegments.push(payload.text.trim());
   }
-  if (text === undefined) throw new CoreError("COVERAGE_SUPPLEMENT_REQUIRED", "Provide supplement text, a URL or an attachment.", true);
-  const { source, state: withSource } = createUserSupplementSource(state, text, actor, operation.id);
+
+  if (payload.url !== undefined && payload.url.trim() !== "") {
+    let urlText = `Source URL: ${payload.url.trim()}`;
+    if (deps.fetcher !== undefined) {
+      try {
+        const fetched = await deps.fetcher(payload.url.trim());
+        if (fetched !== undefined && fetched.content !== undefined) {
+          const decoded = new TextDecoder("utf-8").decode(fetched.content);
+          if (decoded.trim() !== "") {
+            urlText = decoded.trim();
+          }
+        }
+      } catch (err) {
+        throw new CoreError("OPERATION_COMMAND_INVALID", `Failed to fetch URL ${payload.url}: ${err instanceof Error ? err.message : String(err)}`, true);
+      }
+    }
+    textSegments.push(urlText);
+  }
+
+  if (attachments.length > 0) {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    for (const att of attachments) {
+      const mediaType = att.media_type ?? "text/plain";
+      if (!mediaType.startsWith("text/") && mediaType !== "application/json" && mediaType !== "application/xml" && mediaType !== "") {
+        throw new CoreError("OPERATION_COMMAND_INVALID", `Unsupported attachment media_type "${mediaType}" for file "${att.name}".`, true);
+      }
+      try {
+        const decoded = decoder.decode(att.content);
+        if (decoded.trim() !== "") {
+          textSegments.push(`Attachment (${att.name}):\n${decoded.trim()}`);
+        }
+      } catch {
+        throw new CoreError("OPERATION_COMMAND_INVALID", `Attachment "${att.name}" is not valid UTF-8 text.`, true);
+      }
+    }
+  }
+
+  const combinedText = textSegments.join("\n\n");
+  if (combinedText.trim() === "") {
+    throw new CoreError("OPERATION_COMMAND_INVALID", "User supplement must contain text, a valid URL, or valid text attachment.", true);
+  }
+
+  // Atomically create Candidate and Source
+  const { candidate, source, state: stateWithSource } = createUserSupplementSource(
+    state,
+    combinedText,
+    actor,
+    operation.id,
+    attachments[0]?.media_type ?? "text/plain",
+    attachments[0]?.name ?? "User supplement",
+  );
+
+  // Synchronously chunk source in memory
+  const chunks = chunkSource(source, KNOWLEDGE_EXTRACTOR_REVISION);
+
+  // Update state with chunks atomically
+  const stateWithChunks: ProjectState = {
+    ...stateWithSource,
+    knowledge_chunks: [...stateWithSource.knowledge_chunks, ...chunks],
+  };
+
+  const targetScope = {
+    ...(payload.character_id === undefined ? {} : { character_id: payload.character_id }),
+    requirement_id: payload.requirement_id,
+  };
+
+  const summary = `Created user supplement source ${source.id} with ${chunks.length} chunk(s).`;
+
   return {
-    state: withSource,
-    result: { source_id: source.id, source_revision: source.revision, chunk_count: 0 },
-    auditEvents: [{
-      id: internalId("audit"), operation_id: operation.id, event: "coverage.supplement.ingested", actor,
-      occurred_at: now(), details: { source_id: source.id, source_revision: source.revision, requirement_id: command.payload.requirement_id, character_id: command.payload.character_id, chunk_count: 0, provenance_kind: "user_supplement" },
-    }],
+    state: stateWithChunks,
+    result: {
+      status: "completed",
+      summary,
+      source_id: source.id,
+      source_revision: source.revision,
+      candidate_id: candidate.id,
+      chunk_count: chunks.length,
+      target: targetScope,
+      next_step: "至 Fact Curation / Fact Review 觀看分片並進行事實提煉",
+    },
+    auditEvents: [
+      {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "coverage.supplement.provided",
+        actor,
+        occurred_at: now(),
+        details: {
+          source_id: source.id,
+          source_revision: source.revision,
+          candidate_id: candidate.id,
+          requirement_id: payload.requirement_id,
+          character_id: payload.character_id,
+          chunk_count: chunks.length,
+          provenance_kind: "user_supplement",
+        },
+      },
+      {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "coverage.supplement.ingested",
+        actor,
+        occurred_at: now(),
+        details: {
+          source_id: source.id,
+          source_revision: source.revision,
+          requirement_id: payload.requirement_id,
+          character_id: payload.character_id,
+          chunk_count: chunks.length,
+          provenance_kind: "user_supplement",
+        },
+      },
+      {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "knowledge.chunks.prepared",
+        actor,
+        occurred_at: now(),
+        details: {
+          request: source.id,
+          source_ids: [source.id],
+          chunk_count: chunks.length,
+          fact_count: 0,
+        },
+      },
+    ],
   };
 }
 
 export async function coverageSupplement(
   deps: CoverageApplicationDeps,
   actor: string,
-  input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; text?: string; url?: string },
-  attachments: Array<{ name: string; content: Uint8Array; media_type?: string }>,
-): Promise<Record<string, unknown>> {
+  input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; text?: string; url?: string; operation_id?: string },
+  attachments: Array<{ name: string; content: Uint8Array; media_type?: string }> = [],
+): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
+  if (input.operation_id !== undefined) {
+    const existingOp = state.operations.find((o) => o.id === input.operation_id);
+    if (existingOp !== undefined && existingOp.status === "completed") {
+      const dummyOp = coverageOperation(actor, "coverage_supplement", {}, "director", "orchestrator", input.operation_id);
+      const replayed = await checkReplayCoverageCommand(deps, dummyOp, "coverage.supplement.provided");
+      if (replayed !== undefined) return replayed;
+    }
+  }
+
   assertAssessmentMatches(state, input.assessment_id, input.assessment_revision);
-  const operation = coverageOperation(actor, "coverage_supplement", { assessment_id: input.assessment_id, assessment_revision: input.assessment_revision, requirement_id: input.requirement_id, ...(input.character_id === undefined ? {} : { character_id: input.character_id }), ...(input.text === undefined ? {} : { text: input.text }), ...(input.url === undefined ? {} : { url: input.url }) }, "director", "orchestrator");
-  const outcome = await executeCoverageSupplement(deps, state, operation, actor, attachments);
-  const result = await commitCommand(deps, state, operation, outcome);
-  const sourceId = outcome.result.source_id as string;
-  const chunks = await deps.knowledge.prepareSourceAdaptationChunks(operation.id, sourceId, executionInputFor(operation, actor, "director", "orchestrator"));
-  return { ...result, ...outcome.result, chunk_count: chunks.chunks.length };
+
+  const attachmentRefs = attachments.map((a) => ({
+    id: internalId("attachment"),
+    name: a.name,
+    ...(a.media_type === undefined ? {} : { media_type: a.media_type }),
+  }));
+
+  const operation = coverageOperation(
+    actor,
+    "coverage_supplement",
+    {
+      assessment_id: input.assessment_id,
+      assessment_revision: input.assessment_revision,
+      requirement_id: input.requirement_id,
+      ...(input.character_id === undefined ? {} : { character_id: input.character_id }),
+      ...(input.text === undefined ? {} : { text: input.text }),
+      ...(input.url === undefined ? {} : { url: input.url }),
+      ...(attachmentRefs.length === 0 ? {} : { attachment_refs: attachmentRefs }),
+    },
+    "director",
+    "orchestrator",
+    input.operation_id,
+  );
+
+  const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.supplement.provided");
+  if (replayed !== undefined) return replayed;
+
+  try {
+    const outcome = await executeCoverageSupplement(deps, state, operation, actor, attachments);
+    return await commitCommand(deps, state, operation, outcome);
+  } catch (error) {
+    return await recordFailedOperation(deps, state, operation, error);
+  }
 }
 
 /** Recover an exhausted research task: revise query/constraints (successor) or route to supplement/creative. */
@@ -378,7 +764,7 @@ export async function executeCoverageResearchRecover(deps: CoverageApplicationDe
   if (command.payload.action === "revise_query" || command.payload.action === "revise_constraints") {
     const revised = reviseResearchTask(mutated, command.payload.task_id, { ...(command.payload.query_seeds === undefined ? {} : { query_seeds: command.payload.query_seeds }), ...(command.payload.source_constraints === undefined ? {} : { source_constraints: command.payload.source_constraints }) }, executionInput);
     mutated = revised.state;
-    result = { task: revised.task, predecessor_id: command.payload.task_id };
+    result = { task: revised.task, predecessor_id: command.payload.task_id, summary: `Revised task ${command.payload.task_id}.` };
   } else {
     throw new CoreError("COVERAGE_RESOLUTION_REQUIRED", "Use the resolution confirm flow for supplement and creative completion recovery.", true);
   }
@@ -395,14 +781,21 @@ export async function executeCoverageResearchRecover(deps: CoverageApplicationDe
 export async function coverageResearchRecover(
   deps: CoverageApplicationDeps,
   actor: string,
-  input: { task_id: string; action: "revise_query" | "revise_constraints" | "manual_url" | "supplement" | "creative_completion"; query_seeds?: string[]; source_constraints?: string[]; url?: string },
-  attachments: Array<{ name: string; content: Uint8Array; media_type?: string }>,
-): Promise<Record<string, unknown>> {
+  input: { task_id: string; action: "revise_query" | "revise_constraints" | "manual_url" | "supplement" | "creative_completion"; query_seeds?: string[]; source_constraints?: string[]; url?: string; operation_id?: string },
+  attachments: Array<{ name: string; content: Uint8Array; media_type?: string }> = [],
+): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
-  const operation = coverageOperation(actor, "coverage_research_recover", { task_id: input.task_id, action: input.action, ...(input.query_seeds === undefined ? {} : { query_seeds: input.query_seeds }), ...(input.source_constraints === undefined ? {} : { source_constraints: input.source_constraints }), ...(input.url === undefined ? {} : { url: input.url }) }, "source-researcher", "researcher");
-  const outcome = await executeCoverageResearchRecover(deps, state, operation, actor, attachments);
-  const result = await commitCommand(deps, state, operation, outcome);
-  return { ...result, ...outcome.result };
+  const operation = coverageOperation(actor, "coverage_research_recover", { task_id: input.task_id, action: input.action, ...(input.query_seeds === undefined ? {} : { query_seeds: input.query_seeds }), ...(input.source_constraints === undefined ? {} : { source_constraints: input.source_constraints }), ...(input.url === undefined ? {} : { url: input.url }) }, "source-researcher", "researcher", input.operation_id);
+
+  const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.research.recovered");
+  if (replayed !== undefined) return replayed;
+
+  try {
+    const outcome = await executeCoverageResearchRecover(deps, state, operation, actor, attachments);
+    return await commitCommand(deps, state, operation, outcome);
+  } catch (error) {
+    return await recordFailedOperation(deps, state, operation, error);
+  }
 }
 
 /** Dashboard read model: requirement set, assessment, cells with actions and recovery choices. */
@@ -432,11 +825,10 @@ export async function dashboardCoverage(deps: CoverageApplicationDeps): Promise<
     };
   });
   return {
-    requirement_set: requirementSet === undefined ? undefined : { id: requirementSet.id, revision: requirementSet.revision, characters: requirementSet.characters, world_requirement_ids: requirementSet.world_requirement_ids },
-    assessment: assessment === undefined ? undefined : { id: assessment.id, revision: assessment.revision, pass: assessment.pass, current: true },
-    cells,
-    blockers: readiness.blockers,
+    requirement_set: requirementSet === undefined ? undefined : { id: requirementSet.id, revision: requirementSet.revision },
+    assessment: assessment === undefined ? undefined : { id: assessment.id, revision: assessment.revision, pass: assessment.pass, current: coverageAssessmentFreshness(state, assessment) },
     ready: readiness.ready,
+    cells,
   };
 }
 

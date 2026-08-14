@@ -616,26 +616,61 @@ export function createUserSupplementSource(
   text: string,
   actor: string,
   operationId: string,
-): { source: SourceRecord; state: ProjectState } {
+  mediaType = "text/plain",
+  title = "User supplement",
+): { candidate: SourceCandidate; source: SourceRecord; state: ProjectState } {
+  const candidateId = internalId("candidate");
   const sourceId = internalId("source");
+  const origHash = contentHash(text);
+  const rev = contentHash(canonicalJson({ id: sourceId, text, kind: "user_supplement" }));
+  const timeNow = now();
+
+  const candidateRecord: SourceCandidate = {
+    id: candidateId,
+    title,
+    content: text,
+    media_type: mediaType,
+    content_hash: origHash,
+    source_revision: rev,
+    status: "approved",
+    approved_at: timeNow,
+    selection_snapshot: {
+      operation_id: operationId,
+      candidate_ids: [candidateId],
+      approved_candidate_ids: [candidateId],
+      rejected_candidate_ids: [],
+      selected_at: timeNow,
+      selected_by: actor,
+    },
+  };
+
   const sourceRecord: SourceRecord = {
     id: sourceId,
-    candidate_id: internalId("candidate"),
-    title: "User supplement",
+    candidate_id: candidateId,
+    title,
     canonical_text: text,
-    original_hash: contentHash(text),
-    revision: contentHash(canonicalJson({ id: sourceId, text, kind: "user_supplement" })),
-    media_type: "text/plain",
+    original_hash: origHash,
+    revision: rev,
+    media_type: mediaType,
     provenance_kind: "user_supplement",
     selection_snapshot: {
       operation_id: operationId,
-      candidate_ids: [],
-      approved_candidate_ids: [],
+      candidate_ids: [candidateId],
+      approved_candidate_ids: [candidateId],
       rejected_candidate_ids: [],
-      selected_at: now(),
+      selected_at: timeNow,
       selected_by: actor,
     },
-    created_at: now(),
+    created_at: timeNow,
   };
-  return { source: sourceRecord, state: { ...state, sources: [...state.sources, sourceRecord] } };
+
+  return {
+    candidate: candidateRecord,
+    source: sourceRecord,
+    state: {
+      ...state,
+      candidates: [...state.candidates, candidateRecord],
+      sources: [...state.sources, sourceRecord],
+    },
+  };
 }

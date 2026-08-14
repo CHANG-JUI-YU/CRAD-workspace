@@ -391,14 +391,14 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       if (request.method === "POST" && url.pathname === "/workspace/coverage/resolution/confirm") {
         const parsed = await body(request);
         const input = parseRequest(coverageResolutionConfirmInputSchema, parsed, "COVERAGE_RESOLUTION_REQUIRED");
-        json(response, 200, await (await deps.getRuntime()).coverageResolutionConfirm(deps.actor, { assessment_id: input.assessment_id, assessment_revision: input.assessment_revision, requirement_id: input.requirement_id, ...(input.character_id === undefined ? {} : { character_id: input.character_id }), action: input.action, choice: input.choice, rationale: input.rationale }));
+        json(response, 200, await (await deps.getRuntime()).coverageResolutionConfirm(deps.actor, { assessment_id: input.assessment_id, assessment_revision: input.assessment_revision, requirement_id: input.requirement_id, ...(input.character_id === undefined ? {} : { character_id: input.character_id }), action: input.action, choice: input.choice, rationale: input.rationale, ...(input.operation_id === undefined ? {} : { operation_id: input.operation_id }) }));
         return true;
       }
       if (request.method === "POST" && url.pathname === "/workspace/coverage/supplement") {
         const parsed = await body(request);
         const input = parseRequest(coverageSupplementInputSchema, parsed, "COVERAGE_SUPPLEMENT_REQUIRED");
         const attachments = decodeAttachments(input.attachments);
-        json(response, 200, await (await deps.getRuntime()).coverageSupplement(deps.actor, { assessment_id: input.assessment_id, assessment_revision: input.assessment_revision, requirement_id: input.requirement_id, ...(input.character_id === undefined ? {} : { character_id: input.character_id }), ...(input.text === undefined ? {} : { text: input.text }), ...(input.url === undefined ? {} : { url: input.url }) }, attachments));
+        json(response, 200, await (await deps.getRuntime()).coverageSupplement(deps.actor, { assessment_id: input.assessment_id, assessment_revision: input.assessment_revision, requirement_id: input.requirement_id, ...(input.character_id === undefined ? {} : { character_id: input.character_id }), ...(input.text === undefined ? {} : { text: input.text }), ...(input.url === undefined ? {} : { url: input.url }), ...(input.operation_id === undefined ? {} : { operation_id: input.operation_id }) }, attachments));
         return true;
       }
       if (request.method === "POST" && url.pathname === "/workspace/coverage/research/recover") {

@@ -1,4 +1,4 @@
-import { assertExecutionLeaseForOperation } from "@st-workspace/domain";
+import { assertExecutionLeaseForOperation, emptyDownstreamInvalidationReport } from "@st-workspace/domain";
 import { computeProjectProjection, type ArtifactRecord, type ExecutionContext, type OperationRecord, type ProjectState, type RequestResult } from "@st-workspace/core";
 
 function now(): string {
@@ -74,6 +74,7 @@ function responseFromOperation(operation: OperationRecord): RequestResult {
     summary: operation.result_summary ?? "操作正在處理中。",
     completed,
     blocked,
+    downstream_invalidation: emptyDownstreamInvalidationReport(),
     ...(operation.question === undefined ? {} : { question: operation.question }),
     ...(operation.execution_snapshot?.execution_agent_id === undefined ? {} : { agent_id: operation.execution_snapshot.execution_agent_id }),
     ...(operation.execution_snapshot?.execution_agent_role === undefined ? {} : { agent_role: operation.execution_snapshot.execution_agent_role }),

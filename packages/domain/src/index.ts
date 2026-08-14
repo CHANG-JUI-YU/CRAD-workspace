@@ -114,6 +114,7 @@ export {
 } from "./required-artifacts.js";
 
 export * from "./inputs.js";
+export { chunkSource, KNOWLEDGE_EXTRACTOR_REVISION } from "./source-chunking.js";
 
 export interface FetchResult {
   content: Uint8Array;

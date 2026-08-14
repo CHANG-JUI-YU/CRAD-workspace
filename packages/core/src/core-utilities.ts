@@ -82,6 +82,7 @@ export interface RequestResult {
   question?: string;
   agent_id?: string;
   agent_role?: string;
+  downstream_invalidation?: any;
   project_id?: string;
   project_name?: string;
   project_path?: string;

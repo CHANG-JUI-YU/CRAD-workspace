@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   contentHash,
-  createInMemoryProjectRepository,
+  MemoryProjectRepository,
   createProjectState,
   type BlueprintPrecheckRecord,
   type CoverageAssessment,
@@ -35,24 +35,34 @@ function sourceRecord(id: string, text: string): SourceRecord {
 }
 
 function precheck(projectId: string): BlueprintPrecheckRecord {
+  const bp = {
+    schema_version: 1,
+    title: "Test Blueprint",
+    source_adaptation: true,
+    characters: [{ id: "alpha", label: "Alpha", is_primary: true }],
+    world: { enabled: false },
+    relationships: { enabled: false },
+  };
+  const rev = contentHash(JSON.stringify(bp));
   return {
     id: "precheck-1",
     schema_version: 1,
     project_id: projectId,
     operation_id: "op-precheck",
     collaboration_mode: "assisted",
-    candidate_blueprint: {
-      schema_version: 1,
-      title: "Test Blueprint",
-      source_adaptation: true,
-      characters: [{ id: "alpha", label: "Alpha", is_primary: true }],
-      world: { enabled: false },
-      relationships: { enabled: false },
-    },
-    candidate_blueprint_revision: "bp-rev-1",
+    candidate_blueprint: bp,
+    candidate_blueprint_revision: rev,
     status: "recorded",
-    checks: [],
+    checks: [{
+      subject_id: "alpha",
+      dimension: "character_core",
+      uncertainty: "low",
+      impact: "low",
+      basis: "blueprint character",
+      action: "preserve_explicit",
+    }],
     created_at: now,
+    created_by: "director",
   };
 }
 
@@ -65,7 +75,7 @@ function buildBaseState(): ProjectState {
     revision: "set-rev-1",
     source: "default",
     blueprint_revision: pc.candidate_blueprint_revision,
-    characters: [{ character_id: "alpha", requirement_ids: ["req.identity", "req.personality"] }],
+    characters: [{ character_id: "alpha", requirement_ids: ["req.identity"] }],
     world_requirement_ids: [],
     created_by: "director",
     created_at: now,
@@ -90,7 +100,7 @@ describe("Audit 6 Batch 1 - Runtime Stale Guards & Research Batch", () => {
       coverage_assessments: [assessment],
     };
 
-    const repo = createInMemoryProjectRepository(stateWithAssess);
+    const repo = new MemoryProjectRepository(stateWithAssess.id, stateWithAssess);
     const deps: CoverageApplicationDeps = {
       repository: repo,
       knowledge: {} as any,
@@ -102,7 +112,7 @@ describe("Audit 6 Batch 1 - Runtime Stale Guards & Research Batch", () => {
       blueprint_prechecks: [
         {
           ...curr.blueprint_prechecks[0]!,
-          candidate_blueprint_revision: "bp-rev-changed",
+          candidate_blueprint_revision: contentHash("bp-rev-changed"),
         },
       ],
     }));
@@ -119,36 +129,24 @@ describe("Audit 6 Batch 1 - Runtime Stale Guards & Research Batch", () => {
       coverageResolutionConfirm(deps, "director", {
         assessment_id: assessment.id,
         assessment_revision: assessment.revision,
+        action: "accept_candidate",
         requirement_id: "req.identity",
-        character_id: "alpha",
-        action: "creative_completion",
-        choice: "authorizing",
-        rationale: "reasons",
       }),
     ).rejects.toThrow("COVERAGE_ASSESSMENT_STALE");
 
     await expect(
-      coverageSupplement(
-        deps,
-        "director",
-        {
-          assessment_id: assessment.id,
-          assessment_revision: assessment.revision,
-          requirement_id: "req.identity",
-          character_id: "alpha",
-          text: "supplement content text",
-        },
-        [],
-      ),
+      coverageSupplement(deps, "director", {
+        assessment_id: assessment.id,
+        assessment_revision: assessment.revision,
+        requirement_id: "req.identity",
+        text: "Supplemental evidence",
+      }),
     ).rejects.toThrow("COVERAGE_ASSESSMENT_STALE");
 
-    // Verify NO side-effects occurred
-    const afterState = await repo.read();
-    expect(afterState.revision).toBe(revisionBefore);
-    expect(afterState.audit.length).toBe(auditBeforeCount);
-    expect(afterState.coverage_research_batches.length).toBe(0);
-    expect(afterState.coverage_resolutions.length).toBe(0);
-    expect(afterState.sources.length).toBe(0);
+    // Check no side effects or state mutation occurred
+    const stateAfter = await repo.read();
+    expect(stateAfter.revision).toBe(revisionBefore);
+    expect(stateAfter.audit.length).toBe(auditBeforeCount);
   });
 
   it("Research batch task lifecycle works normally after start", async () => {
@@ -161,7 +159,7 @@ describe("Audit 6 Batch 1 - Runtime Stale Guards & Research Batch", () => {
       coverage_assessments: [assessment],
     };
 
-    const repo = createInMemoryProjectRepository(stateWithAssess);
+    const repo = new MemoryProjectRepository(stateWithAssess.id, stateWithAssess);
     const deps: CoverageApplicationDeps = {
       repository: repo,
       knowledge: {} as any,

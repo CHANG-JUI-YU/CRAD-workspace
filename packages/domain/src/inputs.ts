@@ -222,6 +222,7 @@ const coverageResolutionScopeSchema = z.object({
   assessment_revision: z.string().min(1),
   requirement_id: coverageRequirementIdSchema,
   character_id: z.string().min(1).optional(),
+  operation_id: z.string().min(1).optional(),
 });
 
 export const coverageResolutionPreviewInputSchema = coverageResolutionScopeSchema.extend({

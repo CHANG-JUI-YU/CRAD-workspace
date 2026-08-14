@@ -79,11 +79,20 @@ export const coverageSupplementCommandPayloadSchema = z.object({
   character_id: z.string().min(1).optional(),
   text: z.string().min(1).optional(),
   url: z.string().url().optional(),
+  attachment_refs: z.array(z.object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    media_type: z.string().optional(),
+  })).optional(),
 }).strict().superRefine((value, context) => {
-  if (value.text === undefined && value.url === undefined) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "A user supplement requires either text or a URL.", path: ["text"] });
+  const hasText = value.text !== undefined && value.text.trim() !== "";
+  const hasUrl = value.url !== undefined && value.url.trim() !== "";
+  const hasAttachment = value.attachment_refs !== undefined && value.attachment_refs.length > 0;
+  if (!hasText && !hasUrl && !hasAttachment) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "A user supplement requires text, a URL, or an attachment.", path: ["text"] });
   }
 });
+
 
 export const coverageResearchRecoverCommandPayloadSchema = z.object({
   task_id: z.string().min(1),

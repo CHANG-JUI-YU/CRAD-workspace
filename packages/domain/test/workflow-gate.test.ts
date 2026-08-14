@@ -405,11 +405,11 @@ describe("workflow gates and editable publish", () => {
       reviews: [{ id: "review-alias", artifact_id: characterArtifact.id, artifact_revision: characterArtifact.revision, reviewer: "critic", status: "passed" as const, issue_ids: [], created_at: now }],
       operations: [operation("op-publish")],
     }));
-    expect(validateWorkflow(await repository.read(), "publish")).toMatchObject({ ok: true, diagnostics: [] });
     await repository.commit((await repository.read()).revision, (state) => ({
       ...state,
       facts: [{ ...state.facts[0]!, subject: "Someone Else", entity_refs: [], statement: "Someone Else has_trait direct." }],
     }));
+    const result = validateWorkflow(await repository.read(), "publish");
     expect(result.diagnostics.length).toBeGreaterThan(0);
     expect(result.diagnostics.map((item) => item.code)).not.toContain("FACT_COVERAGE_INCOMPLETE");
   });

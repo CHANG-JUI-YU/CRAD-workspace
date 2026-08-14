@@ -66,6 +66,188 @@ function recoverCoverageTask(cell, action, promptText) {
   });
 }
 
+function openSupplementDialog(cell, preview) {
+  var assessment = coverageAssessmentRef();
+  if (assessment === undefined) return;
+
+  var existingModal = byId("supplement-modal-overlay");
+  if (existingModal) existingModal.remove();
+
+  var overlay = document.createElement("div");
+  overlay.id = "supplement-modal-overlay";
+  overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;";
+
+  var modal = document.createElement("div");
+  modal.style.cssText = "background:#fff;border-radius:8px;max-width:550px;width:100%;max-height:90vh;overflow-y:auto;padding:24px;box-shadow:0 4px 20px rgba(0,0,0,0.25);font-family:inherit;";
+
+  var title = document.createElement("h3");
+  title.style.cssText = "margin-top:0;margin-bottom:12px;";
+  title.textContent = "提供補充資料 — " + coverageCellTitle(cell);
+  modal.appendChild(title);
+
+  var previewBox = document.createElement("div");
+  previewBox.style.cssText = "background:#f8f9fa;border-left:4px solid #0066cc;padding:10px 14px;margin-bottom:16px;font-size:0.9em;color:#333;";
+  previewBox.textContent = "操作預期影響：" + ((preview && preview.consequences) ? preview.consequences.join("；") : "確認提供補充資料後，系統將記錄決策並進行來源分片與事實提煉。");
+  modal.appendChild(previewBox);
+
+  var errBox = document.createElement("div");
+  errBox.style.cssText = "color:#dc3545;font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
+  modal.appendChild(errBox);
+
+  var textGroup = document.createElement("div");
+  textGroup.style.cssText = "margin-bottom:12px;";
+  var textLabel = document.createElement("label");
+  textLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+  textLabel.textContent = "補充資料內容（純文字）：";
+  var textInput = document.createElement("textarea");
+  textInput.rows = 3;
+  textInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+  textInput.placeholder = "請輸入補充事實或說明內容...";
+  textGroup.appendChild(textLabel);
+  textGroup.appendChild(textInput);
+  modal.appendChild(textGroup);
+
+  var urlGroup = document.createElement("div");
+  urlGroup.style.cssText = "margin-bottom:12px;";
+  var urlLabel = document.createElement("label");
+  urlLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+  urlLabel.textContent = "來源網址 URL（選填）：";
+  var urlInput = document.createElement("input");
+  urlInput.type = "url";
+  urlInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+  urlInput.placeholder = "https://example.com/source";
+  urlGroup.appendChild(urlLabel);
+  urlGroup.appendChild(urlInput);
+  modal.appendChild(urlGroup);
+
+  var fileGroup = document.createElement("div");
+  fileGroup.style.cssText = "margin-bottom:12px;";
+  var fileLabel = document.createElement("label");
+  fileLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+  fileLabel.textContent = "上傳檔案附件（文字/Markdown/JSON，選填）：";
+  var fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.style.cssText = "display:block;";
+  fileGroup.appendChild(fileLabel);
+  fileGroup.appendChild(fileInput);
+  modal.appendChild(fileGroup);
+
+  var rationaleGroup = document.createElement("div");
+  rationaleGroup.style.cssText = "margin-bottom:16px;";
+  var rationaleLabel = document.createElement("label");
+  rationaleLabel.style.cssText = "display:block;font-weight:bold;margin-bottom:4px;font-size:0.9em;";
+  rationaleLabel.textContent = "確認理由 (Rationale)：";
+  var rationaleInput = document.createElement("input");
+  rationaleInput.type = "text";
+  rationaleInput.value = "提供補充資料證據。";
+  rationaleInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+  rationaleGroup.appendChild(rationaleLabel);
+  rationaleGroup.appendChild(rationaleInput);
+  modal.appendChild(rationaleGroup);
+
+  var actionRow = document.createElement("div");
+  actionRow.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+
+  var cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.textContent = "取消";
+  cancelBtn.style.cssText = "padding:8px 16px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;";
+  cancelBtn.addEventListener("click", function () { overlay.remove(); });
+  actionRow.appendChild(cancelBtn);
+
+  var submitBtn = document.createElement("button");
+  submitBtn.type = "button";
+  submitBtn.textContent = "確認並提交補充資料";
+  submitBtn.style.cssText = "padding:8px 16px;border:none;background:#0066cc;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;";
+
+  submitBtn.addEventListener("click", function () {
+    var textVal = textInput.value.trim();
+    var urlVal = urlInput.value.trim();
+    var rationaleVal = rationaleInput.value.trim();
+    var hasFile = fileInput.files && fileInput.files.length > 0;
+
+    if (!textVal && !urlVal && !hasFile) {
+      errBox.textContent = "請至少提供補充文字、URL 或上傳附件其中一項。";
+      errBox.style.display = "block";
+      return;
+    }
+
+    if (!rationaleVal) {
+      errBox.textContent = "請填寫確認理由。";
+      errBox.style.display = "block";
+      return;
+    }
+
+    errBox.style.display = "none";
+    submitBtn.disabled = true;
+    submitBtn.textContent = "處理中...";
+
+    var processSubmission = function (attachmentsPayload) {
+      postJson("/workspace/coverage/resolution/confirm", {
+        assessment_id: assessment.id,
+        assessment_revision: assessment.revision,
+        requirement_id: cell.requirement_id,
+        ...(cell.character_id === undefined ? {} : { character_id: cell.character_id }),
+        action: "user_supplement",
+        choice: rationaleVal,
+        rationale: rationaleVal,
+      }).then(function () {
+        var suppBody = {
+          assessment_id: assessment.id,
+          assessment_revision: assessment.revision,
+          requirement_id: cell.requirement_id,
+          ...(cell.character_id === undefined ? {} : { character_id: cell.character_id }),
+          ...(textVal ? { text: textVal } : {}),
+          ...(urlVal ? { url: urlVal } : {}),
+          ...(attachmentsPayload ? { attachments: attachmentsPayload } : {}),
+        };
+        return postJson("/workspace/coverage/supplement", suppBody);
+      }).then(function (result) {
+        overlay.remove();
+        renderMutationInvalidation(result.downstream_invalidation);
+        var msgContainer = byId("coverage-message");
+        msgContainer.textContent = "已成功提交補充資料（來源 ID: " + (result.source_id || "建立中") + "，分片數: " + (result.chunk_count || 0) + "）。" + (result.next_step ? " " + result.next_step : "");
+        void loadCoverageData();
+        void refreshWorkflowViews();
+      }).catch(function (error) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "確認並提交補充資料";
+        errBox.textContent = "提交失敗：" + (error && error.message ? error.message : String(error));
+        errBox.style.display = "block";
+      });
+    };
+
+    if (hasFile) {
+      var file = fileInput.files[0];
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        var arrayBuffer = e.target.result;
+        var bytes = new Uint8Array(arrayBuffer);
+        var binaryStr = "";
+        for (var i = 0; i < bytes.byteLength; i++) {
+          binaryStr += String.fromCharCode(bytes[i]);
+        }
+        var base64 = window.btoa(binaryStr);
+        processSubmission([{ name: file.name, content: base64, media_type: file.type || "text/plain" }]);
+      };
+      reader.onerror = function () {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "確認並提交補充資料";
+        errBox.textContent = "讀取附件檔案失敗。";
+        errBox.style.display = "block";
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      processSubmission(null);
+    }
+  });
+
+  actionRow.appendChild(submitBtn);
+  modal.appendChild(actionRow);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+}
+
 function previewCoverageResolution(cell, action) {
   var assessment = coverageAssessmentRef();
   if (assessment === undefined) return;
@@ -76,10 +258,14 @@ function previewCoverageResolution(cell, action) {
     ...(cell.character_id === undefined ? {} : { character_id: cell.character_id }),
     action: action,
   }).then(function (preview) {
+    if (action === "user_supplement") {
+      openSupplementDialog(cell, preview);
+      return;
+    }
     var container = byId("coverage-message");
     container.textContent = (preview.consequences || []).join("；");
-    var confirmButton = coverageButton(action === "user_supplement" ? "確認補充資料" : "確認創作補全", function () {
-      var choice = window.prompt("請輸入確認理由：", action === "user_supplement" ? "使用者提供補充資料。" : "使用者授權創作補全。");
+    var confirmButton = coverageButton("確認創作補全", function () {
+      var choice = window.prompt("請輸入確認理由：", "使用者授權創作補全。");
       if (choice === null || choice.trim() === "") { container.textContent = "已取消確認。"; return; }
       postJson("/workspace/coverage/resolution/confirm", {
         assessment_id: assessment.id,
