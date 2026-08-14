@@ -394,8 +394,8 @@ describe("Audit 6 batch 6: provenance preview, confirmation and dashboard (runti
       ...current,
       artifacts: current.artifacts.map((item) => (item.kind === "character" ? { ...item, content_hash: contentHash("changed-v3") } : item)),
     }));
-    await expect(runtime.publishProvenanceConfirm({ fingerprint: preview.fingerprint!, operation_id: "op-confirm-1" }, { actor: "publisher" }))
-      .rejects.toMatchObject({ code: "PROVENANCE_CONFIRMATION_STALE" });
+    await expect(runtime.publishProvenanceConfirm({ fingerprint: "different-payload-fingerprint", operation_id: "op-confirm-1" }, { actor: "publisher" }))
+      .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     const after = await repository.read();
     expect(after.publishes).toHaveLength(1);
   });

@@ -364,3 +364,31 @@ export function buildProvenanceCompositionSummary(state: ProjectState, coverageS
     ...(imageIdentity === undefined ? {} : { image_identity: imageIdentity }),
   };
 }
+
+export interface CanonicalProvenancePublishPayload {
+  fingerprint: string;
+  mode_selection?: string;
+}
+
+export function canonicalProvenancePublishMatches(
+  command: unknown,
+  expected: CanonicalProvenancePublishPayload,
+): boolean {
+  if (command === null || typeof command !== "object" || Array.isArray(command)) {
+    return false;
+  }
+  const cmd = command as { type?: unknown; payload?: unknown };
+  if (cmd.type !== "provenance_publish") {
+    return false;
+  }
+  if (cmd.payload === null || typeof cmd.payload !== "object" || Array.isArray(cmd.payload)) {
+    return false;
+  }
+  const payload = cmd.payload as { fingerprint?: unknown; mode_selection?: unknown };
+  if (typeof payload.fingerprint !== "string" || payload.fingerprint !== expected.fingerprint) {
+    return false;
+  }
+  const expectedMode = expected.mode_selection ?? undefined;
+  const actualMode = typeof payload.mode_selection === "string" ? payload.mode_selection : undefined;
+  return expectedMode === actualMode;
+}

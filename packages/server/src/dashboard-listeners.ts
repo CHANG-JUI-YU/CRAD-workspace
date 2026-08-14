@@ -87,22 +87,91 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
           return payload;
         });
       });
-      byId("confirm-publish").addEventListener("click", function () {
-        void runTask("確認並發布", async function () {
-          var fingerprint = currentProvenanceConfirmation !== null && currentProvenanceConfirmation !== undefined ? currentProvenanceConfirmation.fingerprint : "";
-          var modeSelect = byId("readiness-mode");
-          var modeValue = modeSelect instanceof HTMLSelectElement ? modeSelect.value : "";
-          var body = { fingerprint: fingerprint };
-          if (modeValue !== "") body.mode_selection = modeValue;
-          var payload = await postJson("/workspace/publish/provenance/confirm", body);
-          var messageEl = byId("provenance-confirm-message");
-          if (payload && payload.status === "completed") {
-            messageEl.textContent = "發布完成；Publish Record 已保存同一份確認的 provenance refs。";
-          } else {
-            messageEl.textContent = "發布未完成：" + ((payload && payload.summary) || (payload && payload.status) || "請重新準備確認。");
+      var modeSelectEl = byId("readiness-mode");
+      if (modeSelectEl) {
+        modeSelectEl.addEventListener("change", function () {
+          currentProvenanceConfirmation = null;
+          var summaryTarget = byId("provenance-summary");
+          if (summaryTarget) summaryTarget.textContent = "";
+          var confirmButton = byId("confirm-publish");
+          if (confirmButton) {
+            confirmButton.disabled = true;
+            confirmButton.textContent = "確認並發布";
           }
-          await Promise.allSettled([loadDashboardData(), loadProvenanceHistory()]);
-          return payload;
+          var messageEl = byId("provenance-confirm-message");
+          if (messageEl) messageEl.textContent = "發布模式已變更；請重新點擊「準備發布確認」以產生新的確認資訊。";
+        });
+      }
+
+      byId("confirm-publish").addEventListener("click", function () {
+        if (currentProvenanceConfirmation === null || currentProvenanceConfirmation === undefined) {
+          setNotice("warning", "請先點擊「準備發布確認」以載入發布資訊。");
+          return;
+        }
+        if (currentProvenanceConfirmation.in_flight === true) {
+          return;
+        }
+        var confirmButton = byId("confirm-publish");
+        var messageEl = byId("provenance-confirm-message");
+        var confirmation = currentProvenanceConfirmation;
+
+        var body = {
+          fingerprint: confirmation.fingerprint,
+          idempotency_key: confirmation.idempotency_key
+        };
+        if (confirmation.mode_selection !== undefined && confirmation.mode_selection !== "") {
+          body.mode_selection = confirmation.mode_selection;
+        }
+
+        confirmation.in_flight = true;
+        if (confirmButton) {
+          confirmButton.disabled = true;
+          confirmButton.textContent = "發布中...";
+        }
+
+        void runTask("確認並發布", async function () {
+          try {
+            var payload = await postJson("/workspace/publish/provenance/confirm", body);
+            confirmation.result = payload;
+            if (payload && payload.status === "completed") {
+              confirmation.completed = true;
+              var parts = [];
+              if (payload.idempotent_replay === true) {
+                parts.push("此發布先前已完成，本次為安全重試，未建立重複發布。");
+              } else {
+                parts.push("發布完成；Publish Record 已保存同一份確認的 provenance refs。");
+              }
+              if (payload.build_id) parts.push("Build ID: " + payload.build_id);
+              if (payload.publish_id) parts.push("Publish ID: " + payload.publish_id);
+              if (payload.published_at) parts.push("發布時間: " + payload.published_at);
+              messageEl.textContent = parts.join(" · ");
+              if (confirmButton) confirmButton.textContent = payload.idempotent_replay === true ? "已完成（可安全重試）" : "發布完成";
+            } else if (payload && (payload.status === "running" || payload.status === "resolving" || payload.status === "created")) {
+              messageEl.textContent = "發布操作正在背景進行中（狀態：" + payload.status + "）…";
+              if (confirmButton) confirmButton.textContent = "處理中...";
+            } else {
+              messageEl.textContent = "發布未完成：" + ((payload && payload.summary) || (payload && payload.status) || "請重新準備確認。");
+              if (confirmButton) confirmButton.textContent = "確認並發布";
+            }
+            await Promise.allSettled([loadDashboardData(), loadProvenanceHistory()]);
+            return payload;
+          } catch (error) {
+            var errorMsg = (error && error.message) ? error.message : String(error);
+            if (errorMsg.indexOf("IDEMPOTENCY_CONFLICT") !== -1 || (error && error.code === "IDEMPOTENCY_CONFLICT")) {
+              messageEl.textContent = "衝突錯誤：此確認識別已用於不同的發布內容，請重新準備發布確認。";
+            } else {
+              messageEl.textContent = "發布請求失敗：" + errorMsg + "（可再次點擊重試）";
+            }
+            throw error;
+          } finally {
+            confirmation.in_flight = false;
+            if (confirmButton && !confirmation.completed) {
+              confirmButton.disabled = confirmation.fingerprint === "";
+              if (confirmButton.textContent === "發布中...") confirmButton.textContent = "確認並發布";
+            } else if (confirmButton && confirmation.completed) {
+              confirmButton.disabled = false;
+            }
+          }
         });
       });
       byId("check-build").addEventListener("click", function () {

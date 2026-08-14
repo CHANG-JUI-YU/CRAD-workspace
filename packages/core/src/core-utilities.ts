@@ -75,6 +75,10 @@ export function executionContextFromOperation(operation: OperationRecord, input:
 
 export interface RequestResult {
   operation_id?: string;
+  build_id?: string;
+  publish_id?: string;
+  published_at?: string;
+  idempotent_replay?: boolean;
   status: import("./project-state.js").OperationStatus | "completed";
   summary: string;
   completed: string[];

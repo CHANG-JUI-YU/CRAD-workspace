@@ -210,6 +210,28 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
       var lastDiagnosticHighlight = null;
       var currentProvenanceConfirmation = null;
 
+      function generateIdempotencyKey() {
+        if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+          return crypto.randomUUID();
+        }
+        var s4 = function () { return Math.floor((1 + Math.random()) * 0x10000).toString(16).substring(1); };
+        return s4() + s4() + "-" + s4() + "-4" + s4().substr(0, 3) + "-" + s4() + "-" + s4() + s4() + s4();
+      }
+
+      function getOrCreateProvenanceIdempotencyKey(projectId, fingerprint, mode) {
+        var storageKey = "crad_publish_idempotency_" + (projectId || "default") + "_" + fingerprint + "_" + (mode || "default");
+        try {
+          if (typeof sessionStorage !== "undefined") {
+            var existing = sessionStorage.getItem(storageKey);
+            if (existing && existing.length > 0) return existing;
+            var newKey = generateIdempotencyKey();
+            sessionStorage.setItem(storageKey, newKey);
+            return newKey;
+          }
+        } catch (e) {}
+        return generateIdempotencyKey();
+      }
+
       function clearDiagnosticHighlight() {
         if (lastDiagnosticHighlight !== null && lastDiagnosticHighlight !== undefined) {
           lastDiagnosticHighlight.classList.remove("diagnostic-highlight");
@@ -436,14 +458,28 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         if (!isRecord(preview)) {
           byId("provenance-confirm-message").textContent = "無法取得 provenance 資訊。";
           if (confirmButton) confirmButton.disabled = true;
+          currentProvenanceConfirmation = null;
           return;
         }
         if (preview.available !== true || !isRecord(preview.composition)) {
           byId("provenance-confirm-message").textContent = "尚未準備完成：" + (firstString(preview, ["reason"]) || "不可用") + "。請先完成 Fact Review 與 formal coverage assessment 後再試。";
           if (confirmButton) confirmButton.disabled = true;
+          currentProvenanceConfirmation = null;
           return;
         }
-        currentProvenanceConfirmation = { fingerprint: firstString(preview, ["fingerprint"]), mode_selection: firstString(preview, ["mode_selection"]) || undefined };
+        var fingerprint = firstString(preview, ["fingerprint"]);
+        var modeSelection = firstString(preview, ["mode_selection"]) || undefined;
+        var projectId = (state && state.status && state.status.project_id) || "";
+        var idempotencyKey = getOrCreateProvenanceIdempotencyKey(projectId, fingerprint, modeSelection);
+
+        currentProvenanceConfirmation = {
+          fingerprint: fingerprint,
+          mode_selection: modeSelection,
+          idempotency_key: idempotencyKey,
+          in_flight: false,
+          completed: false,
+          result: null
+        };
         var composition = preview.composition;
         var box = document.createElement("div");
         box.className = "workflow-stage";

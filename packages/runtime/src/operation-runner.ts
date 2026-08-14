@@ -81,6 +81,42 @@ function responseFromOperation(operation: OperationRecord): RequestResult {
   };
 }
 
+function reconstructPublishOutcome(
+  state: ProjectState,
+  operation: OperationRecord,
+  idempotentReplay = false,
+): RequestResult {
+  const publish = state.publishes.find((p) => p.operation_id === operation.id);
+  const build = state.builds.find((b) => b.operation_id === operation.id);
+
+  const progressCompleted = operation.progress.filter((item) => item.status === "completed").map((item) => item.item_id);
+  const completedIds = Array.from(new Set([
+    ...progressCompleted,
+    ...(build?.id === undefined ? [] : [build.id]),
+    ...(publish?.id === undefined ? [] : [publish.id]),
+  ]));
+
+  const blocked = operation.status === "blocked"
+    ? [operation.id]
+    : operation.progress.filter((item) => item.status !== "completed").map((item) => item.item_id);
+
+  return {
+    operation_id: operation.id,
+    status: operation.status,
+    summary: operation.result_summary ?? (operation.status === "completed" ? "發布已完成。" : "操作處理中。"),
+    completed: completedIds,
+    blocked,
+    ...(build?.id === undefined ? {} : { build_id: build.id }),
+    ...(publish?.id === undefined ? {} : { publish_id: publish.id }),
+    ...(publish?.created_at === undefined ? {} : { published_at: publish.created_at }),
+    ...(operation.question === undefined ? {} : { question: operation.question }),
+    ...(operation.execution_snapshot?.execution_agent_id === undefined ? {} : { agent_id: operation.execution_snapshot.execution_agent_id }),
+    ...(operation.execution_snapshot?.execution_agent_role === undefined ? {} : { agent_role: operation.execution_snapshot.execution_agent_role }),
+    idempotent_replay: idempotentReplay,
+    downstream_invalidation: emptyDownstreamInvalidationReport(),
+  };
+}
+
 export {
   now,
   OPERATION_LEASE_MS,
@@ -92,5 +128,6 @@ export {
   parsedModeModules,
   availableCardModesRuntime,
   responseFromOperation,
+  reconstructPublishOutcome,
   type BuildModeSelection,
 };

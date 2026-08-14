@@ -233,7 +233,7 @@ import { dashboardSnapshot as dashboardSnapshotQuery, publishPreview as publishP
 import { dashboardArtifacts as dashboardArtifactsQuery, dashboardArtifact as dashboardArtifactQuery, dashboardArtifactHistory as dashboardArtifactHistoryQuery, dashboardAudit as dashboardAuditQuery, dashboardBuilds as dashboardBuildsQuery, dashboardCandidates as dashboardCandidatesQuery, dashboardFacts as dashboardFactsQuery, dashboardIssues as dashboardIssuesQuery, dashboardOperation as dashboardOperationQuery, dashboardOperations as dashboardOperationsQuery, dashboardPublishes as dashboardPublishesQuery, dashboardReviewRun as dashboardReviewRunQuery, dashboardReviewRuns as dashboardReviewRunsQuery, dashboardReviews as dashboardReviewsQuery, dashboardSource as dashboardSourceQuery, dashboardSources as dashboardSourcesQuery, dashboardSummary as dashboardSummaryQuery, dashboardCandidate as dashboardCandidateQuery } from "./dashboard-query.js";
 import { applyFactReviewBatch as applyFactReviewBatchQuery, factReviewContext as factReviewContextQuery, reextract as reextractQuery, resolveFactConflict as resolveFactConflictQuery, startFactReviewRun as startFactReviewRunQuery } from "./fact-review-application.js";
 import { buildBlueprintPrecheck, collaborationMode, createBlueprintArtifact, directionForSubject, intakeKeyForConfirmation, interviewCharacterSubjects, interviewContext as interviewContextQuery, isBarePrecheckConfirmation, isBlueprintConfirmation, isBlueprintRevisionRequest, latestBlueprintSnapshot, mergeExpansionIntoBlueprint, mergePatchBlueprint, mergeWorldIntoBlueprint, nonEmptyInterviewValue, nonEmptyString, objectValue, PALETTE_MODULE_ORDER, parsePrecheckConfirmQuestionId, precheckConfirmQuestion, precheckSubjectLabel, sourceAdaptationIntentFromValues, sourceFactsReady, startInterview as startInterviewQuery, worldConfig, isSourceAdaptationProject, relationshipConfig, authoringModeForSubject, canonPolicyFromValues, ZHUJI_MODULE_ORDER } from "./interview-application.js";
-import { availableCardModesRuntime, blueprintRosterIds, executionLeaseGuard, latestByKey, now, OPERATION_LEASE_MS, parsedModeModules, parseBuildModeSelection, responseFromOperation, stripLease } from "./operation-runner.js";
+import { availableCardModesRuntime, blueprintRosterIds, executionLeaseGuard, latestByKey, now, OPERATION_LEASE_MS, parsedModeModules, parseBuildModeSelection, reconstructPublishOutcome, responseFromOperation, stripLease } from "./operation-runner.js";
 import { defaultAgentForTemplate, nextFactReviewer, pluginIdOf, proposalCapability, resolveNaturalReviewTarget, reviewCriticForArtifactKind } from "./operation-recovery.js";
 import { createAdaptationDecision as createAdaptationDecisionQuery, executionContextFor as executionContextForQuery, resolveExecutionContext as resolveExecutionContextQuery, selectSourceCandidates as selectSourceCandidatesQuery, sourceCandidates as sourceCandidatesQuery } from "./source-application.js";
 export * from "./runtime-views.js";
@@ -1715,7 +1715,11 @@ export class WorkspaceRuntime {
   private async replayProvenancePublish(operation: OperationRecord, payload: ProvenancePublishCommandPayload, _context: WorkspaceContext, execution: ExecutionContext): Promise<RequestResult> {
     const agent = execution.executionAgent.id;
     const state = await this.repository.read();
-    if (this.hasAuditMarker(operation.id, "publish.committed", state) || this.hasAuditMarker(operation.id, "build.previewed", state)) return responseFromOperation(await this.completeReplayedOperation(operation, execution));
+    if (this.hasAuditMarker(operation.id, "publish.committed", state) || this.hasAuditMarker(operation.id, "build.previewed", state)) {
+      const completedOp = await this.completeReplayedOperation(operation, execution);
+      const replayedState = await this.repository.read();
+      return reconstructPublishOutcome(replayedState, completedOp, true);
+    }
     const buildOptions = {
       ...(payload.mode_selection === undefined ? {} : { mode_selection: payload.mode_selection }),
       expected_provenance_fingerprint: payload.fingerprint,
@@ -1723,7 +1727,24 @@ export class WorkspaceRuntime {
     const result = await this.build.run(operation.id, operation.request, execution, buildOptions);
     const latest = await this.repository.read();
     const finalOperation = latest.operations.find((item) => item.id === operation.id);
-    return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.build_id === undefined ? [] : [result.build_id], blocked: result.status === "blocked" ? [operation.id] : [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
+    const publishRecord = latest.publishes.find((p) => p.operation_id === operation.id);
+    const completedIds = Array.from(new Set([
+      ...(result.build_id === undefined ? [] : [result.build_id]),
+      ...(publishRecord?.id === undefined ? [] : [publishRecord.id]),
+    ]));
+    return {
+      operation_id: operation.id,
+      status: result.status,
+      summary: result.summary,
+      completed: completedIds,
+      blocked: result.status === "blocked" ? [operation.id] : [],
+      ...(result.build_id === undefined ? {} : { build_id: result.build_id }),
+      ...(publishRecord?.id === undefined ? {} : { publish_id: publishRecord.id }),
+      ...(publishRecord?.created_at === undefined ? {} : { published_at: publishRecord.created_at }),
+      ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+      ...(agent === undefined ? {} : { agent_id: agent }),
+      idempotent_replay: false,
+    };
   }
 
   /* c8 ignore stop */
@@ -2645,8 +2666,72 @@ export class WorkspaceRuntime {
     };
   }
 
+  private async handleExistingProvenancePublish(
+    state: ProjectState,
+    existing: OperationRecord,
+    input: PublishProvenanceConfirmInput,
+    context: WorkspaceContext,
+  ): Promise<RequestResult & { downstream_invalidation: DownstreamInvalidationReport }> {
+    if (existing.command?.type !== "provenance_publish") {
+      throw new CoreError("IDEMPOTENCY_CONFLICT", `操作 "${existing.id}" 不是 provenance_publish 操作。`, true);
+    }
+    const payload = existing.command.payload as { fingerprint?: string; mode_selection?: string } | undefined;
+    if (payload?.fingerprint !== input.fingerprint) {
+      throw new CoreError("IDEMPOTENCY_CONFLICT", `此確認識別（${input.idempotency_key ?? input.operation_id ?? existing.id}）已被用於不同的發布 fingerprint。`, true);
+    }
+    if (input.mode_selection !== undefined && payload?.mode_selection !== input.mode_selection) {
+      throw new CoreError("IDEMPOTENCY_CONFLICT", `此確認識別（${input.idempotency_key ?? input.operation_id ?? existing.id}）已被用於不同的發布模式（原模式：${payload?.mode_selection ?? "預設"}，本次請求：${input.mode_selection}）。`, true);
+    }
+
+    if (existing.status === "completed") {
+      try {
+        await this.recordAudit(
+          existing.id,
+          "request.idempotent_replay",
+          { idempotency_key: input.idempotency_key ?? null, replayed: true },
+          context.actor,
+        );
+      } catch {}
+      const latestState = await this.repository.read();
+      const outcome = reconstructPublishOutcome(latestState, existing, true);
+      return {
+        ...outcome,
+        downstream_invalidation: emptyDownstreamInvalidationReport(),
+      };
+    }
+
+    if (existing.status === "running" || existing.status === "resolving" || existing.status === "created" || existing.status === "partial") {
+      const outcome = reconstructPublishOutcome(state, existing, true);
+      return {
+        ...outcome,
+        summary: existing.result_summary ?? "發布操作正在處理中。",
+        downstream_invalidation: emptyDownstreamInvalidationReport(),
+      };
+    }
+
+    // Terminal: blocked / failed / cancelled
+    const outcome = reconstructPublishOutcome(state, existing, true);
+    return {
+      ...outcome,
+      downstream_invalidation: emptyDownstreamInvalidationReport(),
+    };
+  }
+
   async publishProvenanceConfirm(input: PublishProvenanceConfirmInput, context: WorkspaceContext): Promise<RequestResult & { downstream_invalidation: DownstreamInvalidationReport }> {
     const before = await this.repository.read();
+
+    const opById = input.operation_id !== undefined ? before.operations.find((item) => item.id === input.operation_id) : undefined;
+    const opByKey = input.idempotency_key !== undefined ? before.operations.find((item) => item.idempotency_key === input.idempotency_key) : undefined;
+
+    if (opById !== undefined && opByKey !== undefined && opById.id !== opByKey.id) {
+      throw new CoreError("IDEMPOTENCY_CONFLICT", `operation_id "${input.operation_id}" 與 idempotency_key "${input.idempotency_key}" 指向不同的既有操作。`, true);
+    }
+
+    const existing = opById ?? opByKey;
+    if (existing !== undefined) {
+      return await this.handleExistingProvenancePublish(before, existing, input, context);
+    }
+
     const modeResolution = resolveBuildModeSelection(before, input.mode_selection);
     if (modeResolution.status === "invalid") {
       throw new CoreError("BUILD_MODE_INVALID", modeResolution.question ?? "Invalid build mode selection.", true);
@@ -2662,14 +2747,8 @@ export class WorkspaceRuntime {
     if (preview.fingerprint !== input.fingerprint) {
       throw new CoreError("PROVENANCE_CONFIRMATION_STALE", "Provenance composition changed after preview; please re-preview before confirming.", true);
     }
-    const existing = before.operations.find((item) =>
-      (input.operation_id !== undefined && item.id === input.operation_id)
-      || (input.idempotency_key !== undefined && item.idempotency_key === input.idempotency_key));
-    if (existing !== undefined) {
-      await this.recordAudit(existing.id, "request.idempotent_replay", { idempotency_key: input.idempotency_key ?? null, replayed: true }, context.actor);
-      return { ...responseFromOperation(existing), downstream_invalidation: emptyDownstreamInvalidationReport() };
-    }
-    const operationId = internalId("operation");
+
+    const operationId = input.operation_id ?? internalId("operation");
     const syncLease: ExecutionLeaseContext = { owner: internalId("sync"), token: internalId("lease"), generation: 1 };
     const operation: OperationRecord = {
       id: operationId,
@@ -2703,19 +2782,44 @@ export class WorkspaceRuntime {
         created_at: now(),
       },
     };
-    const created = await this.repository.commit(before.revision, (current) => ({
-      ...current,
-      operations: [...current.operations, operation],
-      audit: [...current.audit, {
-        id: internalId("audit"),
-        operation_id: operation.id,
-        event: "operation.created",
-        actor: context.actor,
-        occurred_at: now(),
-        project_revision: current.revision + 1,
-        details: { kind: "build", provenance_confirmation: true, mode_selection: effectiveMode ?? null },
-      }],
-    }));
+
+    let created: ProjectState;
+    let currentState = before;
+    while (true) {
+      const raceById = input.operation_id !== undefined ? currentState.operations.find((item) => item.id === input.operation_id) : undefined;
+      const raceByKey = input.idempotency_key !== undefined ? currentState.operations.find((item) => item.idempotency_key === input.idempotency_key) : undefined;
+      if (raceById !== undefined && raceByKey !== undefined && raceById.id !== raceByKey.id) {
+        throw new CoreError("IDEMPOTENCY_CONFLICT", `operation_id "${input.operation_id}" 與 idempotency_key "${input.idempotency_key}" 指向不同的既有操作。`, true);
+      }
+      const raceOp = raceById ?? raceByKey;
+      if (raceOp !== undefined) {
+        return await this.handleExistingProvenancePublish(currentState, raceOp, input, context);
+      }
+
+      try {
+        created = await this.repository.commit(currentState.revision, (current) => ({
+          ...current,
+          operations: [...current.operations, operation],
+          audit: [...current.audit, {
+            id: internalId("audit"),
+            operation_id: operation.id,
+            event: "operation.created",
+            actor: context.actor,
+            occurred_at: now(),
+            project_revision: current.revision + 1,
+            details: { kind: "build", provenance_confirmation: true, mode_selection: effectiveMode ?? null },
+          }],
+        }));
+        break;
+      } catch (error) {
+        if (error instanceof CoreError && error.code === "REVISION_CONFLICT") {
+          currentState = await this.repository.read();
+          continue;
+        }
+        throw error;
+      }
+    }
+
     const execution = this.executionContextFor(operation, context, { id: "build-provenance", role: "builder" }, { lease: syncLease });
     try {
       await this.repository.commit(created.revision, (current) => {
@@ -2731,13 +2835,23 @@ export class WorkspaceRuntime {
       });
       const latest = await this.repository.read();
       const finalOperation = latest.operations.find((item) => item.id === operation.id);
+      const publishRecord = latest.publishes.find((p) => p.operation_id === operation.id);
+      const buildRecord = latest.builds.find((b) => b.operation_id === operation.id);
+      const completedIds = Array.from(new Set([
+        ...(result.build_id === undefined ? [] : [result.build_id]),
+        ...(publishRecord?.id === undefined ? [] : [publishRecord.id]),
+      ]));
       const base: RequestResult = {
         operation_id: operation.id,
         status: result.status,
         summary: result.summary,
-        completed: result.build_id === undefined ? [] : [result.build_id],
+        completed: completedIds,
         blocked: result.status === "blocked" ? [operation.id] : [],
+        ...(result.build_id === undefined ? {} : { build_id: result.build_id }),
+        ...(publishRecord?.id === undefined ? {} : { publish_id: publishRecord.id }),
+        ...(publishRecord?.created_at === undefined ? {} : { published_at: publishRecord.created_at }),
         ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+        idempotent_replay: false,
       };
       return this.attachDownstreamInvalidation(base, before);
     } finally {
