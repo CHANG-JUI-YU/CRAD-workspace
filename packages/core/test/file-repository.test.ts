@@ -153,13 +153,13 @@ describe("file project repository", () => {
 
     await repository.commit(0, (state) => ({ ...state, artifacts: [rina, other, rinaZhuji, rinaPalette, rinaWardrobePrevious, rinaWardrobe, otherZhuji] }));
 
-    await expect(readFile(path.join(root, "demo", "characters", `rina-${displayName}`, "character.json"), "utf8")).resolves.toContain('"id":"rina"');
-    await expect(readFile(path.join(root, "demo", "characters", `rina-${displayName}`, "zhuji", "appearance.json"), "utf8")).resolves.toContain('"character_id":"rina"');
-    await expect(readFile(path.join(root, "demo", "characters", `rina-${displayName}`, "palette", "basic_information.json"), "utf8")).resolves.toContain('"character_id":"rina"');
+    await expect(readFile(path.join(root, "demo", "characters", `rina-${displayName}`, "character.json"), "utf8")).resolves.toContain('\n    "id": "rina",\n');
+    await expect(readFile(path.join(root, "demo", "characters", `rina-${displayName}`, "zhuji", "appearance.json"), "utf8")).resolves.toContain('\n  "character_id": "rina",\n');
+    await expect(readFile(path.join(root, "demo", "characters", `rina-${displayName}`, "palette", "basic_information.json"), "utf8")).resolves.toContain('\n  "character_id": "rina",\n');
     await expect(readFile(path.join(root, "demo", "characters", `rina-${displayName}`, "wardrobe", "wardrobe.md"), "utf8")).resolves.toContain("白色 T 恤");
     await expect(readFile(path.join(root, "demo", "characters", `rina-${displayName}`, "wardrobe", "revisions", `${rinaWardrobePrevious.revision}.md`), "utf8")).resolves.toContain("灰色 T 恤");
-    await expect(readFile(path.join(root, "demo", "characters", `other-${displayName}`, "character.json"), "utf8")).resolves.toContain('"id":"other"');
-    await expect(readFile(path.join(root, "demo", "characters", `other-${displayName}`, "zhuji", "appearance.json"), "utf8")).resolves.toContain('"character_id":"other"');
+    await expect(readFile(path.join(root, "demo", "characters", `other-${displayName}`, "character.json"), "utf8")).resolves.toContain('\n    "id": "other",\n');
+    await expect(readFile(path.join(root, "demo", "characters", `other-${displayName}`, "zhuji", "appearance.json"), "utf8")).resolves.toContain('\n  "character_id": "other",\n');
   });
 
   it("normalizes character ids and display names in canonical folders", async () => {
@@ -174,8 +174,8 @@ describe("file project repository", () => {
 
     await repository.commit(0, (state) => ({ ...state, artifacts: [character, zhuji] }));
 
-    await expect(readFile(path.join(root, "demo", "characters", "rina-id-Rina---Prime", "character.json"), "utf8")).resolves.toContain('"id":"rina id"');
-    await expect(readFile(path.join(root, "demo", "characters", "rina-id-Rina---Prime", "zhuji", "appearance.json"), "utf8")).resolves.toContain('"character_id":"rina id"');
+    await expect(readFile(path.join(root, "demo", "characters", "rina-id-Rina---Prime", "character.json"), "utf8")).resolves.toContain('\n    "id": "rina id",\n');
+    await expect(readFile(path.join(root, "demo", "characters", "rina-id-Rina---Prime", "zhuji", "appearance.json"), "utf8")).resolves.toContain('\n  "character_id": "rina id",\n');
   });
 
   it("rejects a corrupted file during the commit read path", async () => {

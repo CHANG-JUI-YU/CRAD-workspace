@@ -53,6 +53,28 @@ export function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function withTrailingNewline(content: string): string {
+  return content.endsWith("\n") ? content : `${content}\n`;
+}
+
+/**
+ * Keep canonical artifact content compact for hashing, while making the
+ * project-facing JSON files pleasant to inspect and edit by hand.
+ */
+export function humanReadableJsonFile(content: string): string {
+  try {
+    return `${JSON.stringify(JSON.parse(content), null, 2)}\n`;
+  } catch {
+    return withTrailingNewline(content);
+  }
+}
+
+export function materializedArtifactContent(artifact: Pick<ArtifactRecord, "content" | "media_type">): string {
+  return artifact.media_type === "application/json"
+    ? humanReadableJsonFile(artifact.content)
+    : withTrailingNewline(artifact.content);
+}
+
 export function characterFolderName(characterId: string, displayName?: string): string {
   const safeId = safeSegment(characterId);
   return displayName === undefined ? safeId : `${safeId}-${safeSegment(displayName)}`;
@@ -299,12 +321,12 @@ async function publishMaterializedFiles(
   if (latest === undefined || paths === undefined) return [];
   const files: RepositoryFile[] = [];
   if (latest.content !== undefined && paths.json !== undefined) {
-    files.push({ path: paths.json, content: latest.content.endsWith("\n") ? latest.content : `${latest.content}\n` });
+    files.push({ path: paths.json, content: humanReadableJsonFile(latest.content) });
   } else if (latest.content_ref !== undefined && paths.json !== undefined && readBlob !== undefined) {
     const blob = await readBlob(latest.content_ref.hash);
     if (blob !== undefined) {
       const decoded = new TextDecoder("utf-8", { fatal: false }).decode(blob);
-      files.push({ path: paths.json, content: decoded.endsWith("\n") ? decoded : `${decoded}\n` });
+      files.push({ path: paths.json, content: humanReadableJsonFile(decoded) });
     }
   }
   if (latest.png_base64 !== undefined && paths.png !== undefined) {
@@ -337,7 +359,7 @@ export async function incrementalMaterializationWriteSet(
       currentPaths.add(target);
       const previousArtifact = previousFiles.get(target);
       if (previousArtifact?.id === artifact.id && previousArtifact.revision === artifact.revision) continue;
-      files.push({ path: target, content: artifact.content.endsWith("\n") ? artifact.content : `${artifact.content}\n` });
+      files.push({ path: target, content: materializedArtifactContent(artifact) });
     }
   }
   const previousPublish = previous.publishes.at(-1);

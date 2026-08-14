@@ -47,9 +47,11 @@ import {
   assertTransactionTargetPath,
   characterFolderById,
   characterFolderName,
+  humanReadableJsonFile,
   incrementalMaterializationWriteSet,
   isPublicArtifactKind,
   latestStateTimestamp,
+  materializedArtifactContent,
   moveToBackup,
   nonEmptyString,
   normalizeRepositoryPath,
@@ -950,15 +952,14 @@ export class FileProjectRepository implements ProjectRepository {
         continue;
       }
       const target = path.relative(this.projectDirectory, artifactFilePath(this.projectDirectory, artifact, characterFolders, worldArtifactCounts));
-      files.push({ path: target, content: artifact.content.endsWith("\n") ? artifact.content : `${artifact.content}\n` });
+      files.push({ path: target, content: materializedArtifactContent(artifact) });
     }
     const latestPublish = state.publishes.at(-1);
     if (latestPublish !== undefined) {
       if (latestPublish.content !== undefined) {
-        const publishedContent = latestPublish.content.endsWith("\n") ? latestPublish.content : `${latestPublish.content}\n`;
         files.push({
           path: latestPublish.export_json_path ?? publishedCardExportPath(state.project_name, state.project_id, state.artifacts),
-          content: publishedContent,
+          content: humanReadableJsonFile(latestPublish.content),
         });
       } else if (latestPublish.content_ref !== undefined) {
         const blob = await this.blobs.get(latestPublish.content_ref.hash);
@@ -966,7 +967,7 @@ export class FileProjectRepository implements ProjectRepository {
           const decoded = new TextDecoder("utf-8", { fatal: false }).decode(blob);
           files.push({
             path: latestPublish.export_json_path ?? publishedCardExportPath(state.project_name, state.project_id, state.artifacts),
-            content: decoded.endsWith("\n") ? decoded : `${decoded}\n`,
+            content: humanReadableJsonFile(decoded),
           });
         }
       }
