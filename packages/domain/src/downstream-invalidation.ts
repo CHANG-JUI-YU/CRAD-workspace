@@ -4,6 +4,8 @@ import {
   computeProjectProjection,
   contentHash,
   coverageFactProjectionRevision,
+  coverageResolutionProjectionRevision,
+  EMPTY_COVERAGE_RESOLUTION_PROJECTION_REVISION,
   type ArtifactRecord,
   type BlueprintPrecheckRecord,
   type BuildPlan,
@@ -303,6 +305,16 @@ export function coverageAssessmentStaleComponents(state: ProjectState, assessmen
   const currentSources = state.sources.map((source) => ({ source_id: source.id, revision: source.revision }));
   if (!sameSourceRevisions(snapshot.source_revisions, currentSources)) components.push("sources");
   if (snapshot.fact_projection_revision !== coverageFactProjectionRevision(state)) components.push("facts");
+
+  const currentResolutionRev = coverageResolutionProjectionRevision(state);
+  if (snapshot.coverage_resolution_projection_revision === undefined) {
+    if (currentResolutionRev !== EMPTY_COVERAGE_RESOLUTION_PROJECTION_REVISION) {
+      components.push("resolutions");
+    }
+  } else if (snapshot.coverage_resolution_projection_revision !== currentResolutionRev) {
+    components.push("resolutions");
+  }
+
   return components;
 }
 

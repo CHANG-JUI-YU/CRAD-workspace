@@ -654,6 +654,19 @@ function renderCellActionButton(cell, actionOpt) {
       previewCoverageResolution(cell, "creative_completion");
     } else if (actionOpt.action === "reassess") {
       switchPanel("coverage");
+    } else if (actionOpt.action === "view_research_task") {
+      var targetTaskId = actionOpt.target_task_id || (actionOpt.prerequisite ? actionOpt.prerequisite.target_id : null);
+      if (actionOpt.prerequisite && actionOpt.prerequisite.target_panel) {
+        switchPanel(actionOpt.prerequisite.target_panel);
+      }
+      if (targetTaskId) {
+        var targetEl = byId("research-task-" + targetTaskId) || document.querySelector('[data-task-id="' + targetTaskId + '"]');
+        if (targetEl) {
+          targetEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          targetEl.style.outline = "2px solid #0066cc";
+          setTimeout(function () { targetEl.style.outline = ""; }, 2000);
+        }
+      }
     } else if (actionOpt.action === "view_details") {
       if (actionOpt.prerequisite && actionOpt.prerequisite.target_panel) {
         switchPanel(actionOpt.prerequisite.target_panel);
@@ -848,6 +861,8 @@ function renderCoverageCenter(payload) {
 function researchTaskElement(task) {
   var row = document.createElement("div");
   row.className = "workflow-stage";
+  row.id = "research-task-" + task.id;
+  row.setAttribute("data-task-id", task.id);
   var title = document.createElement("div");
   title.className = "workflow-stage-title";
   var badge = document.createElement("span");

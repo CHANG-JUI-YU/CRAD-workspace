@@ -9,8 +9,10 @@ import { coverageAssessmentStaleComponents } from "./downstream-invalidation.js"
 import {
   deriveAssessmentWideResearchProjection,
   deriveCoverageAssessmentEligibility,
+  deriveRequirementResearchEligibility,
   type AssessmentWideResearchProjection,
   type CoverageAssessmentEligibility,
+  type CoverageRequirementResearchEligibility,
 } from "./coverage-eligibility.js";
 
 export type CoverageCenterCellStatus = "missing" | "candidate_signal" | "source_covered" | "supplement" | "creative_completion" | "conflict" | "stale";
@@ -74,6 +76,8 @@ export interface CoverageCenterCell {
   history_resolutions: CoverageCenterResolutionRef[];
   reason?: string;
   missing_prerequisite?: string;
+  research_eligibility?: CoverageRequirementResearchEligibility;
+  existing_in_flight_task_ids?: string[];
   actions: string[];
   typed_actions: CoverageCellActionOption[];
 }
@@ -155,6 +159,7 @@ export function deriveCoverageCellActions(
   eligibility: CoverageAssessmentEligibility,
   exhausted: boolean,
   scope: { character_id?: string; requirement_id: string; assessment_id?: string; assessment_revision?: string },
+  inFlightTaskIds: string[] = [],
 ): CoverageCellActionOption[] {
   const options: CoverageCellActionOption[] = [];
 
@@ -244,6 +249,21 @@ export function deriveCoverageCellActions(
     return options;
   }
 
+  if (inFlightTaskIds.length > 0) {
+    const primaryTaskId = inFlightTaskIds[0]!;
+    options.push({
+      action: "view_research_task",
+      label: "查看進行中研究",
+      enabled: true,
+      target_task_id: primaryTaskId,
+      prerequisite: { action: "view_task", target_panel: "research-monitor", target_id: primaryTaskId },
+      scope,
+    });
+    options.push({ action: "supplement", label: "提供補充資料", enabled: true, scope });
+    options.push({ action: "creative_completion", label: "授權創作補全", enabled: true, scope });
+    return options;
+  }
+
   if (exhausted) {
     options.push({ action: "revise_query", label: "修改查詢", enabled: true, scope });
     options.push({ action: "revise_constraints", label: "修改來源限制", enabled: true, scope });
@@ -321,6 +341,9 @@ export function deriveCoverageCenterMatrix(state: ProjectState): CoverageCenterM
       }
     }
 
+    const inFlightTasks = currentResearchTasks.filter((t) => t.is_active);
+    const inFlightTaskIds = inFlightTasks.map((t) => t.id);
+
     const allMatchingResolutions = state.coverage_resolutions.filter(
       (res) => res.requirement_id === item.requirement_id && (res.character_id ?? "") === (item.character_id ?? ""),
     );
@@ -376,8 +399,16 @@ export function deriveCoverageCenterMatrix(state: ProjectState): CoverageCenterM
       ...(assessment?.revision === undefined ? {} : { assessment_revision: assessment.revision }),
     };
 
-    const typedActions = deriveCoverageCellActions(status, eligibility, unSupersededExhausted, cellScope);
+    const typedActions = deriveCoverageCellActions(status, eligibility, unSupersededExhausted, cellScope, inFlightTaskIds);
     const enabledActions = typedActions.filter((a) => a.enabled).map((a) => a.action);
+
+    const researchEligibility =
+      assessment === undefined
+        ? undefined
+        : deriveRequirementResearchEligibility(state, assessment, {
+            requirement_id: item.requirement_id,
+            ...(item.character_id === undefined ? {} : { character_id: item.character_id }),
+          });
 
     const cellReason = explanation?.reason ?? (status === "stale" ? (staleComponents.length > 0 ? `assessment 已過期：${staleComponents.join("、")}` : "assessment 已過期") : item.reason);
 
@@ -402,6 +433,8 @@ export function deriveCoverageCenterMatrix(state: ProjectState): CoverageCenterM
       history_resolutions: historyResolutionRefs,
       ...(cellReason === undefined ? {} : { reason: cellReason }),
       ...(explanation?.missing_prerequisite === undefined ? {} : { missing_prerequisite: explanation.missing_prerequisite }),
+      ...(researchEligibility === undefined ? {} : { research_eligibility: researchEligibility }),
+      existing_in_flight_task_ids: inFlightTaskIds,
       actions: enabledActions,
       typed_actions: typedActions,
     };

@@ -277,6 +277,7 @@ export interface CoverageAssessmentInputSnapshot {
   fact_projection_revision?: string;
   fact_review_run_id?: string;
   fact_review_projection_revision?: string;
+  coverage_resolution_projection_revision?: string;
 }
 
 export interface CoverageAssessmentItem {
@@ -327,6 +328,7 @@ export const coverageAssessmentSchema = z.object({
     fact_projection_revision: z.string().min(1).optional(),
     fact_review_run_id: z.string().min(1).optional(),
     fact_review_projection_revision: z.string().min(1).optional(),
+    coverage_resolution_projection_revision: z.string().min(1).optional(),
   }).strict(),
   items: z.array(coverageAssessmentItemSchema).min(1),
   operation_id: z.string().min(1),
@@ -687,11 +689,59 @@ export function coverageFactProjectionRevision(state: Pick<ProjectState, "facts"
   );
 }
 
+/**
+ * Single authoritative resolution projection revision used by coverage assessment freshness.
+ * Only resolutions that alter formal coverage statuses are included:
+ * - creative_completion + authorized
+ * - user_supplement + fulfilled
+ */
+export const EMPTY_COVERAGE_RESOLUTION_PROJECTION_REVISION = contentHash("empty-coverage-resolution-projection");
+
+export function coverageResolutionProjectionRevision(
+  state: Pick<ProjectState, "coverage_resolutions" | "coverage_requirement_sets">,
+): string {
+  const currentReqSetRevision = state.coverage_requirement_sets.at(-1)?.revision;
+  const active = state.coverage_resolutions.filter((resolution) => {
+    if (currentReqSetRevision !== undefined && resolution.requirement_set_revision !== currentReqSetRevision) {
+      return false;
+    }
+    const isSuperseded = state.coverage_resolutions.some((other) => other.supersedes === resolution.id);
+    if (isSuperseded) return false;
+    if (resolution.mode === "creative_completion" && resolution.status === "authorized") return true;
+    if (resolution.mode === "user_supplement" && resolution.status === "fulfilled") return true;
+    return false;
+  });
+
+  if (active.length === 0) {
+    return EMPTY_COVERAGE_RESOLUTION_PROJECTION_REVISION;
+  }
+
+  const sorted = [...active].sort((a, b) => {
+    const keyA = `${a.character_id ?? ""}::${a.requirement_id}::${a.id}`;
+    const keyB = `${b.character_id ?? ""}::${b.requirement_id}::${b.id}`;
+    return keyA.localeCompare(keyB);
+  });
+
+  return contentHash(
+    canonicalJson(
+      sorted.map((r) => ({
+        id: r.id,
+        character_id: r.character_id,
+        requirement_id: r.requirement_id,
+        mode: r.mode,
+        status: r.status,
+        requirement_set_revision: r.requirement_set_revision,
+      })),
+    ),
+  );
+}
+
 export interface CoverageCellActionOption {
-  action: "research" | "supplement" | "creative_completion" | "revise_query" | "revise_constraints" | "manual_url" | "reassess" | "view_details";
+  action: "research" | "supplement" | "creative_completion" | "revise_query" | "revise_constraints" | "manual_url" | "reassess" | "view_details" | "view_research_task";
   label: string;
   enabled: boolean;
   disabled_reason?: string;
+  target_task_id?: string;
   prerequisite?: {
     action: string;
     target_panel?: string;

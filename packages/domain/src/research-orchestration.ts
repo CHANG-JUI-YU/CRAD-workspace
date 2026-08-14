@@ -201,6 +201,13 @@ export function resolveResearchTargets(
         true,
       );
     }
+    if (matchingItem.status !== "missing") {
+      throw new CoreError(
+        "COVERAGE_RESEARCH_TARGET_INELIGIBLE",
+        `Target requirement "${t.requirement_id}" (character: ${t.character_id ?? "world"}) is not eligible for research because its assessment status is "${matchingItem.status}". Only "missing" requirements can be researched.`,
+        true,
+      );
+    }
     const key = `${t.character_id ?? ""}::${t.requirement_id}`;
     if (!seen.has(key)) {
       seen.add(key);

@@ -94,9 +94,12 @@ export {
 export {
   deriveAssessmentWideResearchProjection,
   deriveCoverageAssessmentEligibility,
+  deriveRequirementResearchEligibility,
   type AssessmentWideResearchProjection,
   type CoverageAssessmentEligibility,
   type CoverageEligibilityReasonCode,
+  type CoverageRequirementResearchEligibility,
+  type CoverageRequirementResearchReasonCode,
 } from "./coverage-eligibility.js";
 export {
   deriveArtifactCoverageLineage,

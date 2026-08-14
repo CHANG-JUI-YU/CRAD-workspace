@@ -339,12 +339,17 @@ describe("Audit 5 batch 5: coverage production orchestration", () => {
 
   it("exposes a coverage dashboard with per-cell actions", async () => {
     const { runtime, assessmentId, assessmentRevision } = await coverageRuntime();
+    const dashboardBefore = await runtime.dashboardCoverage();
+    expect(dashboardBefore.assessment).toMatchObject({ id: assessmentId, revision: assessmentRevision, pass: "formal" });
+    expect(Array.isArray(dashboardBefore.cells)).toBe(true);
+    const appearanceBefore = dashboardBefore.cells.find((cell: { requirement_id: string }) => cell.requirement_id === "req.appearance");
+    expect(appearanceBefore).toBeDefined();
+    expect(appearanceBefore!.actions).toEqual(expect.arrayContaining(["research", "supplement", "creative_completion"]));
+
     await runtime.coverageResearchStart("director", assessmentId, assessmentRevision);
-    const dashboard = await runtime.dashboardCoverage();
-    expect(dashboard.assessment).toMatchObject({ id: assessmentId, revision: assessmentRevision, pass: "formal" });
-    expect(Array.isArray(dashboard.cells)).toBe(true);
-    const appearance = dashboard.cells.find((cell: { requirement_id: string }) => cell.requirement_id === "req.appearance");
-    expect(appearance).toBeDefined();
-    expect(appearance!.actions).toEqual(expect.arrayContaining(["research", "supplement", "creative_completion"]));
+    const dashboardAfter = await runtime.dashboardCoverage();
+    const appearanceAfter = dashboardAfter.cells.find((cell: { requirement_id: string }) => cell.requirement_id === "req.appearance");
+    expect(appearanceAfter).toBeDefined();
+    expect(appearanceAfter!.actions).toEqual(expect.arrayContaining(["view_research_task", "supplement", "creative_completion"]));
   });
 });

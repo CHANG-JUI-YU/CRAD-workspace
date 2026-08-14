@@ -2,6 +2,7 @@ import {
   COVERAGE_DIMENSIONS,
   COVERAGE_FORMAL_ITEM_STATUSES,
   COVERAGE_INITIAL_ITEM_STATUSES,
+  EMPTY_COVERAGE_RESOLUTION_PROJECTION_REVISION,
   WORLD_COVERAGE_DIMENSION,
   CoreError,
   artifactBinding,
@@ -11,6 +12,7 @@ import {
   coverageFactProjectionRevision,
   coverageRequirementById,
   coverageRequirementSetRevision,
+  coverageResolutionProjectionRevision,
   coverageSnapshotHash,
   createEntityMatcher,
   factReferencesEntity,
@@ -98,6 +100,7 @@ function inputSnapshot(state: ProjectState): CoverageAssessmentInputSnapshot {
     source_revisions: state.sources.map((source) => ({ source_id: source.id, revision: source.revision })),
     fact_projection_revision: factProjectionRevision(state),
     ...(run === undefined ? {} : { fact_review_run_id: run.id, fact_review_projection_revision: run.candidate_set_revision }),
+    coverage_resolution_projection_revision: coverageResolutionProjectionRevision(state),
   };
 }
 
@@ -312,6 +315,19 @@ export function coverageAssessmentFreshness(state: ProjectState, assessment: Cov
     if (before === undefined || after === undefined || before.source_id !== after.source_id || before.revision !== after.revision) return false;
   }
   if (snapshot.fact_projection_revision !== factProjectionRevision(state)) return false;
+
+  const currentResolutionRev = coverageResolutionProjectionRevision(state);
+  if (snapshot.coverage_resolution_projection_revision === undefined) {
+    // Legacy snapshot compatibility:
+    // If current effective resolution is empty, legacy snapshot is still fresh.
+    // If there are effective resolutions, legacy snapshot is stale because it didn't account for them.
+    if (currentResolutionRev !== EMPTY_COVERAGE_RESOLUTION_PROJECTION_REVISION) {
+      return false;
+    }
+  } else if (snapshot.coverage_resolution_projection_revision !== currentResolutionRev) {
+    return false;
+  }
+
   return true;
 }
 
@@ -343,6 +359,29 @@ export function recordUserDecisionAndResolution(
 
   if (latestAssessment === undefined) {
     throw new CoreError("COVERAGE_RESOLUTION_INVALID", "No coverage assessment exists to bind the resolution; run an assessment first.", true);
+  }
+
+  const currentReqSetRevision = reqSet?.revision;
+  for (const reqId of requirementIds) {
+    const existingResolutions = currentResolutions(state, {
+      requirementSetRevision: currentReqSetRevision,
+      requirementId: reqId,
+      characterId,
+    });
+    if (existingResolutions.length > 0) {
+      const matchingOp = existingResolutions.find((r) => r.operation_id === operationId);
+      if (matchingOp !== undefined) {
+        const existingDecision = state.coverage_user_decisions.find((d) => d.id === matchingOp.user_decision_id);
+        if (existingDecision !== undefined) {
+          return { decision: existingDecision, resolutions: existingResolutions, state };
+        }
+      }
+      throw new CoreError(
+        "COVERAGE_RESOLUTION_DUPLICATE",
+        `A current resolution already exists for requirement "${reqId}" (character: ${characterId ?? "world"}). Repeated confirmation cannot create duplicate resolutions. Explicit replacement/reopen is required.`,
+        true,
+      );
+    }
   }
 
   const decisionId = internalId("user-decision");
