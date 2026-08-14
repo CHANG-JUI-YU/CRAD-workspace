@@ -4,10 +4,14 @@ import {
   buildZhujiTemplateContext,
   buildTemplateContext,
   beginInterview,
+  buildProvenanceCompositionSummary,
   canonicalJson,
+  computeBuildPlan,
+  computeBuildSnapshotHash,
   computeProjectProjection,
   CoreError,
   contentHash,
+  deriveHistoricalDecisionRefs,
   hasValidMultiCharacterRoster,
   createQualityPolicySnapshot,
   executionContextFromOperation,
@@ -21,6 +25,7 @@ import {
   parseWardrobeMarkdown,
   publishedCardExportPath,
   publishedCardPngExportPath,
+  provenanceConfirmationFingerprint,
   templateJsonSchemaFor,
   templateProposalValueSchema,
   zhujiProposalJsonSchema,
@@ -63,6 +68,7 @@ import {
   type FactClassification,
   type CoverageAssessment,
   type CoverageRequirementSet,
+  type CoverageSnapshot,
   type ExecutionContext,
   type ExecutionLeaseContext,
 } from "@st-workspace/core";
@@ -73,6 +79,7 @@ import {
   KnowledgeService,
   ReviewService,
   SourceService,
+  buildCoverageSnapshot,
   fetchApprovedSource,
   inferAuthoringKind,
   PALETTE_REQUIRED_MODULES,
@@ -111,6 +118,7 @@ import {
   type StructuredPublishDiagnostics,
 } from "@st-workspace/domain";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
+import type { DashboardProvenanceView, PublishProvenanceConfirmInput, PublishProvenancePreviewResult } from "./runtime-views.js";
 import { coverageResearchCandidates as coverageResearchCandidatesQuery, coverageResearchClaim as coverageResearchClaimQuery, coverageResearchExhaust as coverageResearchExhaustQuery, coverageResearchRecover as coverageResearchRecoverQuery, coverageResearchStart as coverageResearchStartQuery, coverageResearchStartPreview as coverageResearchStartPreviewQuery, coverageResolutionConfirm as coverageResolutionConfirmQuery, coverageResolutionPreview as coverageResolutionPreviewQuery, coverageSupplement as coverageSupplementQuery, dashboardCoverage as dashboardCoverageQuery, dashboardCoverageCenter as dashboardCoverageCenterQuery, executeCoverageResearchCandidates, executeCoverageResearchClaim, executeCoverageResearchExhaust, executeCoverageResearchRecover, executeCoverageResearchStart, executeCoverageResolutionConfirm, executeCoverageSupplement, type CoverageApplicationDeps, type CoverageCommandOutcome } from "./coverage-application.js";
 import {
   artifactQueryFromDashboardQuery,
@@ -2459,6 +2467,148 @@ export class WorkspaceRuntime {
 
   async publishPreview(mode?: "zhuji" | "palette"): Promise<WorkflowGateResult> {
     return publishPreviewQuery({ repository: this.repository }, mode);
+  }
+
+  async publishProvenancePreview(mode?: "zhuji" | "palette"): Promise<PublishProvenancePreviewResult> {
+    const state = await this.repository.read();
+    const projection = computeProjectProjection(state);
+    const availableModes = {
+      zhuji: projection.publishPlan("zhuji").entries.some((entry) => entry.kind === "zhuji"),
+      palette: projection.publishPlan("palette").entries.some((entry) => entry.kind === "palette"),
+    };
+    const manifest = buildRequiredArtifactManifest(state);
+    const manifestMode = manifest === undefined || manifest.export_modes === "both" ? undefined : manifest.export_modes;
+    const onlyAvailableMode = availableModes.zhuji === availableModes.palette
+      ? undefined
+      : availableModes.zhuji
+      ? "zhuji"
+      : availableModes.palette
+      ? "palette"
+      : undefined;
+    const effectiveMode = mode ?? (manifestMode !== undefined && availableModes[manifestMode] ? manifestMode : onlyAvailableMode);
+    const plan = computeBuildPlan(state, effectiveMode);
+    const latestAssessment = state.coverage_assessments.at(-1);
+    let coverageSnapshot: CoverageSnapshot | undefined;
+    if (projection.intent.is_source_adaptation) {
+      if (latestAssessment === undefined || latestAssessment.pass !== "formal") {
+        return { available: false, reason: "COVERAGE_ASSESSMENT_REQUIRED", historical_decisions: deriveHistoricalDecisionRefs(state, undefined) };
+      }
+      if (!coverageAssessmentFreshness(state, latestAssessment)) {
+        return { available: false, reason: "COVERAGE_ASSESSMENT_STALE", historical_decisions: deriveHistoricalDecisionRefs(state, undefined) };
+      }
+      coverageSnapshot = buildCoverageSnapshot(state, latestAssessment, plan);
+    }
+    const buildSnapshotHash = computeBuildSnapshotHash(state, plan, effectiveMode, coverageSnapshot);
+    const composition = buildProvenanceCompositionSummary(state, coverageSnapshot, buildSnapshotHash);
+    return {
+      available: true,
+      fingerprint: provenanceConfirmationFingerprint(composition),
+      build_snapshot_hash: buildSnapshotHash,
+      composition,
+      historical_decisions: deriveHistoricalDecisionRefs(state, coverageSnapshot),
+    };
+  }
+
+  async publishProvenanceConfirm(input: PublishProvenanceConfirmInput, context: WorkspaceContext): Promise<RequestResult & { downstream_invalidation: DownstreamInvalidationReport }> {
+    const before = await this.repository.read();
+    const preview = await this.publishProvenancePreview(input.mode_selection);
+    if (!preview.available || preview.fingerprint === undefined) {
+      throw new CoreError("PROVENANCE_CONFIRMATION_STALE", `Provenance composition is not ready for confirmation: ${preview.reason ?? "unavailable"}`, true);
+    }
+    if (preview.fingerprint !== input.fingerprint) {
+      throw new CoreError("PROVENANCE_CONFIRMATION_STALE", "Provenance composition changed after preview; please re-preview before confirming.", true);
+    }
+    const existing = before.operations.find((item) =>
+      (input.operation_id !== undefined && item.id === input.operation_id)
+      || (input.idempotency_key !== undefined && item.idempotency_key === input.idempotency_key));
+    if (existing !== undefined) {
+      await this.recordAudit(existing.id, "request.idempotent_replay", { idempotency_key: input.idempotency_key ?? null, replayed: true }, context.actor);
+      return { ...responseFromOperation(existing), downstream_invalidation: emptyDownstreamInvalidationReport() };
+    }
+    const operationId = internalId("operation");
+    const syncLease: ExecutionLeaseContext = { owner: internalId("sync"), token: internalId("lease"), generation: 1 };
+    const operation: OperationRecord = {
+      id: operationId,
+      kind: "build",
+      request: "發布（provenance 已確認）",
+      actor: context.actor,
+      status: "resolving",
+      created_at: now(),
+      updated_at: now(),
+      progress: [],
+      command: { version: 1, type: "request" },
+      ...(input.idempotency_key === undefined ? {} : { idempotency_key: input.idempotency_key }),
+      lease_owner: syncLease.owner,
+      lease_token: syncLease.token,
+      lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
+      ...(syncLease.generation === undefined ? {} : { fencing_generation: syncLease.generation }),
+      attempt: 1,
+      execution_snapshot: {
+        execution_agent_id: "build-provenance",
+        execution_agent_role: "builder",
+        initiated_by: context.actor,
+        route_kind: "build",
+        source_search_mode: this.sourceSearchMode,
+        created_at: now(),
+      },
+    };
+    const created = await this.repository.commit(before.revision, (current) => ({
+      ...current,
+      operations: [...current.operations, operation],
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: operation.id,
+        event: "operation.created",
+        actor: context.actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { kind: "build", provenance_confirmation: true },
+      }],
+    }));
+    const execution = this.executionContextFor(operation, context, { id: "build-provenance", role: "builder" }, { lease: syncLease });
+    try {
+      await this.repository.commit(created.revision, (current) => {
+        executionLeaseGuard(current, operation.id, execution);
+        return {
+          ...current,
+          operations: current.operations.map((item) => item.id === operation.id ? { ...item, status: "running", updated_at: now() } : item),
+        };
+      });
+      const result = await this.build.run(operation.id, "發布（provenance 已確認）", execution, {
+        ...(input.mode_selection === undefined ? {} : { mode_selection: input.mode_selection }),
+        expected_provenance_fingerprint: input.fingerprint,
+      });
+      const latest = await this.repository.read();
+      const finalOperation = latest.operations.find((item) => item.id === operation.id);
+      const base: RequestResult = {
+        operation_id: operation.id,
+        status: result.status,
+        summary: result.summary,
+        completed: result.build_id === undefined ? [] : [result.build_id],
+        blocked: result.status === "blocked" ? [operation.id] : [],
+        ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+      };
+      return this.attachDownstreamInvalidation(base, before);
+    } finally {
+      await this.releaseOperationLease(operation.id, syncLease.owner, syncLease.token);
+    }
+  }
+
+  async dashboardProvenance(): Promise<DashboardProvenanceView> {
+    const state = await this.repository.read();
+    const latestBuild = [...state.builds].reverse().find((build) => build.status === "previewed" || build.status === "built");
+    if (latestBuild === undefined || latestBuild.provenance_summary === undefined) {
+      return { historical_decisions: deriveHistoricalDecisionRefs(state, undefined), legacy_build_snapshot_hash: false };
+    }
+    return {
+      build_id: latestBuild.id,
+      build_status: latestBuild.status,
+      provenance_summary: latestBuild.provenance_summary,
+      historical_decisions: deriveHistoricalDecisionRefs(state, latestBuild.coverage_snapshot),
+      legacy_build_snapshot_hash: latestBuild.provenance_summary.compiled_content_hash === undefined,
+      ...(latestBuild.provenance_summary.compiled_content_hash === undefined ? {} : { compiled_content_hash: latestBuild.provenance_summary.compiled_content_hash }),
+      ...(latestBuild.provenance_summary.build_snapshot_hash === undefined ? {} : { build_snapshot_hash: latestBuild.provenance_summary.build_snapshot_hash }),
+    };
   }
 
   async buildReadiness(): Promise<DashboardBuildReadiness> {

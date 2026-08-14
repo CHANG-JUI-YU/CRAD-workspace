@@ -74,7 +74,34 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
           var payload = await requestJson(endpoint);
           var structured = await requestJson("/workspace/dashboard/publish-diagnostics");
           renderPublishDiagnostics(structured);
-          renderProvenanceSummary(payload.provenance_summary);
+          return payload;
+        });
+      });
+      byId("prepare-provenance").addEventListener("click", function () {
+        void runTask("準備發布確認", async function () {
+          var modeSelect = byId("readiness-mode");
+          var modeValue = modeSelect instanceof HTMLSelectElement ? modeSelect.value : "";
+          var endpoint = modeValue === "" ? "/workspace/publish/provenance/preview" : "/workspace/publish/provenance/preview?mode=" + encodeURIComponent(modeValue);
+          var payload = await requestJson(endpoint);
+          renderProvenanceComposition(payload);
+          return payload;
+        });
+      });
+      byId("confirm-publish").addEventListener("click", function () {
+        void runTask("確認並發布", async function () {
+          var fingerprint = currentProvenanceConfirmation !== null && currentProvenanceConfirmation !== undefined ? currentProvenanceConfirmation.fingerprint : "";
+          var modeSelect = byId("readiness-mode");
+          var modeValue = modeSelect instanceof HTMLSelectElement ? modeSelect.value : "";
+          var body = { fingerprint: fingerprint };
+          if (modeValue !== "") body.mode_selection = modeValue;
+          var payload = await postJson("/workspace/publish/provenance/confirm", body);
+          var messageEl = byId("provenance-confirm-message");
+          if (payload && payload.status === "completed") {
+            messageEl.textContent = "發布完成；Publish Record 已保存同一份確認的 provenance refs。";
+          } else {
+            messageEl.textContent = "發布未完成：" + ((payload && payload.summary) || (payload && payload.status) || "請重新準備確認。");
+          }
+          await Promise.allSettled([loadDashboardData(), loadProvenanceHistory()]);
           return payload;
         });
       });

@@ -1,4 +1,4 @@
-import type { AttachmentStore, ProvenanceCompositionSummary, RepairInspection } from "@st-workspace/core";
+import type { AttachmentStore, ProvenanceCompositionSummary, ProvenanceOverrideRef, RepairInspection } from "@st-workspace/core";
 import type { SourceFetcher } from "@st-workspace/domain";
 
 export interface DashboardProjectView {
@@ -187,6 +187,32 @@ export interface TavernCompatibilityReport {
 }
 
 export type SourceSearchMode = "agent_managed" | "runtime_provider" | "disabled";
+
+export interface PublishProvenancePreviewResult {
+  available: boolean;
+  reason?: string;
+  fingerprint?: string;
+  build_snapshot_hash?: string;
+  composition?: ProvenanceCompositionSummary;
+  historical_decisions: ProvenanceOverrideRef[];
+}
+
+export interface PublishProvenanceConfirmInput {
+  fingerprint: string;
+  mode_selection?: "zhuji" | "palette";
+  idempotency_key?: string;
+  operation_id?: string;
+}
+
+export interface DashboardProvenanceView {
+  build_id?: string;
+  build_status?: string;
+  provenance_summary?: ProvenanceCompositionSummary;
+  historical_decisions: ProvenanceOverrideRef[];
+  legacy_build_snapshot_hash: boolean;
+  compiled_content_hash?: string;
+  build_snapshot_hash?: string;
+}
 
 export interface WorkspaceRuntimeOptions {
   searcher?: (request: string) => Promise<Array<{ title: string; url: string; snippet?: string; content?: string; media_type?: string; domain?: string; official?: boolean }>>;

@@ -204,6 +204,39 @@ export const DASHBOARD_CSS = `  <style>
     .provenance-summary {
       margin-top: 0.75rem;
     }
+    .provenance-history {
+      margin-top: 0.75rem;
+    }
+    .provenance-section {
+      border: 1px solid #dfe6ec;
+      border-radius: 8px;
+      padding: 0.45rem 0.65rem;
+      margin-top: 0.5rem;
+      background: #fbfcfd;
+      font-size: 0.85rem;
+    }
+    .provenance-section.supplement {
+      border-left: 4px solid #3d7a5a;
+    }
+    .provenance-section.creative {
+      border-left: 4px solid #7a5a3d;
+    }
+    .provenance-section ul {
+      margin: 0.4rem 0 0;
+      padding-left: 1.2rem;
+    }
+    .provenance-hash-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.35rem;
+      flex-wrap: wrap;
+    }
+    .provenance-hash-row code {
+      word-break: break-all;
+      max-width: 34rem;
+      font-size: 0.8rem;
+    }
     .readiness-row {
       display: flex;
       align-items: flex-start;

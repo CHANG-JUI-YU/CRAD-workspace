@@ -41,6 +41,9 @@ describe("provenance composition summary", () => {
     state.coverage_user_decisions = [
       { id: "dec-1", action: "user_supplement", requirement_ids: ["req.personality"], character_id: "alpha", choice: "supplement", rationale: "用户补充", actor: "tester", operation_id: "op-1", supersedes: "dec-0", created_at: now },
     ];
+    state.coverage_resolutions = [
+      { id: "res-1", character_id: "alpha", requirement_id: "req.personality", mode: "user_supplement", status: "fulfilled", assessment_id: "assess-1", assessment_revision: "rev-assess-1", requirement_set_revision: "set-rev-1", rationale: "补充", user_decision_id: "dec-1", authorized_by: "tester", operation_id: "op-1", created_by: "tester", created_at: now },
+    ];
     const snap = snapshot();
     const summary = buildProvenanceCompositionSummary(state, snap, contentHash("compiled-1"));
 

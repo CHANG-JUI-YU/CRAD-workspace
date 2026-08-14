@@ -159,6 +159,12 @@ export const DASHBOARD_MARKUP = `<body>
       <div id="readiness-message" class="panel-message" aria-live="polite">尚未執行就緒檢查。</div>
       <div id="readiness-list" class="readiness-list"></div>
       <div id="provenance-summary" class="provenance-summary"></div>
+      <div class="form-actions">
+        <button id="prepare-provenance" type="button">準備發布確認</button>
+        <button id="confirm-publish" class="primary" type="button" disabled>確認並發布</button>
+      </div>
+      <div id="provenance-confirm-message" class="panel-message" aria-live="polite">尚未準備 provenance 確認。</div>
+      <div id="provenance-history" class="provenance-history"></div>
     </section>
 
     <section class="panel panel-wide" aria-labelledby="artifact-heading">

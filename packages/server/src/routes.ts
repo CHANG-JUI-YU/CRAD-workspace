@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { CoreError, internalId, z, type AdaptationDecision, type RequestResult } from "@st-workspace/core";
-import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverageResearchCandidatesInputSchema, coverageResearchClaimInputSchema, coverageResearchExhaustInputSchema, coverageResearchRecoverInputSchema, coverageResearchStartInputSchema, coverageResearchStartPreviewInputSchema, coverageResolutionConfirmInputSchema, coverageResolutionPreviewInputSchema, coverageSupplementInputSchema, decodeAttachments, factReviewBatchInputSchema, imageInputSchema, imageRemoveInputSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
+import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverageResearchCandidatesInputSchema, coverageResearchClaimInputSchema, coverageResearchExhaustInputSchema, coverageResearchRecoverInputSchema, coverageResearchStartInputSchema, coverageResearchStartPreviewInputSchema, coverageResolutionConfirmInputSchema, coverageResolutionPreviewInputSchema, coverageSupplementInputSchema, decodeAttachments, factReviewBatchInputSchema, imageInputSchema, imageRemoveInputSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, publishProvenanceConfirmSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
 import { type AgentAdapter, type WorkspaceProjectManager, type WorkspaceRuntime, type WorkspaceWorker } from "@st-workspace/runtime";
 import { structuredError } from "./errors.js";
 import { body, compact, dashboardPathId, dashboardQuery, json, parseRequest } from "./http-utils.js";
@@ -140,6 +140,16 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         json(response, 200, await (await deps.getRuntime()).publishPreview(mode));
         return true;
       }
+      if (request.method === "GET" && url.pathname === "/workspace/publish/provenance/preview") {
+        const rawMode = url.searchParams.get("mode");
+        const mode = rawMode === "zhuji" || rawMode === "palette" ? rawMode : undefined;
+        json(response, 200, await (await deps.getRuntime()).publishProvenancePreview(mode));
+        return true;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/provenance") {
+        json(response, 200, await (await deps.getRuntime()).dashboardProvenance());
+        return true;
+      }
       if (request.method === "GET" && url.pathname === "/workspace/tavern/compat") {
         json(response, 200, await (await deps.getRuntime()).tavernCompat());
         return true;
@@ -241,6 +251,18 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         const result = deps.projectManager === undefined
           ? await (await deps.getAgentAdapter()).request({ request: requestText, context: { actor: deps.actor, attachments: decodeAttachments(input.attachments) }, ...requestOptions })
           : await deps.projectManager.request(requestText, { actor: deps.actor, attachments: decodeAttachments(input.attachments) }, requestOptions);
+        json(response, 200, result);
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/publish/provenance/confirm") {
+        const parsed = await body(request);
+        const input = parseRequest(publishProvenanceConfirmSchema, parsed, "PROVENANCE_CONFIRMATION_REQUIRED");
+        const result = await (await deps.getRuntime()).publishProvenanceConfirm({
+          fingerprint: input.fingerprint,
+          ...(input.mode_selection === undefined ? {} : { mode_selection: input.mode_selection }),
+          ...(input.idempotency_key === undefined ? {} : { idempotency_key: input.idempotency_key }),
+          ...(input.operation_id === undefined ? {} : { operation_id: input.operation_id }),
+        }, { actor: deps.actor, attachments: [] });
         json(response, 200, result);
         return true;
       }

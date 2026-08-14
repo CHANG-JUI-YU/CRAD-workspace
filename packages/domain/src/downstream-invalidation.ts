@@ -22,6 +22,24 @@ import {
 import { buildCoverageSnapshot, coverageAssessmentFreshness, isCoverageSensitiveArtifactKind, projectActiveCoverageBindings } from "./coverage-assessment.js";
 import { validateWorkflow } from "./workflow-gate.js";
 
+function coverageSnapshotMatchesState(state: ProjectState, snapshot: { assessment_id: string; assessment_revision: string; requirement_set_revision: string; fact_projection_revision?: string; fact_review_run_id?: string; source_revisions: Array<{ source_id: string; revision: string }> }): boolean {
+  const latestAssessment = state.coverage_assessments.at(-1);
+  if (latestAssessment === undefined) return false;
+  const requirementSet = state.coverage_requirement_sets.find((item) => item.id === latestAssessment.requirement_set_id);
+  const latestRun = [...state.fact_review_runs].reverse().find((run) => run.status !== "superseded");
+  const currentSources = state.sources.map((source) => ({ source_id: source.id, revision: source.revision }));
+  return snapshot.assessment_id === latestAssessment.id
+    && snapshot.assessment_revision === latestAssessment.revision
+    && snapshot.requirement_set_revision === (requirementSet?.revision ?? "")
+    && snapshot.fact_projection_revision === coverageFactProjectionRevision(state)
+    && snapshot.fact_review_run_id === latestRun?.id
+    && snapshot.source_revisions.length === currentSources.length
+    && snapshot.source_revisions.every((ref, index) => {
+      const current = currentSources[index];
+      return current !== undefined && current.source_id === ref.source_id && current.revision === ref.revision;
+    });
+}
+
 export type DownstreamInvalidationSourceKind =
   | "source"
   | "fact"
@@ -371,28 +389,22 @@ export function deriveDownstreamInvalidation(before: ProjectState, after: Projec
 
   const lastBuild = latestBuild(after);
   if (lastBuild?.coverage_snapshot !== undefined) {
-    const latestAssessment = after.coverage_assessments.at(-1);
-    if (latestAssessment !== undefined) {
-      const expectedSnapshot = buildCoverageSnapshot(after, latestAssessment, afterPlan);
-      if (lastBuild.coverage_snapshot.snapshot_hash !== expectedSnapshot.snapshot_hash) {
-        let wasStale = false;
-        const beforeBuild = before.builds.find((previous) => previous.id === lastBuild.id);
-        const beforeLatestAssessment = before.coverage_assessments.at(-1);
-        if (beforeBuild?.coverage_snapshot !== undefined && beforeLatestAssessment !== undefined) {
-          const beforeExpected = buildCoverageSnapshot(before, beforeLatestAssessment, beforePlan);
-          wasStale = beforeBuild.coverage_snapshot.snapshot_hash !== beforeExpected.snapshot_hash;
-        }
-        if (!wasStale) {
-          report.items.push({
-            target_kind: "build",
-            target_id: lastBuild.id,
-            revision: lastBuild.coverage_snapshot.snapshot_hash,
-            reason_code: "COVERAGE_PUBLISH_SNAPSHOT_STALE",
-            reason: `Build ${lastBuild.id} carries a coverage snapshot (${lastBuild.coverage_snapshot.snapshot_hash.slice(0, 12)}) that no longer matches current assessment, facts, or sources.`,
-            next_action: "Re-run the build preview to refresh the publish snapshot.",
-          });
-          report.invalidated = true;
-        }
+    if (!coverageSnapshotMatchesState(after, lastBuild.coverage_snapshot)) {
+      let wasStale = false;
+      const beforeBuild = before.builds.find((previous) => previous.id === lastBuild.id);
+      if (beforeBuild?.coverage_snapshot !== undefined && coverageSnapshotMatchesState(before, beforeBuild.coverage_snapshot) === false) {
+        wasStale = true;
+      }
+      if (!wasStale) {
+        report.items.push({
+          target_kind: "build",
+          target_id: lastBuild.id,
+          revision: lastBuild.coverage_snapshot.snapshot_hash,
+          reason_code: "COVERAGE_PUBLISH_SNAPSHOT_STALE",
+          reason: `Build ${lastBuild.id} carries a coverage snapshot (${lastBuild.coverage_snapshot.snapshot_hash.slice(0, 12)}) that no longer matches current assessment, facts, or sources.`,
+          next_action: "Re-run the build preview to refresh the publish snapshot.",
+        });
+        report.invalidated = true;
       }
     }
   }
@@ -472,22 +484,16 @@ export function deriveProjectInvalidations(state: ProjectState): DownstreamInval
   }
 
   const lastBuild = latestBuild(state);
-  if (lastBuild?.coverage_snapshot !== undefined) {
-    const latestAssessment = state.coverage_assessments.at(-1);
-    if (latestAssessment !== undefined) {
-      const expectedSnapshot = buildCoverageSnapshot(state, latestAssessment, plan);
-      if (lastBuild.coverage_snapshot.snapshot_hash !== expectedSnapshot.snapshot_hash) {
-        report.items.push({
-          target_kind: "build",
-          target_id: lastBuild.id,
-          revision: lastBuild.coverage_snapshot.snapshot_hash,
-          reason_code: "COVERAGE_PUBLISH_SNAPSHOT_STALE",
-          reason: `Build ${lastBuild.id} carries a coverage snapshot (${lastBuild.coverage_snapshot.snapshot_hash.slice(0, 12)}) that no longer matches current assessment, facts, or sources.`,
-          next_action: "Re-run the build preview to refresh the publish snapshot.",
-        });
-        report.invalidated = true;
-      }
-    }
+  if (lastBuild?.coverage_snapshot !== undefined && !coverageSnapshotMatchesState(state, lastBuild.coverage_snapshot)) {
+    report.items.push({
+      target_kind: "build",
+      target_id: lastBuild.id,
+      revision: lastBuild.coverage_snapshot.snapshot_hash,
+      reason_code: "COVERAGE_PUBLISH_SNAPSHOT_STALE",
+      reason: `Build ${lastBuild.id} carries a coverage snapshot (${lastBuild.coverage_snapshot.snapshot_hash.slice(0, 12)}) that no longer matches current assessment, facts, or sources.`,
+      next_action: "Re-run the build preview to refresh the publish snapshot.",
+    });
+    report.invalidated = true;
   }
 
   const gate = validateWorkflow(state, "publish");

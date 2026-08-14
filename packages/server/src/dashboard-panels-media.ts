@@ -435,6 +435,7 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
           byId("operation-message").textContent = "首頁摘要已載入；按下按鈕取得 operation。";
           byId("quality-message").textContent = "首頁摘要已載入；按下按鈕取得 issue。";
           void refreshWorkflowViews();
+          void loadProvenanceHistory();
           return payload;
         } catch (error) {
           setAreaError("prechecks-message", error);

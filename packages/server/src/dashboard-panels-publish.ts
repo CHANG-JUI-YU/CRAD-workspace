@@ -194,6 +194,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
       }
 
       var lastDiagnosticHighlight = null;
+      var currentProvenanceConfirmation = null;
 
       function clearDiagnosticHighlight() {
         if (lastDiagnosticHighlight !== null && lastDiagnosticHighlight !== undefined) {
@@ -329,36 +330,202 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         }
       }
 
-      function renderProvenanceSummary(summary) {
+      function provenanceCoverageRefs(refs) {
+        var list = document.createElement("ul");
+        if (!Array.isArray(refs) || refs.length === 0) {
+          var empty = document.createElement("li");
+          empty.className = "muted";
+          empty.textContent = "沒有項目。";
+          list.append(empty);
+          return list;
+        }
+        for (var i = 0; i < refs.length; i += 1) {
+          var ref = refs[i];
+          var li = document.createElement("li");
+          li.textContent = (isRecord(ref) && ref.character_id ? ref.character_id : "world") + "／" + (isRecord(ref) && ref.requirement_id ? ref.requirement_id : "?");
+          list.append(li);
+        }
+        return list;
+      }
+
+      function provenanceSection(title, refs) {
+        var section = document.createElement("details");
+        section.className = "provenance-section";
+        var summaryEl = document.createElement("summary");
+        summaryEl.textContent = title;
+        section.append(summaryEl);
+        section.append(provenanceCoverageRefs(refs));
+        return section;
+      }
+
+      function overrideList(refs) {
+        var list = document.createElement("ul");
+        if (!Array.isArray(refs) || refs.length === 0) {
+          var empty = document.createElement("li");
+          empty.className = "muted";
+          empty.textContent = "沒有項目。";
+          list.append(empty);
+          return list;
+        }
+        for (var i = 0; i < refs.length; i += 1) {
+          var ref = refs[i];
+          if (!isRecord(ref)) continue;
+          var li = document.createElement("li");
+          var text = String(ref.decision_id) + "（" + String(ref.action) + "）：" + (Array.isArray(ref.requirement_ids) ? ref.requirement_ids.join(", ") : "?");
+          if (ref.supersedes) text += "；取代 " + String(ref.supersedes);
+          li.textContent = text;
+          list.append(li);
+        }
+        return list;
+      }
+
+      function hashRow(label, value, container, legacyNote) {
+        var rowEl = document.createElement("div");
+        rowEl.className = "provenance-hash-row";
+        var labelEl = document.createElement("span");
+        labelEl.className = "muted";
+        labelEl.textContent = label;
+        rowEl.append(labelEl);
+        var valueEl = document.createElement("code");
+        valueEl.textContent = String(value);
+        rowEl.append(valueEl);
+        if (legacyNote) {
+          var legacy = document.createElement("span");
+          legacy.className = "status-badge cancelled";
+          legacy.textContent = legacyNote;
+          rowEl.append(legacy);
+        }
+        if (typeof navigator !== "undefined" && navigator.clipboard) {
+          var copy = document.createElement("button");
+          copy.type = "button";
+          copy.textContent = "複製";
+          copy.setAttribute("aria-label", "複製完整 " + label);
+          copy.addEventListener("click", function () {
+            navigator.clipboard.writeText(String(value)).catch(function () {});
+          });
+          rowEl.append(copy);
+        }
+        container.append(rowEl);
+      }
+
+      function renderProvenanceComposition(preview) {
         var target = byId("provenance-summary");
         target.textContent = "";
-        if (summary === undefined || summary === null) return;
+        var confirmButton = byId("confirm-publish");
+        if (!isRecord(preview)) {
+          byId("provenance-confirm-message").textContent = "無法取得 provenance 資訊。";
+          if (confirmButton) confirmButton.disabled = true;
+          return;
+        }
+        if (preview.available !== true || !isRecord(preview.composition)) {
+          byId("provenance-confirm-message").textContent = "尚未準備完成：" + (firstString(preview, ["reason"]) || "不可用") + "。請先完成 Fact Review 與 formal coverage assessment 後再試。";
+          if (confirmButton) confirmButton.disabled = true;
+          return;
+        }
+        currentProvenanceConfirmation = { fingerprint: firstString(preview, ["fingerprint"]) };
+        var composition = preview.composition;
         var box = document.createElement("div");
         box.className = "workflow-stage";
         var title = document.createElement("div");
         title.className = "workflow-stage-title";
-        title.textContent = "來源組成（provenance composition）";
+        title.textContent = "發布來源組成（不可變 provenance）";
         box.append(title);
-        var meta = document.createElement("div");
-        meta.className = "muted";
-        var parts = [];
-        if (summary.source_backed) parts.push("來源佐證 " + summary.source_backed.count);
-        if (summary.user_supplement) parts.push("使用者補充 " + summary.user_supplement.count);
-        if (summary.creative_completion) parts.push("創作補全 " + summary.creative_completion.count);
-        if (summary.overrides && summary.overrides.length > 0) parts.push("覆寫決策 " + summary.overrides.length);
-        if (summary.quality_overrides && summary.quality_overrides.length > 0) parts.push("品質覆寫 " + summary.quality_overrides.length);
-        if (summary.assessment) parts.push("評估 " + summary.assessment.id + "@" + summary.assessment.revision.slice(0, 8));
-        if (summary.requirement_set) parts.push("requirement set " + summary.requirement_set.revision.slice(0, 8));
-        if (summary.fact_review_run) parts.push("review run " + summary.fact_review_run.id.slice(0, 8));
-        if (summary.fact_projection_revision) parts.push("fact projection " + summary.fact_projection_revision.slice(0, 8));
-        if (summary.source_revisions && summary.source_revisions.length > 0) parts.push("來源 revisions " + summary.source_revisions.map(function (ref) { return ref.source_id + "@" + ref.revision.slice(0, 8); }).join(", "));
-        if (summary.resolution_ids && summary.resolution_ids.length > 0) parts.push("resolutions " + summary.resolution_ids.map(function (id) { return id.slice(0, 8); }).join(", "));
-        if (summary.authoring_binding_ids && summary.authoring_binding_ids.length > 0) parts.push("bindings " + summary.authoring_binding_ids.map(function (id) { return id.slice(0, 8); }).join(", "));
-        if (summary.coverage_snapshot_hash) parts.push("coverage snapshot " + summary.coverage_snapshot_hash.slice(0, 8));
-        if (summary.build_snapshot_hash) parts.push("build snapshot " + summary.build_snapshot_hash.slice(0, 8));
-        meta.textContent = parts.join(" · ");
-        box.append(meta);
+        var counts = document.createElement("div");
+        counts.className = "muted";
+        var countParts = [];
+        if (composition.source_backed) countParts.push("來源佐證 " + composition.source_backed.count);
+        if (composition.user_supplement) countParts.push("使用者補充 " + composition.user_supplement.count);
+        if (composition.creative_completion) countParts.push("創作補全 " + composition.creative_completion.count);
+        if (Array.isArray(composition.overrides) && composition.overrides.length > 0) countParts.push("active override " + composition.overrides.length);
+        if (Array.isArray(composition.quality_overrides) && composition.quality_overrides.length > 0) countParts.push("品質覆寫 " + composition.quality_overrides.length);
+        counts.textContent = countParts.join(" · ");
+        box.append(counts);
+        box.append(provenanceSection("來源佐證 source-backed（" + (composition.source_backed ? composition.source_backed.count : 0) + "）", composition.source_backed ? composition.source_backed.refs : []));
+        var supplementSection = provenanceSection("使用者補充 user supplement（" + (composition.user_supplement ? composition.user_supplement.count : 0) + "）", composition.user_supplement ? composition.user_supplement.refs : []);
+        supplementSection.className += " supplement";
+        box.append(supplementSection);
+        var creativeSection = provenanceSection("創作補全 creative completion（" + (composition.creative_completion ? composition.creative_completion.count : 0) + "）", composition.creative_completion ? composition.creative_completion.refs : []);
+        creativeSection.className += " creative";
+        box.append(creativeSection);
+        var activeOverrideSection = document.createElement("details");
+        activeOverrideSection.className = "provenance-section";
+        var activeOverrideSummary = document.createElement("summary");
+        activeOverrideSummary.textContent = "Active coverage decisions／overrides（" + (Array.isArray(composition.overrides) ? composition.overrides.length : 0) + "）";
+        activeOverrideSection.append(activeOverrideSummary);
+        activeOverrideSection.append(overrideList(composition.overrides));
+        box.append(activeOverrideSection);
+        var qualityOverrideSection = document.createElement("details");
+        qualityOverrideSection.className = "provenance-section";
+        var qualityOverrideSummary = document.createElement("summary");
+        qualityOverrideSummary.textContent = "Quality overrides（" + (Array.isArray(composition.quality_overrides) ? composition.quality_overrides.length : 0) + "）";
+        qualityOverrideSection.append(qualityOverrideSummary);
+        qualityOverrideSection.append(overrideList(composition.quality_overrides.map(function (item) {
+          return { decision_id: String(item.code), action: "quality_override", requirement_ids: [], rationale: item.reason, supersedes: undefined };
+        })));
+        box.append(qualityOverrideSection);
+        var identities = document.createElement("details");
+        identities.className = "provenance-section";
+        var identitiesSummary = document.createElement("summary");
+        identitiesSummary.textContent = "Snapshot identities（完整值）";
+        identities.append(identitiesSummary);
+        var identityBox = document.createElement("div");
+        if (composition.assessment) hashRow("評估 assessment", composition.assessment.id + "@" + composition.assessment.revision, identityBox);
+        if (composition.requirement_set) hashRow("requirement set", composition.requirement_set.id + "@" + composition.requirement_set.revision, identityBox);
+        if (composition.fact_review_run) hashRow("fact review run", composition.fact_review_run.id + "@" + (composition.fact_review_run.projection_revision || "?"), identityBox);
+        if (composition.fact_projection_revision) hashRow("fact projection revision", composition.fact_projection_revision, identityBox);
+        if (Array.isArray(composition.source_revisions) && composition.source_revisions.length > 0) {
+          hashRow("來源 revisions", composition.source_revisions.map(function (ref) { return ref.source_id + "@" + ref.revision; }).join(", "), identityBox);
+        }
+        if (Array.isArray(composition.resolution_ids) && composition.resolution_ids.length > 0) hashRow("resolution IDs", composition.resolution_ids.join(", "), identityBox);
+        if (Array.isArray(composition.authoring_binding_ids) && composition.authoring_binding_ids.length > 0) hashRow("authoring binding IDs", composition.authoring_binding_ids.join(", "), identityBox);
+        if (composition.coverage_snapshot_hash) hashRow("coverage snapshot hash", composition.coverage_snapshot_hash, identityBox);
+        if (composition.build_snapshot_hash) {
+          var legacyNote = composition.compiled_content_hash === undefined ? "legacy identity" : undefined;
+          hashRow("build snapshot hash（build input identity）", composition.build_snapshot_hash, identityBox, legacyNote);
+        }
+        if (composition.compiled_content_hash) hashRow("compiled content hash（compiler output identity）", composition.compiled_content_hash, identityBox);
+        identities.append(identityBox);
+        box.append(identities);
         target.append(box);
+        if (confirmButton) {
+          confirmButton.disabled = currentProvenanceConfirmation.fingerprint === "";
+          confirmButton.textContent = Array.isArray(composition.overrides) && composition.overrides.length > 0
+            ? "確認覆寫並發布（" + composition.overrides.length + " 筆 active override）"
+            : "確認並發布";
+        }
+        byId("provenance-confirm-message").textContent = "已準備；確認後將以同一份 immutable refs 保存到 Publish Record。";
+      }
+
+      function renderProvenanceHistory(view) {
+        var target = byId("provenance-history");
+        target.textContent = "";
+        if (!isRecord(view)) return;
+        var historical = Array.isArray(view.historical_decisions) ? view.historical_decisions : [];
+        if (historical.length === 0 && view.provenance_summary === undefined && view.legacy_build_snapshot_hash !== true) return;
+        var box = document.createElement("div");
+        box.className = "workflow-stage";
+        var title = document.createElement("div");
+        title.className = "workflow-stage-title";
+        title.textContent = "歷史與已取代決策（不計入 active composition）";
+        box.append(title);
+        box.append(overrideList(historical));
+        if (view.legacy_build_snapshot_hash === true) {
+          var legacy = document.createElement("div");
+          legacy.className = "muted";
+          legacy.textContent = "此 build 為舊版記錄：build_snapshot_hash 為舊語意（compiled content hash），不是新版 build-input snapshot identity。";
+          box.append(legacy);
+        }
+        target.append(box);
+      }
+
+      function loadProvenanceHistory() {
+        return requestJson("/workspace/dashboard/provenance").then(function (view) {
+          renderProvenanceHistory(view);
+          return view;
+        }).catch(function (error) {
+          setAreaError("provenance-history", error);
+          return undefined;
+        });
       }
 
       function renderArtifactList(snapshot) {
