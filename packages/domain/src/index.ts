@@ -92,6 +92,13 @@ export {
   type ResearchMonitorTaskView,
 } from "./coverage-center.js";
 export {
+  deriveAssessmentWideResearchProjection,
+  deriveCoverageAssessmentEligibility,
+  type AssessmentWideResearchProjection,
+  type CoverageAssessmentEligibility,
+  type CoverageEligibilityReasonCode,
+} from "./coverage-eligibility.js";
+export {
   deriveArtifactCoverageLineage,
   type ArtifactBindingState,
   type ArtifactCoverageLineage,

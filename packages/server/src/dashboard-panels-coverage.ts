@@ -779,7 +779,10 @@ function renderCoverageCenter(payload) {
   var matrix = payload.matrix;
   var msgText = "";
   if (matrix.assessment !== undefined) {
-    msgText = "評估 " + matrix.assessment.id + "@" + matrix.assessment.revision.slice(0, 8) + "（" + matrix.assessment.pass + (matrix.assessment.fresh ? "、目前" : "、已過期") + "）";
+    msgText = "評估 " + matrix.assessment.id + "@" + matrix.assessment.revision.slice(0, 8) + "（" + matrix.assessment.pass + (matrix.assessment.fresh ? "、輸入仍新鮮" : "、輸入已過期") + "）";
+    if (matrix.assessment.eligibility_reason) {
+      msgText += " · " + matrix.assessment.eligibility_reason;
+    }
     if (matrix.stale_components && matrix.stale_components.length > 0) {
       msgText += " · 失效元件：" + matrix.stale_components.join(", ");
     }
@@ -791,7 +794,13 @@ function renderCoverageCenter(payload) {
   heading.className = "coverage-center-heading";
   var headingParts = [];
   if (matrix.assessment !== undefined) {
-    headingParts.push("評估 " + matrix.assessment.id + "@" + matrix.assessment.revision.slice(0, 8) + "（" + matrix.assessment.pass + (matrix.assessment.fresh ? "、目前" : "、已過期") + "）");
+    headingParts.push("評估 " + matrix.assessment.id + "@" + matrix.assessment.revision.slice(0, 8) + "（" + matrix.assessment.pass + (matrix.assessment.fresh ? "、輸入仍新鮮" : "、輸入已過期") + "）");
+    if (matrix.assessment.actionable !== undefined) {
+      headingParts.push(matrix.assessment.actionable ? "可操作" : "不可操作");
+    }
+    if (matrix.assessment.eligibility_reason) {
+      headingParts.push(matrix.assessment.eligibility_reason);
+    }
   }
   if (matrix.requirement_set !== undefined) {
     headingParts.push("requirement set " + matrix.requirement_set.revision.slice(0, 8));
@@ -803,13 +812,27 @@ function renderCoverageCenter(payload) {
   container.appendChild(heading);
 
   var topBar = document.createElement("div");
-  topBar.style.cssText = "margin-bottom:12px;display:flex;gap:8px;";
-  var allMissingCount = (matrix.cells || []).filter(function (c) { return c.status === "missing" || c.status === "stale"; }).length;
-  var allResearchBtn = coverageButton("啟動全量缺口研究 (" + allMissingCount + " 個缺口)", function () {
+  topBar.style.cssText = "margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;";
+  var wideResearch = matrix.assessment_wide_research;
+  var allResearchBtn = coverageButton("", function () {
     startCoverageResearch(null, true);
   });
-  allResearchBtn.style.cssText = "padding:6px 14px;background:#0066cc;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:bold;";
+  if (wideResearch !== null && wideResearch !== undefined && wideResearch.enabled) {
+    allResearchBtn.textContent = "啟動全量缺口研究 (" + wideResearch.target_count + " 個缺口)";
+    allResearchBtn.style.cssText = "padding:6px 14px;background:#0066cc;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:bold;";
+  } else {
+    allResearchBtn.textContent = "全量缺口研究";
+    allResearchBtn.disabled = true;
+    allResearchBtn.title = wideResearch !== null && wideResearch !== undefined && wideResearch.disabled_reason ? wideResearch.disabled_reason : "目前不具備全量研究資格";
+    allResearchBtn.style.cssText = "padding:6px 14px;background:#b0b8c0;color:#fff;border:none;border-radius:4px;font-weight:bold;";
+  }
   topBar.appendChild(allResearchBtn);
+  if (wideResearch !== null && wideResearch !== undefined && !wideResearch.enabled && wideResearch.disabled_reason) {
+    var wideReason = document.createElement("span");
+    wideReason.className = "muted";
+    wideReason.textContent = wideResearch.disabled_reason;
+    topBar.appendChild(wideReason);
+  }
   container.appendChild(topBar);
 
   var grid = document.createElement("div");

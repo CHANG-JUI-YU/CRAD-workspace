@@ -6,6 +6,12 @@ import {
 } from "@st-workspace/core";
 import { coverageAssessmentFreshness, currentResolutions, deriveCoverageRequirementExplanations } from "./coverage-assessment.js";
 import { coverageAssessmentStaleComponents } from "./downstream-invalidation.js";
+import {
+  deriveAssessmentWideResearchProjection,
+  deriveCoverageAssessmentEligibility,
+  type AssessmentWideResearchProjection,
+  type CoverageAssessmentEligibility,
+} from "./coverage-eligibility.js";
 
 export type CoverageCenterCellStatus = "missing" | "candidate_signal" | "source_covered" | "supplement" | "creative_completion" | "conflict" | "stale";
 
@@ -74,8 +80,22 @@ export interface CoverageCenterCell {
 
 export interface CoverageCenterMatrix {
   requirement_set?: { id: string; revision: string };
-  assessment?: { id: string; revision: string; pass: string; fresh: boolean };
+  assessment?: {
+    id: string;
+    revision: string;
+    pass: string;
+    fresh: boolean;
+    current: boolean;
+    formal: boolean;
+    requirement_set_current: boolean;
+    actionable: boolean;
+    eligibility_reason_code?: string;
+    eligibility_reason?: string;
+    prerequisite?: string;
+  };
   stale_components: string[];
+  assessment_eligibility: CoverageAssessmentEligibility;
+  assessment_wide_research: AssessmentWideResearchProjection;
   cells: CoverageCenterCell[];
 }
 
@@ -132,42 +152,51 @@ const CELL_STATUS_MAP: Readonly<Record<string, CoverageCenterCellStatus>> = {
 
 export function deriveCoverageCellActions(
   cellStatus: CoverageCenterCellStatus,
-  assessmentStale: boolean,
+  eligibility: CoverageAssessmentEligibility,
   exhausted: boolean,
   scope: { character_id?: string; requirement_id: string; assessment_id?: string; assessment_revision?: string },
 ): CoverageCellActionOption[] {
   const options: CoverageCellActionOption[] = [];
 
-  if (assessmentStale) {
+  if (!eligibility.actionable) {
+    const reasonText = eligibility.reason ?? "Coverage Assessment 尚不具備 mutation 資格";
+    const reassessLabel =
+      eligibility.reason_code === "COVERAGE_ASSESSMENT_NOT_FORMAL"
+        ? "前往 Fact Review／Formal Assessment"
+        : eligibility.reason_code === "COVERAGE_ASSESSMENT_STALE"
+          ? "重新執行 Formal Assessment"
+          : "重新進行評估";
+    const reassessTargetPanel =
+      eligibility.reason_code === "COVERAGE_ASSESSMENT_NOT_FORMAL" ? "fact-review" : "coverage";
     options.push({
       action: "reassess",
-      label: "重新進行評估",
+      label: reassessLabel,
       enabled: true,
-      prerequisite: { action: "reassess", target_panel: "coverage" },
+      prerequisite: { action: "reassess", target_panel: reassessTargetPanel },
       scope,
     });
     options.push({
       action: "research",
       label: "來源研究",
       enabled: false,
-      disabled_reason: "Coverage Assessment 已過期，需先重新執行 Formal Assessment",
-      prerequisite: { action: "reassess", target_panel: "coverage" },
+      disabled_reason: reasonText,
+      prerequisite: { action: "reassess", target_panel: reassessTargetPanel },
       scope,
     });
     options.push({
       action: "supplement",
       label: "提供補充資料",
       enabled: false,
-      disabled_reason: "Coverage Assessment 已過期，需先重新執行 Formal Assessment",
-      prerequisite: { action: "reassess", target_panel: "coverage" },
+      disabled_reason: reasonText,
+      prerequisite: { action: "reassess", target_panel: reassessTargetPanel },
       scope,
     });
     options.push({
       action: "creative_completion",
       label: "授權創作補全",
       enabled: false,
-      disabled_reason: "Coverage Assessment 已過期，需先重新執行 Formal Assessment",
-      prerequisite: { action: "reassess", target_panel: "coverage" },
+      disabled_reason: reasonText,
+      prerequisite: { action: "reassess", target_panel: reassessTargetPanel },
       scope,
     });
     return options;
@@ -233,6 +262,8 @@ export function deriveCoverageCellActions(
 export function deriveCoverageCenterMatrix(state: ProjectState): CoverageCenterMatrix {
   const requirementSet = state.coverage_requirement_sets.at(-1);
   const assessment = state.coverage_assessments.at(-1);
+  const eligibility = deriveCoverageAssessmentEligibility(state);
+  const wideResearch = deriveAssessmentWideResearchProjection(state);
   const staleComponents = assessment === undefined ? [] : coverageAssessmentStaleComponents(state, assessment);
   const fresh = assessment !== undefined && staleComponents.length === 0;
   const explanations = deriveCoverageRequirementExplanations(state);
@@ -345,7 +376,7 @@ export function deriveCoverageCenterMatrix(state: ProjectState): CoverageCenterM
       ...(assessment?.revision === undefined ? {} : { assessment_revision: assessment.revision }),
     };
 
-    const typedActions = deriveCoverageCellActions(status, !fresh, unSupersededExhausted, cellScope);
+    const typedActions = deriveCoverageCellActions(status, eligibility, unSupersededExhausted, cellScope);
     const enabledActions = typedActions.filter((a) => a.enabled).map((a) => a.action);
 
     const cellReason = explanation?.reason ?? (status === "stale" ? (staleComponents.length > 0 ? `assessment 已過期：${staleComponents.join("、")}` : "assessment 已過期") : item.reason);
@@ -378,8 +409,26 @@ export function deriveCoverageCenterMatrix(state: ProjectState): CoverageCenterM
 
   return {
     ...(requirementSet === undefined ? {} : { requirement_set: { id: requirementSet.id, revision: requirementSet.revision } }),
-    ...(assessment === undefined ? {} : { assessment: { id: assessment.id, revision: assessment.revision, pass: assessment.pass, fresh } }),
+    ...(assessment === undefined
+      ? {}
+      : {
+          assessment: {
+            id: assessment.id,
+            revision: assessment.revision,
+            pass: assessment.pass,
+            fresh,
+            current: eligibility.current,
+            formal: eligibility.formal,
+            requirement_set_current: eligibility.requirement_set_current,
+            actionable: eligibility.actionable,
+            ...(eligibility.reason_code === undefined ? {} : { eligibility_reason_code: eligibility.reason_code }),
+            ...(eligibility.reason === undefined ? {} : { eligibility_reason: eligibility.reason }),
+            ...(eligibility.prerequisite === undefined ? {} : { prerequisite: eligibility.prerequisite }),
+          },
+        }),
     stale_components: staleComponents,
+    assessment_eligibility: eligibility,
+    assessment_wide_research: wideResearch,
     cells,
   };
 }

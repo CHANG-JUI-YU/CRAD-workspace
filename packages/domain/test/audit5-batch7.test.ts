@@ -382,7 +382,7 @@ describe("Audit 5 batch 7 domain", () => {
       const statuses = matrix.cells.map((cell) => cell.status);
       const expected: CoverageCenterCellStatus[] = ["missing", "candidate_signal", "source_covered", "supplement", "creative_completion", "conflict"];
       expect(statuses).toEqual(expected);
-      expect(matrix.assessment).toEqual({ id: "assess-1", revision: contentHash("assess-1"), pass: "formal", fresh: true });
+      expect(matrix.assessment).toEqual({ id: "assess-1", revision: contentHash("assess-1"), pass: "formal", fresh: true, current: true, formal: true, requirement_set_current: true, actionable: true });
       expect(matrix.requirement_set).toEqual({ id: "set-1", revision: "set-rev-1" });
       const personality = matrix.cells.find((cell) => cell.requirement_id === "req.personality")!;
       expect(personality.requirement_label).toBe("人格特質");

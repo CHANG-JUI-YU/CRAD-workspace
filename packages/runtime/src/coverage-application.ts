@@ -23,6 +23,7 @@ import {
   createResearchBatchWithScope,
   createUserSupplementSource,
   coverageAssessmentFreshness,
+  deriveCoverageAssessmentEligibility,
   deriveCoverageCenterMatrix,
   deriveCoverageReadiness,
   deriveDownstreamInvalidation,
@@ -38,7 +39,11 @@ import {
   KNOWLEDGE_EXTRACTOR_REVISION,
   RESEARCH_IN_FLIGHT_STATUSES,
   type CoverageCenterMatrix,
+  type CoverageResearchRecoverInput,
   type CoverageResearchStartPreviewInput,
+  type CoverageResolutionConfirmInput,
+  type CoverageResolutionPreviewInput,
+  type CoverageSupplementInput,
   type DownstreamInvalidationReport,
   type ExecutionActorInput,
   type ResearchCandidateInput,
@@ -83,20 +88,11 @@ export interface CoverageCommandResult {
 }
 
 function assertAssessmentMatches(state: ProjectState, assessmentId: string, assessmentRevision: string): void {
-  const latestAssessment = state.coverage_assessments.at(-1);
-  if (latestAssessment === undefined || latestAssessment.id !== assessmentId || latestAssessment.revision !== assessmentRevision) {
-    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "[COVERAGE_ASSESSMENT_STALE] The coverage assessment changed or is not the current assessment; reload and retry.", true);
-  }
-  if (latestAssessment.pass !== "formal") {
-    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "[COVERAGE_ASSESSMENT_STALE] The coverage assessment pass is not formal; run a formal assessment first.", true);
-  }
-  const currentReqSet = state.coverage_requirement_sets.at(-1);
-  if (currentReqSet === undefined || currentReqSet.id !== latestAssessment.requirement_set_id || currentReqSet.revision !== latestAssessment.requirement_set_revision) {
-    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "[COVERAGE_ASSESSMENT_STALE] The requirement set changed since the coverage assessment was performed.", true);
-  }
-  if (!coverageAssessmentFreshness(state, latestAssessment)) {
-    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "[COVERAGE_ASSESSMENT_STALE] The coverage assessment is stale due to changed inputs (blueprint, sources, facts, or review run).", true);
-  }
+  const eligibility = deriveCoverageAssessmentEligibility(state, assessmentId, assessmentRevision);
+  if (eligibility.actionable) return;
+  const code = eligibility.reason_code ?? "COVERAGE_ASSESSMENT_STALE";
+  const message = eligibility.reason ?? "The coverage assessment is not actionable; reload and retry.";
+  throw new CoreError("COVERAGE_ASSESSMENT_STALE", `[${code}] ${message}`, true);
 }
 
 function executionInputFor(operation: OperationRecord, actor: string, agentId: string, role: string): ExecutionContext {
@@ -568,10 +564,11 @@ export async function coverageResearchExhaust(
 }
 
 /** Read-only preview of resolution consequences (two-phase confirmation, phase 1). */
-export async function coverageResolutionPreview(deps: CoverageApplicationDeps, input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; action: "user_supplement" | "creative_completion" }): Promise<ResolutionConsequencesPreview> {
+export async function coverageResolutionPreview(deps: CoverageApplicationDeps, input: CoverageResolutionPreviewInput): Promise<ResolutionConsequencesPreview> {
   const state = await deps.repository.read();
+  assertAssessmentMatches(state, input.assessment_id, input.assessment_revision);
   const assessment = state.coverage_assessments.find((item) => item.id === input.assessment_id);
-  if (assessment === undefined || assessment.revision !== input.assessment_revision) throw new CoreError("COVERAGE_ASSESSMENT_STALE", "The coverage assessment changed since the dashboard was loaded; reload and retry.", true);
+  if (assessment === undefined) throw new CoreError("COVERAGE_ASSESSMENT_STALE", "[COVERAGE_ASSESSMENT_NOT_CURRENT] The coverage assessment no longer exists; reload and retry.", true);
   return previewResolutionConsequences(state, assessment, input.requirement_id, input.character_id, input.action);
 }
 
@@ -623,7 +620,7 @@ export async function executeCoverageResolutionConfirm(deps: CoverageApplication
 export async function coverageResolutionConfirm(
   deps: CoverageApplicationDeps,
   actor: string,
-  input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; action: "user_supplement" | "creative_completion"; choice: string; rationale: string; operation_id?: string },
+  input: CoverageResolutionConfirmInput,
 ): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
   assertAssessmentMatches(state, input.assessment_id, input.assessment_revision);
@@ -799,7 +796,7 @@ export async function executeCoverageSupplement(
 export async function coverageSupplement(
   deps: CoverageApplicationDeps,
   actor: string,
-  input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; text?: string; url?: string; operation_id?: string },
+  input: Omit<CoverageSupplementInput, "attachments">,
   attachments: Array<{ name: string; content: Uint8Array; media_type?: string }> = [],
 ): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
@@ -1114,17 +1111,7 @@ export async function executeCoverageResearchRecover(
 export async function coverageResearchRecover(
   deps: CoverageApplicationDeps,
   actor: string,
-  input: {
-    task_id: string;
-    action: "revise_query" | "revise_constraints" | "manual_url" | "supplement" | "creative_completion";
-    query_seeds?: string[];
-    source_constraints?: string[];
-    url?: string;
-    text?: string;
-    choice?: string;
-    rationale?: string;
-    operation_id?: string;
-  },
+  input: Omit<CoverageResearchRecoverInput, "attachments">,
   attachments: Array<{ name: string; content: Uint8Array; media_type?: string }> = [],
 ): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();

@@ -111,6 +111,10 @@ import {
   runInitialCoverageAssessment,
   type ArtifactCoverageLineage,
   type CoverageCenterMatrix,
+  type CoverageResearchRecoverInput,
+  type CoverageResolutionConfirmInput,
+  type CoverageResolutionPreviewInput,
+  type CoverageSupplementInput,
   type DownstreamInvalidationReport,
   type EvidenceContextView,
   type ResearchMonitor,
@@ -2695,19 +2699,19 @@ export class WorkspaceRuntime {
     return coverageResearchExhaustQuery(this.coverageDeps(), actor, taskId, claimGeneration, leaseOwner, searchedQueries, sourceFamilies, exhaustedReason);
   }
 
-  async coverageResolutionPreview(input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; action: "user_supplement" | "creative_completion" }): Promise<import("@st-workspace/domain").ResolutionConsequencesPreview> {
+  async coverageResolutionPreview(input: CoverageResolutionPreviewInput): Promise<import("@st-workspace/domain").ResolutionConsequencesPreview> {
     return coverageResolutionPreviewQuery(this.coverageDeps(), input);
   }
 
-  async coverageResolutionConfirm(actor: string, input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; action: "user_supplement" | "creative_completion"; choice: string; rationale: string }): Promise<Record<string, unknown>> {
+  async coverageResolutionConfirm(actor: string, input: CoverageResolutionConfirmInput): Promise<Record<string, unknown>> {
     return coverageResolutionConfirmQuery(this.coverageDeps(), actor, input);
   }
 
-  async coverageSupplement(actor: string, input: { assessment_id: string; assessment_revision: string; requirement_id: string; character_id?: string; text?: string; url?: string }, attachments: Array<{ name: string; content: Uint8Array; media_type?: string }>): Promise<Record<string, unknown>> {
+  async coverageSupplement(actor: string, input: Omit<CoverageSupplementInput, "attachments">, attachments: Array<{ name: string; content: Uint8Array; media_type?: string }>): Promise<Record<string, unknown>> {
     return coverageSupplementQuery(this.coverageDeps(), actor, input, attachments);
   }
 
-  async coverageResearchRecover(actor: string, input: { task_id: string; action: "revise_query" | "revise_constraints" | "manual_url" | "supplement" | "creative_completion"; query_seeds?: string[]; source_constraints?: string[]; url?: string }, attachments: Array<{ name: string; content: Uint8Array; media_type?: string }> = []): Promise<Record<string, unknown>> {
+  async coverageResearchRecover(actor: string, input: Omit<CoverageResearchRecoverInput, "attachments">, attachments: Array<{ name: string; content: Uint8Array; media_type?: string }> = []): Promise<Record<string, unknown>> {
     return coverageResearchRecoverQuery(this.coverageDeps(), actor, input, attachments);
   }
 
