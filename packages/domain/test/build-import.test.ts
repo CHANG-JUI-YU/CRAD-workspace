@@ -8,6 +8,7 @@ import {
   MemoryProjectRepository,
   CoreError,
   contentHash,
+  provenanceConfirmationFingerprint,
   qualityProfileForLevel,
   type ArtifactRecord,
   type OperationRecord,
@@ -35,6 +36,14 @@ function injectCompilerError(): void {
 function operation(id: string, kind: OperationRecord["kind"]): OperationRecord {
   const timestamp = new Date().toISOString();
   return { id, kind, request: kind, status: "running", created_at: timestamp, updated_at: timestamp, progress: [] };
+}
+
+async function previewAndFingerprint(service: BuildService, repository: MemoryProjectRepository | FileProjectRepository, previewOpId: string, options?: { mode_selection?: "zhuji" | "palette" | "both" }): Promise<string> {
+  const state = await repository.read();
+  await repository.commit(state.revision, (current) => ({ ...current, operations: [...current.operations, operation(previewOpId, "build")] }));
+  const preview = await service.run(previewOpId, "preview current card", "publisher", options);
+  expect(preview.status).toBe("completed");
+  return provenanceConfirmationFingerprint((await repository.read()).builds.at(-1)!.provenance_summary!);
 }
 
 async function blobJson(repository: MemoryProjectRepository, hash: string | undefined): Promise<Record<string, unknown>> {
@@ -92,7 +101,9 @@ describe("build, publish and import", () => {
         operations: [operation("op-publish", "build")],
       }));
 
-      const result = await new BuildService(repository).run("op-publish", "publish current card", "publisher");
+      const service = new BuildService(repository);
+      const fingerprint = await previewAndFingerprint(service, repository, "op-confirm");
+      const result = await service.run("op-publish", "publish current card", "publisher", { expected_provenance_fingerprint: fingerprint });
       expect(result.status).toBe("completed");
       const output = JSON.parse(await readFile(path.join(root, "demo", "exports", "一條桃華-珠璣角色卡.json"), "utf8")) as Record<string, unknown>;
       expect(output).toMatchObject({ spec: "chara_card_v3", spec_version: "3.0", data: { name: "一條桃華" } });
@@ -118,8 +129,9 @@ describe("build, publish and import", () => {
     const service = new BuildService(repository);
     const preview = await service.run("op-build", "preview current card", "builder");
     expect(preview.status).toBe("completed");
+    const fingerprint = provenanceConfirmationFingerprint((await repository.read()).builds[0]!.provenance_summary!);
     await repository.commit((await repository.read()).revision, (state) => ({ ...state, operations: [...state.operations, operation("op-publish", "build")] }));
-    const publish = await service.run("op-publish", "publish current card", "publisher");
+    const publish = await service.run("op-publish", "publish current card", "publisher", { expected_provenance_fingerprint: fingerprint });
     expect(publish.status).toBe("completed");
     const state = await repository.read();
     expect(state.publishes).toHaveLength(1);
@@ -286,9 +298,11 @@ describe("build, publish and import", () => {
       quality_profile: { level: "none", blocking_severity: "none", overrides: {}, override_audit: [] },
       operations: [operation("op-none", "build")],
     }));
-    const result = await new BuildService(repository).run("op-none", "publish", "publisher");
+    const service = new BuildService(repository);
+    const fingerprint = await previewAndFingerprint(service, repository, "op-confirm-none");
+    const result = await service.run("op-none", "publish", "publisher", { expected_provenance_fingerprint: fingerprint });
     expect(result.status).toBe("completed");
-    expect((await repository.read()).builds[0]?.quality_policy_snapshot).toMatchObject({ level: "none", blocking_severity: "none" });
+    expect((await repository.read()).builds.at(-1)?.quality_policy_snapshot).toMatchObject({ level: "none", blocking_severity: "none" });
   });
 
   it("publishes when the current profile override allows a stored blocking severity", async () => {
@@ -305,7 +319,9 @@ describe("build, publish and import", () => {
       quality_profile: qualityProfileForLevel("normal", { PLACEHOLDER_REMAINS: "info" }),
       operations: [operation("op-profile-override", "build")],
     }));
-    const result = await new BuildService(repository).run("op-profile-override", "publish", "publisher");
+    const service = new BuildService(repository);
+    const fingerprint = await previewAndFingerprint(service, repository, "op-confirm-override");
+    const result = await service.run("op-profile-override", "publish", "publisher", { expected_provenance_fingerprint: fingerprint });
     expect(result.status).toBe("completed");
     expect((await repository.read()).publishes).toHaveLength(1);
   });
@@ -397,7 +413,9 @@ describe("build, publish and import", () => {
       ],
       operations: [operation("op-mixed-palette", "build")],
     }));
-    const result = await new BuildService(repository).run("op-mixed-palette", "publish current card", "publisher", { mode_selection: "palette" });
+    const service = new BuildService(repository);
+    const fingerprint = await previewAndFingerprint(service, repository, "op-confirm-palette", { mode_selection: "palette" });
+    const result = await service.run("op-mixed-palette", "publish current card", "publisher", { mode_selection: "palette", expected_provenance_fingerprint: fingerprint });
     expect(result.status).toBe("completed");
     const state = await repository.read();
     expect(state.publishes[0]?.export_json_path).toBe("exports/Mode-Choice-調色盤角色卡.json");
@@ -461,7 +479,6 @@ describe("build, publish and import", () => {
   });
 
   it("does not publish or mark the project published when compilation fails during publish", async () => {
-    injectCompilerError();
     const repository = new MemoryProjectRepository("compiler-error-publish");
     const target = artifact("op-author", "A complete character.");
     const timestamp = new Date().toISOString();
@@ -475,12 +492,15 @@ describe("build, publish and import", () => {
       quality_profile: qualityProfileForLevel("normal", { PLACEHOLDER_REMAINS: "info" }),
       operations: [operation("op-error-publish", "build")],
     }));
-    const result = await new BuildService(repository).run("op-error-publish", "publish current card", "publisher");
+    const service = new BuildService(repository);
+    const fingerprint = await previewAndFingerprint(service, repository, "op-confirm-error");
+    injectCompilerError();
+    const result = await service.run("op-error-publish", "publish current card", "publisher", { expected_provenance_fingerprint: fingerprint });
     expect(result.status).toBe("blocked");
     const state = await repository.read();
     expect(state.publishes).toHaveLength(0);
     expect(state.project_status).not.toBe("published");
-    expect(state.builds[0]?.status).toBe("failed");
+    expect(state.builds.at(-1)?.status).toBe("failed");
   });
 
   it("keeps a successful preview with diagnostics when the compiler only reports warnings", async () => {
@@ -546,7 +566,9 @@ describe("build, publish and import", () => {
         operations: [operation("op-publish-palette", "build")],
       }));
 
-      const result = await new BuildService(repository).run("op-publish-palette", "publish current card", "publisher", { mode_selection: "palette" });
+      const service = new BuildService(repository);
+      const fingerprint = await previewAndFingerprint(service, repository, "op-confirm-palette", { mode_selection: "palette" });
+      const result = await service.run("op-publish-palette", "publish current card", "publisher", { mode_selection: "palette", expected_provenance_fingerprint: fingerprint });
       expect(result.status).toBe("completed");
       const paletteOutput = JSON.parse(await readFile(path.join(root, "demo", "exports", "一條桃華-調色盤角色卡.json"), "utf8")) as Record<string, unknown>;
       expect(paletteOutput).toMatchObject({ spec: "chara_card_v3", spec_version: "3.0" });
@@ -670,7 +692,9 @@ describe("build, publish and import", () => {
       reviews,
       operations: [operation("op-selected-mode", "build")],
     }));
-    const result = await new BuildService(repository).run("op-selected-mode", "publish current card", "publisher", { mode_selection: "zhuji" });
+    const service = new BuildService(repository);
+    const fingerprint = await previewAndFingerprint(service, repository, "op-confirm-zhuji", { mode_selection: "zhuji" });
+    const result = await service.run("op-selected-mode", "publish current card", "publisher", { mode_selection: "zhuji", expected_provenance_fingerprint: fingerprint });
     expect(result.status).toBe("completed");
     const state = await repository.read();
     expect(state.publishes).toHaveLength(1);

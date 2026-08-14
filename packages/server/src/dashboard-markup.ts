@@ -153,6 +153,7 @@ export const DASHBOARD_MARKUP = `<body>
           <option value="">依專案自動判斷</option>
           <option value="zhuji">Zhuji</option>
           <option value="palette">Palette</option>
+          <option value="both" id="readiness-both-mode" disabled>Both（兩者）</option>
         </select>
         <button id="check-readiness" class="primary" type="button">重新檢查</button>
       </div>

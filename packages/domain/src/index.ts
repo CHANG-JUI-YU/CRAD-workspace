@@ -17,6 +17,7 @@ import { assertResearchCapability } from "./research-orchestration.js";
 export { canonicalizeSource, canonicalizeSourceUrl, extractSourceUrl } from "./source-canonicalizer.js";
 
 export { AuthoringService, createCoverageBindingForArtifact, type AuthoringExecutionResult, inferAuthoringKind } from "./authoring.js";
+export { resolveBuildModeSelection, type BuildModeResolution } from "./build-mode.js";
 export { BuildService, type BuildExecutionResult } from "./build.js";
 export { ConversionService, type ConversionExecutionResult } from "./conversion.js";
 export { ImportService, type ImportExecutionResult } from "./import.js";

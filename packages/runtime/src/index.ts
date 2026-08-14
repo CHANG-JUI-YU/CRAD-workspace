@@ -26,6 +26,7 @@ import {
   publishedCardExportPath,
   publishedCardPngExportPath,
   provenanceConfirmationFingerprint,
+  resolveCoverImageIdentity,
   templateJsonSchemaFor,
   templateProposalValueSchema,
   zhujiProposalJsonSchema,
@@ -72,6 +73,7 @@ import {
   type CoverageSnapshot,
   type ExecutionContext,
   type ExecutionLeaseContext,
+  type ProvenancePublishCommandPayload,
 } from "@st-workspace/core";
 import {
   AuthoringService,
@@ -108,6 +110,7 @@ import {
   deriveSourceAdaptationWorkflow,
   deriveStructuredPublishDiagnostics,
   emptyDownstreamInvalidationReport,
+  resolveBuildModeSelection,
   runFormalCoverageAssessment,
   runInitialCoverageAssessment,
   type ArtifactCoverageLineage,
@@ -122,6 +125,7 @@ import {
   type SourceAdaptationWorkflowModel,
   type StructuredPublishDiagnostics,
 } from "@st-workspace/domain";
+import type { CardModeSelection } from "@st-workspace/compiler";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
 import type { DashboardProvenanceView, PublishProvenanceConfirmInput, PublishProvenancePreviewResult } from "./runtime-views.js";
 import { coverageResearchCandidates as coverageResearchCandidatesQuery, coverageResearchClaim as coverageResearchClaimQuery, coverageResearchExhaust as coverageResearchExhaustQuery, coverageResearchRecover as coverageResearchRecoverQuery, coverageResearchStart as coverageResearchStartQuery, coverageResearchStartPreview as coverageResearchStartPreviewQuery, coverageResolutionConfirm as coverageResolutionConfirmQuery, coverageResolutionPreview as coverageResolutionPreviewQuery, coverageSupplement as coverageSupplementQuery, dashboardCoverage as dashboardCoverageQuery, dashboardCoverageCenter as dashboardCoverageCenterQuery, executeCoverageResearchCandidates, executeCoverageResearchClaim, executeCoverageResearchExhaust, executeCoverageResearchRecover, executeCoverageResearchStart, executeCoverageResolutionConfirm, executeCoverageSupplement, type CoverageApplicationDeps, type CoverageCommandOutcome } from "./coverage-application.js";
@@ -506,6 +510,9 @@ export class WorkspaceRuntime {
       : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID", execution),
     coverage_research_recover: (operation, command, _context, execution) => command.type === "coverage_research_recover"
       ? this.replayCoverageCommand("coverage.research.recovered", operation, executeCoverageResearchRecover)
+      : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID", execution),
+    provenance_publish: (operation, command, context, execution) => command.type === "provenance_publish"
+      ? this.replayProvenancePublish(operation, command.payload, context, execution)
       : this.markNeedsInput(operation, "OPERATION_COMMAND_INVALID", execution),
   };
 
@@ -1680,10 +1687,18 @@ export class WorkspaceRuntime {
     if (kind === "build") {
       const state = await this.repository.read();
       if (this.hasAuditMarker(operation.id, "publish.committed", state) || this.hasAuditMarker(operation.id, "build.previewed", state)) return responseFromOperation(await this.completeReplayedOperation(operation, execution));
-       const result = await this.build.run(operation.id, operation.request, execution);
+      const command = operation.command;
+      const provenancePayload = command?.type === "provenance_publish" ? command.payload : undefined;
+      const buildOptions = provenancePayload === undefined
+        ? {}
+        : {
+            ...(provenancePayload.mode_selection === undefined ? {} : { mode_selection: provenancePayload.mode_selection }),
+            expected_provenance_fingerprint: provenancePayload.fingerprint,
+          };
+      const result = await this.build.run(operation.id, operation.request, execution, buildOptions);
       const latest = await this.repository.read();
       const finalOperation = latest.operations.find((item) => item.id === operation.id);
-       return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.build_id === undefined ? [] : [result.build_id], blocked: result.status === "blocked" ? [operation.id] : [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
+      return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.build_id === undefined ? [] : [result.build_id], blocked: result.status === "blocked" ? [operation.id] : [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
     }
     await this.assertExecutionLease(execution);
     const latest = await this.repository.read();
@@ -1695,6 +1710,20 @@ export class WorkspaceRuntime {
         : item),
     }));
     return { operation_id: operation.id, status: "needs_input", summary: "需要更多工作描述才能繼續。", completed: [], blocked: [], question: "請描述要執行的來源、知識、創作、審查或建置操作。", ...(agent === undefined ? {} : { agent_id: agent }) };
+  }
+
+  private async replayProvenancePublish(operation: OperationRecord, payload: ProvenancePublishCommandPayload, _context: WorkspaceContext, execution: ExecutionContext): Promise<RequestResult> {
+    const agent = execution.executionAgent.id;
+    const state = await this.repository.read();
+    if (this.hasAuditMarker(operation.id, "publish.committed", state) || this.hasAuditMarker(operation.id, "build.previewed", state)) return responseFromOperation(await this.completeReplayedOperation(operation, execution));
+    const buildOptions = {
+      ...(payload.mode_selection === undefined ? {} : { mode_selection: payload.mode_selection }),
+      expected_provenance_fingerprint: payload.fingerprint,
+    };
+    const result = await this.build.run(operation.id, operation.request, execution, buildOptions);
+    const latest = await this.repository.read();
+    const finalOperation = latest.operations.find((item) => item.id === operation.id);
+    return { operation_id: operation.id, status: result.status, summary: result.summary, completed: result.build_id === undefined ? [] : [result.build_id], blocked: result.status === "blocked" ? [operation.id] : [], ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }), ...(agent === undefined ? {} : { agent_id: agent }) };
   }
 
   /* c8 ignore stop */
@@ -2574,27 +2603,23 @@ export class WorkspaceRuntime {
     return dashboardSnapshotQuery({ repository: this.repository });
   }
 
-  async publishPreview(mode?: "zhuji" | "palette"): Promise<WorkflowGateResult> {
+  async publishPreview(mode?: CardModeSelection): Promise<WorkflowGateResult> {
     return publishPreviewQuery({ repository: this.repository }, mode);
   }
 
-  async publishProvenancePreview(mode?: "zhuji" | "palette"): Promise<PublishProvenancePreviewResult> {
+  async publishProvenancePreview(mode?: CardModeSelection): Promise<PublishProvenancePreviewResult> {
     const state = await this.repository.read();
     const projection = computeProjectProjection(state);
-    const availableModes = {
-      zhuji: projection.publishPlan("zhuji").entries.some((entry) => entry.kind === "zhuji"),
-      palette: projection.publishPlan("palette").entries.some((entry) => entry.kind === "palette"),
-    };
     const manifest = buildRequiredArtifactManifest(state);
-    const manifestMode = manifest === undefined || manifest.export_modes === "both" ? undefined : manifest.export_modes;
-    const onlyAvailableMode = availableModes.zhuji === availableModes.palette
-      ? undefined
-      : availableModes.zhuji
-      ? "zhuji"
-      : availableModes.palette
-      ? "palette"
-      : undefined;
-    const effectiveMode = mode ?? (manifestMode !== undefined && availableModes[manifestMode] ? manifestMode : onlyAvailableMode);
+    const modeResolution = resolveBuildModeSelection(state, mode);
+    if (modeResolution.status !== "ok") {
+      return {
+        available: false,
+        reason: modeResolution.reason ?? "MODE_SELECTION_REQUIRED",
+        historical_decisions: deriveHistoricalDecisionRefs(state, undefined),
+      };
+    }
+    const effectiveMode = modeResolution.mode_selection;
     const plan = computeBuildPlan(state, effectiveMode);
     const latestAssessment = state.coverage_assessments.at(-1);
     let coverageSnapshot: CoverageSnapshot | undefined;
@@ -2607,12 +2632,14 @@ export class WorkspaceRuntime {
       }
       coverageSnapshot = buildCoverageSnapshot(state, latestAssessment, plan);
     }
-    const buildSnapshotHash = computeBuildSnapshotHash(state, plan, effectiveMode, coverageSnapshot);
-    const composition = buildProvenanceCompositionSummary(state, coverageSnapshot, buildSnapshotHash);
+    const imageIdentity = resolveCoverImageIdentity(state, manifest?.primary_character_id).identity;
+    const buildSnapshotHash = computeBuildSnapshotHash(state, plan, effectiveMode, coverageSnapshot, imageIdentity);
+    const composition = buildProvenanceCompositionSummary(state, coverageSnapshot, buildSnapshotHash, undefined, imageIdentity);
     return {
       available: true,
       fingerprint: provenanceConfirmationFingerprint(composition),
       build_snapshot_hash: buildSnapshotHash,
+      ...(effectiveMode === undefined ? {} : { mode_selection: effectiveMode }),
       composition,
       historical_decisions: deriveHistoricalDecisionRefs(state, coverageSnapshot),
     };
@@ -2620,7 +2647,15 @@ export class WorkspaceRuntime {
 
   async publishProvenanceConfirm(input: PublishProvenanceConfirmInput, context: WorkspaceContext): Promise<RequestResult & { downstream_invalidation: DownstreamInvalidationReport }> {
     const before = await this.repository.read();
-    const preview = await this.publishProvenancePreview(input.mode_selection);
+    const modeResolution = resolveBuildModeSelection(before, input.mode_selection);
+    if (modeResolution.status === "invalid") {
+      throw new CoreError("BUILD_MODE_INVALID", modeResolution.question ?? "Invalid build mode selection.", true);
+    }
+    if (modeResolution.status === "needs_input") {
+      throw new CoreError("MODE_SELECTION_REQUIRED", modeResolution.question ?? "A build mode selection is required.", true);
+    }
+    const effectiveMode = modeResolution.mode_selection;
+    const preview = await this.publishProvenancePreview(effectiveMode);
     if (!preview.available || preview.fingerprint === undefined) {
       throw new CoreError("PROVENANCE_CONFIRMATION_STALE", `Provenance composition is not ready for confirmation: ${preview.reason ?? "unavailable"}`, true);
     }
@@ -2645,7 +2680,14 @@ export class WorkspaceRuntime {
       created_at: now(),
       updated_at: now(),
       progress: [],
-      command: { version: 1, type: "request" },
+      command: {
+        version: 1,
+        type: "provenance_publish",
+        payload: {
+          fingerprint: input.fingerprint,
+          ...(effectiveMode === undefined ? {} : { mode_selection: effectiveMode }),
+        },
+      },
       ...(input.idempotency_key === undefined ? {} : { idempotency_key: input.idempotency_key }),
       lease_owner: syncLease.owner,
       lease_token: syncLease.token,
@@ -2671,7 +2713,7 @@ export class WorkspaceRuntime {
         actor: context.actor,
         occurred_at: now(),
         project_revision: current.revision + 1,
-        details: { kind: "build", provenance_confirmation: true },
+        details: { kind: "build", provenance_confirmation: true, mode_selection: effectiveMode ?? null },
       }],
     }));
     const execution = this.executionContextFor(operation, context, { id: "build-provenance", role: "builder" }, { lease: syncLease });
@@ -2684,7 +2726,7 @@ export class WorkspaceRuntime {
         };
       });
       const result = await this.build.run(operation.id, "發布（provenance 已確認）", execution, {
-        ...(input.mode_selection === undefined ? {} : { mode_selection: input.mode_selection }),
+        ...(effectiveMode === undefined ? {} : { mode_selection: effectiveMode }),
         expected_provenance_fingerprint: input.fingerprint,
       });
       const latest = await this.repository.read();
@@ -3004,6 +3046,23 @@ export class WorkspaceRuntime {
         : { ...context, actor: execution.auditActor, fetcher: this.fetcher, execution };
       const resumed = await this.sources.resume(pending.id, trimmed, sourceContext);
       return { operation_id: pending.id, status: resumed.status, summary: resumed.summary, completed: resumed.completed, blocked: resumed.blocked };
+    }
+    if (pending.kind === "build" && pending.command?.type === "provenance_publish") {
+      const payload = pending.command.payload as { fingerprint: string; mode_selection?: CardModeSelection };
+      const resumed = await this.build.run(pending.id, pending.request, execution, {
+        ...(payload.mode_selection === undefined ? {} : { mode_selection: payload.mode_selection }),
+        expected_provenance_fingerprint: payload.fingerprint,
+      });
+      const latest = await this.repository.read();
+      const finalOperation = latest.operations.find((item) => item.id === pending.id);
+      return {
+        operation_id: pending.id,
+        status: resumed.status,
+        summary: resumed.summary,
+        completed: resumed.build_id === undefined ? [] : [resumed.build_id],
+        blocked: resumed.status === "blocked" ? [pending.id] : [],
+        ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
+      };
     }
     if (pending.kind === "build" && /模式|珠璣|調色盤|zhuji|palette/iu.test(pending.question ?? "")) {
       const pendingBuildMode = parseBuildModeSelection(trimmed);

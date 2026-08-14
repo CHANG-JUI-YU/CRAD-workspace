@@ -148,13 +148,21 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       }
       if (request.method === "GET" && url.pathname === "/workspace/publish/preview") {
         const rawMode = url.searchParams.get("mode");
-        const mode = rawMode === "zhuji" || rawMode === "palette" ? rawMode : undefined;
+        if (rawMode !== null && rawMode !== "" && rawMode !== "zhuji" && rawMode !== "palette" && rawMode !== "both") {
+          json(response, 400, structuredError(new CoreError("BUILD_MODE_INVALID", `Invalid build mode: ${rawMode}`, true)));
+          return true;
+        }
+        const mode = rawMode === null || rawMode === "" ? undefined : rawMode as "zhuji" | "palette" | "both";
         json(response, 200, await (await deps.getRuntime()).publishPreview(mode));
         return true;
       }
       if (request.method === "GET" && url.pathname === "/workspace/publish/provenance/preview") {
         const rawMode = url.searchParams.get("mode");
-        const mode = rawMode === "zhuji" || rawMode === "palette" ? rawMode : undefined;
+        if (rawMode !== null && rawMode !== "" && rawMode !== "zhuji" && rawMode !== "palette" && rawMode !== "both") {
+          json(response, 400, structuredError(new CoreError("BUILD_MODE_INVALID", `Invalid build mode: ${rawMode}`, true)));
+          return true;
+        }
+        const mode = rawMode === null || rawMode === "" ? undefined : rawMode as "zhuji" | "palette" | "both";
         json(response, 200, await (await deps.getRuntime()).publishProvenancePreview(mode));
         return true;
       }

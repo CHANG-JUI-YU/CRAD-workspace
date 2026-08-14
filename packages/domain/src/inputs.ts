@@ -16,7 +16,7 @@ export type RequestInput = z.infer<typeof requestSchema>;
 
 export const publishProvenanceConfirmSchema = z.object({
   fingerprint: z.string().min(1),
-  mode_selection: z.enum(["zhuji", "palette"]).optional(),
+  mode_selection: z.enum(["zhuji", "palette", "both"]).optional(),
   idempotency_key: z.string().min(1).optional(),
   operation_id: z.string().min(1).optional(),
 }).strict();

@@ -1,9 +1,10 @@
 import { canonicalCardJson, characterCardV3Schema, type CharacterCardV3 } from "@st-workspace/adapters-ccv3";
 import { isBuiltInPlaceholderImage, readCardFromPng, readPngImageInfo } from "@st-workspace/adapters-png";
 import { computeProjectProjection, contentHash, publishedCardExportPath, publishedCardPngExportPath, type ProjectRepository, type RepairInspection, type RepairReport } from "@st-workspace/core";
-import { buildRequiredArtifactManifest, reviewRunProjectionRevision, validateWorkflow, type WorkflowGateResult } from "@st-workspace/domain";
+import { buildRequiredArtifactManifest, resolveBuildModeSelection, reviewRunProjectionRevision, validateWorkflow, type WorkflowGateResult } from "@st-workspace/domain";
 import { availableCardModesRuntime, latestByKey } from "./operation-runner.js";
 import type { DashboardBlueprint, DashboardBuildReadiness, DashboardSnapshot, TavernCheckResult, TavernCompatibilityReport } from "./runtime-views.js";
+import type { CardModeSelection } from "@st-workspace/compiler";
 
 export interface BuildApplicationDeps {
   repository: ProjectRepository;
@@ -248,21 +249,23 @@ export async function dashboardSnapshot(deps: BuildApplicationDeps): Promise<Das
   };
 }
 
-export async function publishPreview(deps: BuildApplicationDeps, mode?: "zhuji" | "palette"): Promise<WorkflowGateResult> {
+export async function publishPreview(deps: BuildApplicationDeps, mode?: CardModeSelection): Promise<WorkflowGateResult> {
   const state = await deps.repository.read();
-  const modes = availableCardModesRuntime(state);
-  let effective = mode;
-  if (effective === undefined) {
-    if (modes.zhuji && modes.palette) {
-      return {
-        ok: false,
-        diagnostics: [{ code: "MODE_SELECTION_REQUIRED", message: "同時存在 Zhuji 與 Palette 模組；請先選擇本次打包模式（zhuji 或 palette）再檢查就緒狀態。", severity: "error" }],
-      };
-    }
-    if (modes.zhuji) effective = "zhuji";
-    if (modes.palette) effective = "palette";
+  const resolution = resolveBuildModeSelection(state, mode);
+  if (resolution.status === "invalid") {
+    return {
+      ok: false,
+      diagnostics: [{ code: "BUILD_MODE_INVALID", message: resolution.reason ?? "所要求的建置模式無效。", severity: "error" }],
+    };
   }
-  const manifest = buildRequiredArtifactManifest(state, effective);
+  if (resolution.status === "needs_input") {
+    return {
+      ok: false,
+      diagnostics: [{ code: "MODE_SELECTION_REQUIRED", message: resolution.reason ?? "同時存在 Zhuji 與 Palette 模組；請先選擇本次打包模式（zhuji、palette 或 both）再檢查就緒狀態。", severity: "error" }],
+    };
+  }
+  const effective = resolution.mode_selection;
+  const manifest = buildRequiredArtifactManifest(state, effective === "both" ? undefined : effective);
   return validateWorkflow(state, "publish", manifest);
 }
 

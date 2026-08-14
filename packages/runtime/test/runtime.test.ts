@@ -696,10 +696,13 @@ describe("natural language runtime boundary", () => {
     const preview = await runtime.request("Preview current card", { actor: "builder", attachments: [] });
     expect(preview.status).toBe("completed");
     const publish = await runtime.request("Publish current card", { actor: "publisher", attachments: [] });
-    expect(publish.status).toBe("completed");
+    expect(publish.status).toBe("blocked");
+    expect(publish.summary).toContain("confirmation");
     const imported = await runtime.request("Import character card", { actor: "importer", attachments: [{ name: "card.json", content: new TextEncoder().encode(JSON.stringify({ name: "Imported", description: "A complete imported card" })) }] });
     expect(imported.status).toBe("completed");
-    expect((await repository.read()).publishes).toHaveLength(1);
+    const state = await repository.read();
+    expect(state.publishes).toHaveLength(0);
+    expect(state.audit.some((entry) => entry.event === "publish.confirmation_required")).toBe(true);
   });
 
   it("resumes a dual-mode build choice on the same operation and asks again for the next build", async () => {

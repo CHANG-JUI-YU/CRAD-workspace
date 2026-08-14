@@ -141,6 +141,13 @@ export type CoverageResolutionConfirmCommandPayload = z.infer<typeof coverageRes
 export type CoverageSupplementCommandPayload = z.infer<typeof coverageSupplementCommandPayloadSchema>;
 export type CoverageResearchRecoverCommandPayload = z.infer<typeof coverageResearchRecoverCommandPayloadSchema>;
 
+export const provenancePublishCommandPayloadSchema = z.object({
+  fingerprint: z.string().min(1),
+  mode_selection: z.enum(["zhuji", "palette", "both"]).optional(),
+}).strict();
+
+export type ProvenancePublishCommandPayload = z.infer<typeof provenancePublishCommandPayloadSchema>;
+
 export const operationCommandSchema = z.discriminatedUnion("type", [
   z.object({ version: z.literal(1), type: z.literal("template_proposal"), payload: templateProposalValueSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
   z.object({ version: z.literal(1), type: z.literal("zhuji_proposal"), payload: zhujiProposalValueSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
@@ -158,6 +165,7 @@ export const operationCommandSchema = z.discriminatedUnion("type", [
   z.object({ version: z.literal(1), type: z.literal("coverage_resolution_confirm"), payload: coverageResolutionConfirmCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
   z.object({ version: z.literal(1), type: z.literal("coverage_supplement"), payload: coverageSupplementCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
   z.object({ version: z.literal(1), type: z.literal("coverage_research_recover"), payload: coverageResearchRecoverCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
+  z.object({ version: z.literal(1), type: z.literal("provenance_publish"), payload: provenancePublishCommandPayloadSchema, attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
   z.object({ version: z.literal(1), type: z.literal("invalid"), payload: z.object({ code: z.literal("OPERATION_COMMAND_INVALID"), message: z.string().min(1), recoverable: z.literal(true), original_type: z.string().min(1).optional() }).strict(), attachment_refs: operationAttachmentRefsSchema.optional() }).strict(),
 ]);
 

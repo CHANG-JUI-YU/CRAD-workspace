@@ -11,6 +11,7 @@ import {
   provenanceConfirmationFingerprint,
   publishedCardExportPath,
   publishedCardPngExportPath,
+  resolveCoverImageIdentity,
   type BuildRecord,
   type OperationRecord,
   type ProjectRepository,
@@ -22,6 +23,7 @@ import { buildRequiredArtifactManifest } from "./required-artifacts.js";
 import { validateWorkflow } from "./workflow-gate.js";
 import { buildCoverageSnapshot, coverageAssessmentFreshness, projectActiveCoverageBindings } from "./coverage-assessment.js";
 import { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput } from "./execution-context.js";
+import { resolveBuildModeSelection } from "./build-mode.js";
 
 export interface BuildExecutionResult {
   build_id?: string;
@@ -60,32 +62,10 @@ export class BuildService {
       return { status: "needs_input", summary: "目前沒有可建置的 artifact。" };
     }
     const projection = computeProjectProjection(initial);
-    const availableModes = {
-      zhuji: projection.publishPlan("zhuji").entries.some((entry) => entry.kind === "zhuji"),
-      palette: projection.publishPlan("palette").entries.some((entry) => entry.kind === "palette"),
-    };
     const manifest = buildRequiredArtifactManifest(initial);
-    const manifestMode = manifest === undefined || manifest.export_modes === "both" ? undefined : manifest.export_modes;
-    const modeUsable = (selection: CardModeSelection): boolean => {
-      if (manifestMode !== undefined) {
-        if (selection === "both" || selection !== manifestMode) return false;
-        return availableModes[manifestMode];
-      }
-      if (selection === "both") return availableModes.zhuji && availableModes.palette;
-      return availableModes[selection];
-    };
-    const onlyAvailableMode = availableModes.zhuji === availableModes.palette
-      ? undefined
-      : availableModes.zhuji
-      ? "zhuji"
-      : availableModes.palette
-      ? "palette"
-      : undefined;
-    const modeSelection = options.mode_selection ?? (manifestMode !== undefined && availableModes[manifestMode] ? manifestMode : onlyAvailableMode);
-    if (availableModes.zhuji && availableModes.palette && modeSelection === undefined) {
-      const question = manifestMode === undefined
-        ? "本次打包同時有珠璣與調色盤模組，請選擇：珠璣、調色盤，或兩者。"
-        : `本次打包同時有珠璣與調色盤模組；Blueprint 選定 ${manifestMode === "zhuji" ? "珠璣" : "調色盤"}，本次只能打包該模式。請確認後再試。`;
+    const modeResolution = resolveBuildModeSelection(initial, options.mode_selection);
+    if (modeResolution.status === "needs_input" || modeResolution.status === "invalid") {
+      const question = modeResolution.question ?? "請選擇打包模式。";
       await this.repository.commit(initial.revision, (current) => {
         assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
         return {
@@ -100,23 +80,13 @@ export class BuildService {
             actor,
             occurred_at: now(),
             project_revision: current.revision + 1,
-            details: { available_modes: ["zhuji", "palette"], ...(manifestMode === undefined ? {} : { manifest_mode: manifestMode }) },
+            details: { available_modes: ["zhuji", "palette"], ...(modeResolution.manifest_mode === undefined ? {} : { manifest_mode: modeResolution.manifest_mode }), ...(modeResolution.reason === undefined ? {} : { reason: modeResolution.reason }) },
           }],
         };
       });
       return { status: "needs_input", summary: question };
     }
-    if (modeSelection !== undefined && !modeUsable(modeSelection)) {
-      const question = `本次打包可用模式為${availableModes.zhuji ? "珠璣" : ""}${availableModes.zhuji && availableModes.palette ? "、" : ""}${availableModes.palette ? "調色盤" : ""}，請重新選擇。`;
-      await this.repository.commit(initial.revision, (current) => {
-        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
-        return {
-          ...current,
-          operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, { status: "needs_input", question }) : item),
-        };
-      });
-      return { status: "needs_input", summary: question };
-    }
+    const modeSelection = modeResolution.mode_selection;
     const exactManifest = buildRequiredArtifactManifest(initial, modeSelection === "zhuji" || modeSelection === "palette" ? modeSelection : undefined);
     if (isPublishRequest) {
       const gate = validateWorkflow(initial, "publish", exactManifest);
@@ -145,26 +115,51 @@ export class BuildService {
         });
         return { status: "blocked", summary: `Publish blocked: ${diagnostics.join(" ")}` };
       }
+      if (options.expected_provenance_fingerprint === undefined) {
+        const summary = "Publish requires provenance confirmation: please prepare and confirm the immutable provenance composition before publishing.";
+        await this.repository.commit(initial.revision, (current) => {
+          assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+          return {
+            ...current,
+            operations: current.operations.map((item) => item.id === operationId
+              ? updateOperation(item, {
+                  status: "blocked",
+                  question: summary,
+                  result_summary: summary,
+                  progress: [...item.progress, { item_id: operationId, status: "blocked", message: "provenance confirmation required for publish" }],
+                })
+              : item),
+            audit: [...current.audit, {
+              id: internalId("audit"),
+              operation_id: operationId,
+              event: "publish.confirmation_required",
+              actor,
+              occurred_at: now(),
+              project_revision: current.revision + 1,
+              details: { codes: ["PROVENANCE_CONFIRMATION_REQUIRED"] },
+            }],
+          };
+        });
+        return { status: "blocked", summary };
+      }
     }
     const buildWarnings: string[] = [];
     let coverImage: Uint8Array | undefined;
+    let imageIdentity = resolveCoverImageIdentity(initial, manifest?.primary_character_id).identity;
     const isCharacterCardExport = manifest?.primary_character_id !== undefined || projection.currentArtifacts.some((art) => art.kind === "character");
     if (initial.images.length === 0) {
       if (isCharacterCardExport) {
         buildWarnings.push("CARD_IMAGE_MISSING: 專案尚未上傳角色圖片；本次輸出將使用內建佔位圖。");
       }
     } else {
-      const primaryCharacterId = manifest?.primary_character_id;
-      const selected = primaryCharacterId === undefined
-        ? [...initial.images].at(-1)
-        : ([...initial.images].reverse().find((image) => image.character_id === primaryCharacterId)
-          ?? [...initial.images].reverse().find((image) => image.character_id === undefined));
-      if (selected === undefined) {
+      const resolved = resolveCoverImageIdentity(initial, manifest?.primary_character_id);
+      if (resolved.selected === undefined) {
         buildWarnings.push("CARD_IMAGE_MISSING: 找不到 primary 角色的已上傳圖片，也沒有未綁定角色的封面圖；本次輸出將使用內建佔位圖。");
       } else {
-        const blob = await this.repository.readBlob(selected.blob_hash);
+        const blob = await this.repository.readBlob(resolved.selected.blob_hash);
         if (blob === undefined) {
-          buildWarnings.push(`CARD_IMAGE_MISSING: 角色圖 ${selected.id} 的 blob 遺失；本次輸出將使用內建佔位圖。`);
+          buildWarnings.push(`CARD_IMAGE_MISSING: 角色圖 ${resolved.selected.id} 的 blob 遺失；本次輸出將使用內建佔位圖。`);
+          imageIdentity = { mode: "placeholder" };
         } else {
           coverImage = blob;
         }
@@ -225,8 +220,8 @@ export class BuildService {
       }
     }
     const coverageSnapshot = latestAssessment === undefined ? undefined : buildCoverageSnapshot(initial, latestAssessment, plan);
-    const buildSnapshotHash = computeBuildSnapshotHash(initial, plan, modeSelection, coverageSnapshot);
-    const provenanceSummary = buildProvenanceCompositionSummary(initial, coverageSnapshot, buildSnapshotHash, hash);
+    const buildSnapshotHash = computeBuildSnapshotHash(initial, plan, modeSelection, coverageSnapshot, imageIdentity);
+    const provenanceSummary = buildProvenanceCompositionSummary(initial, coverageSnapshot, buildSnapshotHash, hash, imageIdentity);
     const confirmationFingerprint = provenanceConfirmationFingerprint(provenanceSummary);
     if (options.expected_provenance_fingerprint !== undefined && options.expected_provenance_fingerprint !== confirmationFingerprint) {
       const summary = "Provenance confirmation mismatch: build inputs changed after preview; please re-preview before publishing.";
@@ -247,7 +242,7 @@ export class BuildService {
             actor,
             occurred_at: now(),
             project_revision: current.revision + 1,
-            details: { expected: options.expected_provenance_fingerprint, actual: confirmationFingerprint, build_snapshot_hash: buildSnapshotHash },
+            details: { expected: options.expected_provenance_fingerprint, actual: confirmationFingerprint, build_snapshot_hash: buildSnapshotHash, codes: ["PROVENANCE_CONFIRMATION_STALE"] },
           }],
         };
       });

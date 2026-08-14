@@ -123,6 +123,9 @@ importers:
       '@st-workspace/adapters-png':
         specifier: workspace:*
         version: link:../adapters-png
+      '@st-workspace/compiler':
+        specifier: workspace:*
+        version: link:../compiler
       '@st-workspace/core':
         specifier: workspace:*
         version: link:../core

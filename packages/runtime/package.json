@@ -17,6 +17,7 @@
     "@st-workspace/adapters": "workspace:*",
     "@st-workspace/adapters-ccv3": "workspace:*",
     "@st-workspace/adapters-png": "workspace:*",
+    "@st-workspace/compiler": "workspace:*",
     "@st-workspace/core": "workspace:*",
     "@st-workspace/domain": "workspace:*"
   }

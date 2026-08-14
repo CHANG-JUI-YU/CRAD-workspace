@@ -1,8 +1,28 @@
 import { z } from "zod";
 import type { CoverageSnapshot } from "./coverage.js";
-import type { ProjectState } from "./project-state.js";
+import type { ImageRecord, ProjectState } from "./project-state.js";
 import type { BuildPlan } from "./project-projection.js";
 import { canonicalJson, contentHash } from "./core-utilities.js";
+
+export interface ProvenanceImageCrop {
+  width: number;
+  height: number;
+  offset_x: number;
+  offset_y: number;
+}
+
+export interface ProvenanceImageIdentity {
+  mode: "uploaded" | "placeholder";
+  image_id?: string;
+  character_id?: string;
+  blob_hash?: string;
+  media_type?: string;
+  width?: number;
+  height?: number;
+  aspect_ratio?: string;
+  crop?: ProvenanceImageCrop;
+  transformation_revision?: string;
+}
 
 export interface ProvenanceCoverageRef {
   character_id?: string;
@@ -40,6 +60,7 @@ export interface ProvenanceCompositionSummary {
   coverage_snapshot_hash?: string;
   build_snapshot_hash: string;
   compiled_content_hash?: string;
+  image_identity?: ProvenanceImageIdentity;
 }
 
 const provenanceCoverageRefSchema = z.object({
@@ -62,6 +83,26 @@ const provenanceQualityOverrideRefSchema = z.object({
   by: z.string().min(1),
 }).strict();
 
+const provenanceImageCropSchema = z.object({
+  width: z.number().nonnegative(),
+  height: z.number().nonnegative(),
+  offset_x: z.number().nonnegative(),
+  offset_y: z.number().nonnegative(),
+}).strict();
+
+export const provenanceImageIdentitySchema = z.object({
+  mode: z.enum(["uploaded", "placeholder"]),
+  image_id: z.string().min(1).optional(),
+  character_id: z.string().min(1).optional(),
+  blob_hash: z.string().min(1).optional(),
+  media_type: z.string().min(1).optional(),
+  width: z.number().nonnegative().optional(),
+  height: z.number().nonnegative().optional(),
+  aspect_ratio: z.string().min(1).optional(),
+  crop: provenanceImageCropSchema.optional(),
+  transformation_revision: z.string().min(1).optional(),
+}).strict();
+
 export const provenanceCompositionSummarySchema = z.object({
   source_backed: z.object({ refs: z.array(provenanceCoverageRefSchema), count: z.number().int().nonnegative() }).strict(),
   user_supplement: z.object({ refs: z.array(provenanceCoverageRefSchema), count: z.number().int().nonnegative() }).strict(),
@@ -78,6 +119,7 @@ export const provenanceCompositionSummarySchema = z.object({
   coverage_snapshot_hash: z.string().min(1).optional(),
   build_snapshot_hash: z.string().min(1),
   compiled_content_hash: z.string().min(1).optional(),
+  image_identity: provenanceImageIdentitySchema.optional(),
 }).strict();
 
 function refsFrom(values: readonly { character_id?: string; requirement_id: string }[]): ProvenanceCoverageRef[] {
@@ -151,13 +193,64 @@ export function deriveHistoricalDecisionRefs(state: ProjectState, coverageSnapsh
     }));
 }
 
-export const BUILD_SNAPSHOT_PAYLOAD_VERSION = "build-snapshot-v1";
+export const BUILD_SNAPSHOT_PAYLOAD_VERSION = "build-snapshot-v2";
+
+export function imageTransformationRevision(crop: ProvenanceImageCrop | undefined, aspectRatio: string | undefined): string | undefined {
+  if (crop === undefined && aspectRatio === undefined) {
+    return undefined;
+  }
+  return contentHash(canonicalJson({ crop: crop ?? null, aspect_ratio: aspectRatio ?? null }));
+}
+
+export function resolveCoverImageIdentity(state: ProjectState, primaryCharacterId: string | undefined): { identity: ProvenanceImageIdentity; selected: ImageRecord | undefined } {
+  if (state.images.length === 0) {
+    return { identity: { mode: "placeholder" }, selected: undefined };
+  }
+  let selected: ImageRecord | undefined;
+  if (primaryCharacterId !== undefined) {
+    for (let index = state.images.length - 1; index >= 0; index -= 1) {
+      const candidate = state.images[index];
+      if (candidate !== undefined && candidate.character_id === primaryCharacterId) {
+        selected = candidate;
+        break;
+      }
+    }
+  }
+  if (selected === undefined) {
+    for (let index = state.images.length - 1; index >= 0; index -= 1) {
+      const candidate = state.images[index];
+      if (candidate !== undefined && candidate.character_id === undefined) {
+        selected = candidate;
+        break;
+      }
+    }
+  }
+  if (selected === undefined) {
+    return { identity: { mode: "placeholder" }, selected: undefined };
+  }
+  const crop: ProvenanceImageCrop | undefined = selected.crop === undefined ? undefined : { width: selected.crop.width, height: selected.crop.height, offset_x: selected.crop.offset_x, offset_y: selected.crop.offset_y };
+  const transformationRevision = imageTransformationRevision(crop, selected.aspect_ratio);
+  const identity: ProvenanceImageIdentity = {
+    mode: "uploaded",
+    image_id: selected.id,
+    ...(selected.character_id === undefined ? {} : { character_id: selected.character_id }),
+    blob_hash: selected.blob_hash,
+    ...(selected.media_type === undefined ? {} : { media_type: selected.media_type }),
+    ...(selected.width === undefined ? {} : { width: selected.width }),
+    ...(selected.height === undefined ? {} : { height: selected.height }),
+    ...(selected.aspect_ratio === undefined ? {} : { aspect_ratio: selected.aspect_ratio }),
+    ...(crop === undefined ? {} : { crop }),
+    ...(transformationRevision === undefined ? {} : { transformation_revision: transformationRevision }),
+  };
+  return { identity, selected };
+}
 
 export function computeBuildSnapshotHash(
   state: ProjectState,
   plan: BuildPlan,
   modeSelection: string | null | undefined,
   coverageSnapshot: CoverageSnapshot | undefined,
+  imageIdentity?: ProvenanceImageIdentity,
 ): string {
   const artifactHashes = new Map<string, string | null>();
   for (const artifact of state.artifacts) {
@@ -202,11 +295,12 @@ export function computeBuildSnapshotHash(
       overrides: overrideEntries,
       override_audit: overrideAudit,
     },
+    image: imageIdentity ?? null,
   };
   return contentHash(canonicalJson(payload));
 }
 
-export const PROVENANCE_CONFIRMATION_VERSION = "provenance-confirmation-v1";
+export const PROVENANCE_CONFIRMATION_VERSION = "provenance-confirmation-v2";
 
 export function provenanceConfirmationFingerprint(composition: ProvenanceCompositionSummary): string {
   const payload = {
@@ -232,11 +326,12 @@ export function provenanceConfirmationFingerprint(composition: ProvenanceComposi
     fact_review_run_id: composition.fact_review_run?.id ?? null,
     fact_projection_revision: composition.fact_projection_revision ?? null,
     coverage_snapshot_hash: composition.coverage_snapshot_hash ?? null,
+    image: composition.image_identity ?? null,
   };
   return contentHash(canonicalJson(payload));
 }
 
-export function buildProvenanceCompositionSummary(state: ProjectState, coverageSnapshot: CoverageSnapshot | undefined, buildSnapshotHash: string, compiledContentHash?: string): ProvenanceCompositionSummary {
+export function buildProvenanceCompositionSummary(state: ProjectState, coverageSnapshot: CoverageSnapshot | undefined, buildSnapshotHash: string, compiledContentHash?: string, imageIdentity?: ProvenanceImageIdentity): ProvenanceCompositionSummary {
   const qualityAudit = state.quality_profile.override_audit ?? [];
   const qualityOverrides: ProvenanceQualityOverrideRef[] = qualityAudit.length > 0
     ? qualityAudit
@@ -266,5 +361,6 @@ export function buildProvenanceCompositionSummary(state: ProjectState, coverageS
     ...(coverageSnapshot === undefined ? {} : { coverage_snapshot_hash: coverageSnapshot.snapshot_hash }),
     build_snapshot_hash: buildSnapshotHash,
     ...(compiledContentHash === undefined ? {} : { compiled_content_hash: compiledContentHash }),
+    ...(imageIdentity === undefined ? {} : { image_identity: imageIdentity }),
   };
 }

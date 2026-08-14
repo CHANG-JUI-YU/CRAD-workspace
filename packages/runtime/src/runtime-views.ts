@@ -1,4 +1,5 @@
 import type { AttachmentStore, ProvenanceCompositionSummary, ProvenanceOverrideRef, RepairInspection } from "@st-workspace/core";
+import type { CardModeSelection } from "@st-workspace/compiler";
 import type { SourceFetcher } from "@st-workspace/domain";
 
 export interface DashboardProjectView {
@@ -193,13 +194,14 @@ export interface PublishProvenancePreviewResult {
   reason?: string;
   fingerprint?: string;
   build_snapshot_hash?: string;
+  mode_selection?: CardModeSelection;
   composition?: ProvenanceCompositionSummary;
   historical_decisions: ProvenanceOverrideRef[];
 }
 
 export interface PublishProvenanceConfirmInput {
   fingerprint: string;
-  mode_selection?: "zhuji" | "palette";
+  mode_selection?: CardModeSelection;
   idempotency_key?: string;
   operation_id?: string;
 }

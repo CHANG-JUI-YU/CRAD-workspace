@@ -109,6 +109,7 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
         void runTask("打包預覽", async function () {
           var payload = await requestJson("/workspace/build/preview");
           renderBuildReadiness(payload);
+          updateBothModeOption(payload.modes, payload.export_modes);
           return payload;
         });
       });

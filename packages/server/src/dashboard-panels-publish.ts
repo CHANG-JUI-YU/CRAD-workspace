@@ -100,6 +100,20 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         }
       }
 
+      function updateBothModeOption(modes, exportModes) {
+        var option = byId("readiness-both-mode");
+        if (option === null || option === undefined) return;
+        var modesOk = isRecord(modes) && modes.zhuji === true && modes.palette === true;
+        var manifestOk = exportModes === undefined || exportModes === null || exportModes === "both";
+        if (modesOk && manifestOk) {
+          option.disabled = false;
+          option.removeAttribute("title");
+        } else {
+          option.disabled = true;
+          option.setAttribute("title", "僅在 Zhuji 與 Palette 都可建置且 Blueprint 未限制單一模式時可用");
+        }
+      }
+
       function renderReadiness(diagnostics) {
         var target = byId("readiness-list");
         target.textContent = "";
@@ -379,6 +393,13 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         return list;
       }
 
+      function provenanceImageMeta(label, value) {
+        var meta = document.createElement("span");
+        meta.className = "muted";
+        meta.textContent = label + " " + String(value);
+        return meta;
+      }
+
       function hashRow(label, value, container, legacyNote) {
         var rowEl = document.createElement("div");
         rowEl.className = "provenance-hash-row";
@@ -422,7 +443,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
           if (confirmButton) confirmButton.disabled = true;
           return;
         }
-        currentProvenanceConfirmation = { fingerprint: firstString(preview, ["fingerprint"]) };
+        currentProvenanceConfirmation = { fingerprint: firstString(preview, ["fingerprint"]), mode_selection: firstString(preview, ["mode_selection"]) || undefined };
         var composition = preview.composition;
         var box = document.createElement("div");
         box.className = "workflow-stage";
@@ -484,6 +505,35 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
           hashRow("build snapshot hash（build input identity）", composition.build_snapshot_hash, identityBox, legacyNote);
         }
         if (composition.compiled_content_hash) hashRow("compiled content hash（compiler output identity）", composition.compiled_content_hash, identityBox);
+        var imageIdentity = isRecord(composition.image_identity) ? composition.image_identity : undefined;
+        if (imageIdentity) {
+          var imageRow = document.createElement("div");
+          imageRow.className = "provenance-hash-row";
+          var imageLabel = document.createElement("span");
+          imageLabel.className = "muted";
+          imageLabel.textContent = "封面圖片 identity";
+          imageRow.append(imageLabel);
+          var imageValue = document.createElement("code");
+          imageValue.textContent = imageIdentity.mode === "placeholder" ? "placeholder（內建佔位圖）" : String(imageIdentity.image_id || "?");
+          imageRow.append(imageValue);
+          if (imageIdentity.mode === "placeholder") {
+            var placeholderBadge = document.createElement("span");
+            placeholderBadge.className = "status-badge cancelled";
+            placeholderBadge.textContent = "placeholder";
+            imageRow.append(placeholderBadge);
+          }
+          if (imageIdentity.blob_hash) {
+            imageRow.append(provenanceImageMeta("blob hash", imageIdentity.blob_hash));
+          }
+          if (imageIdentity.character_id) imageRow.append(provenanceImageMeta("character_id", imageIdentity.character_id));
+          if (imageIdentity.media_type) imageRow.append(provenanceImageMeta("media_type", imageIdentity.media_type));
+          if (imageIdentity.aspect_ratio) imageRow.append(provenanceImageMeta("aspect_ratio", imageIdentity.aspect_ratio));
+          if (isRecord(imageIdentity.crop)) {
+            imageRow.append(provenanceImageMeta("crop", imageIdentity.crop.width + "x" + imageIdentity.crop.height + "@" + imageIdentity.crop.offset_x + "," + imageIdentity.crop.offset_y));
+          }
+          if (imageIdentity.transformation_revision) imageRow.append(provenanceImageMeta("transformation revision", imageIdentity.transformation_revision));
+          identityBox.append(imageRow);
+        }
         identities.append(identityBox);
         box.append(identities);
         target.append(box);
