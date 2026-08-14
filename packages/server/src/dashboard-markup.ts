@@ -243,17 +243,11 @@ export const DASHBOARD_MARKUP = `<body>
       <div class="panel-heading">
         <div>
           <h2 id="coverage-heading">Coverage 角色設定覆蓋</h2>
-          <p class="muted">來源覆蓋評估、研究任務與 resolution 的目前狀態。</p>
+          <p class="muted">Coverage Center 覆蓋矩陣與研究監控：角色 × 需求覆蓋矩陣、研究批次與 resolution 的權威即時狀態。</p>
         </div>
-        <button id="load-coverage" type="button">載入覆蓋</button>
+        <button id="load-coverage" type="button">載入覆蓋矩陣</button>
       </div>
-      <div id="coverage-message" class="panel-message" aria-live="polite">尚未取得覆蓋資料。</div>
-      <div id="coverage-grid" class="coverage-grid"></div>
-      <div class="coverage-center-heading">
-        <h3 id="coverage-center-heading">覆蓋矩陣與研究監控</h3>
-        <p class="muted">角色 × 需求矩陣、研究批次與任務的即時狀態。</p>
-      </div>
-      <div id="coverage-center-message" class="panel-message" aria-live="polite">尚未取得覆蓋矩陣。</div>
+      <div id="coverage-center-message" class="panel-message" aria-live="polite">尚未取得覆蓋矩陣資料。</div>
       <div id="coverage-center" class="coverage-center"></div>
       <div id="research-monitor" class="research-monitor"></div>
     </section>

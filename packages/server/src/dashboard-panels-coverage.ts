@@ -1,6 +1,14 @@
 export const DASHBOARD_PANELS_COVERAGE_JS = `
-var currentCoverage = null;
 var currentCoverageCenter = null;
+
+function setCoverageNotice(text) {
+  var el = byId("coverage-center-message") || byId("coverage-message");
+  if (el) el.textContent = text;
+}
+
+function setCoverageError(error) {
+  setAreaError(byId("coverage-center-message") ? "coverage-center-message" : "coverage-message", error);
+}
 
 function coverageCellTitle(cell) {
   return (cell.character_id || "世界") + " / " + cell.requirement_id;
@@ -9,9 +17,6 @@ function coverageCellTitle(cell) {
 function coverageAssessmentRef() {
   if (currentCoverageCenter !== null && currentCoverageCenter.matrix !== null && currentCoverageCenter.matrix.assessment !== undefined) {
     return currentCoverageCenter.matrix.assessment;
-  }
-  if (currentCoverage !== null && currentCoverage.assessment !== undefined) {
-    return currentCoverage.assessment;
   }
   return undefined;
 }
@@ -108,8 +113,8 @@ function startCoverageResearch(cell, isAssessmentWide) {
       }).then(function (result) {
         overlay.remove();
         renderMutationInvalidation(result.downstream_invalidation);
-        byId("coverage-message").textContent = result.summary || (result.reused ? "所請求的研究項目已有進行中的任務。" : "已建立研究批次。");
-        void loadCoverageData();
+        setCoverageNotice(result.summary || (result.reused ? "所請求的研究項目已有進行中的任務。" : "已建立研究批次。"));
+        void loadCoverageCenterData();
         void refreshWorkflowViews();
       }).catch(function (error) {
         submitBtn.disabled = false;
@@ -124,7 +129,7 @@ function startCoverageResearch(cell, isAssessmentWide) {
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
   }).catch(function (error) {
-    setAreaError("coverage-message", error);
+    setCoverageError(error);
   });
 }
 
@@ -135,7 +140,7 @@ function openRecoveryDialog(cell, action) {
   });
 
   if (exhaustedTasks.length === 0) {
-    setAreaError("coverage-message", "此項目沒有可恢復的 Exhausted 任務。");
+    setCoverageNotice("此項目沒有可恢復的 Exhausted 任務。");
     return;
   }
 
@@ -337,8 +342,8 @@ function openRecoveryDialog(cell, action) {
       postJson("/workspace/coverage/research/recover", payload).then(function (result) {
         overlay.remove();
         renderMutationInvalidation(result.downstream_invalidation);
-        byId("coverage-message").textContent = result.summary || "已完成任務恢復操作。";
-        void loadCoverageData();
+        setCoverageNotice(result.summary || "已完成任務恢復操作。");
+        void loadCoverageCenterData();
         void refreshWorkflowViews();
       }).catch(function (error) {
         submitBtn.disabled = false;
@@ -518,9 +523,8 @@ function openSupplementDialog(cell, preview) {
       }).then(function (result) {
         overlay.remove();
         renderMutationInvalidation(result.downstream_invalidation);
-        var msgContainer = byId("coverage-message");
-        msgContainer.textContent = "已成功提交補充資料（來源 ID: " + (result.source_id || "建立中") + "，分片數: " + (result.chunk_count || 0) + "）。" + (result.next_step ? " " + result.next_step : "");
-        void loadCoverageData();
+        setCoverageNotice("已成功提交補充資料（來源 ID: " + (result.source_id || "建立中") + "，分片數: " + (result.chunk_count || 0) + "）。" + (result.next_step ? " " + result.next_step : ""));
+        void loadCoverageCenterData();
         void refreshWorkflowViews();
       }).catch(function (error) {
         submitBtn.disabled = false;
@@ -575,116 +579,47 @@ function previewCoverageResolution(cell, action) {
       openSupplementDialog(cell, preview);
       return;
     }
-    var container = byId("coverage-message");
-    container.textContent = (preview.consequences || []).join("；");
-    var confirmButton = coverageButton("確認創作補全", function () {
-      var choice = window.prompt("請輸入確認理由：", "使用者授權創作補全。");
-      if (choice === null || choice.trim() === "") { container.textContent = "已取消確認。"; return; }
-      postJson("/workspace/coverage/resolution/confirm", {
-        assessment_id: assessment.id,
-        assessment_revision: assessment.revision,
-        requirement_id: cell.requirement_id,
-        ...(cell.character_id === undefined ? {} : { character_id: cell.character_id }),
-        action: action,
-        choice: choice.trim(),
-        rationale: choice.trim(),
-      }).then(function (result) {
-        renderMutationInvalidation(result.downstream_invalidation);
-        container.textContent = "已確認 resolution。";
-        void loadCoverageData();
-        void refreshWorkflowViews();
-      }).catch(function (error) {
-        setAreaError("coverage-message", error);
+    var msgEl = byId("coverage-center-message") || byId("coverage-message");
+    if (msgEl) {
+      msgEl.textContent = (preview.consequences || []).join("；");
+      var confirmButton = coverageButton("確認創作補全", function () {
+        var choice = window.prompt("請輸入確認理由：", "使用者授權創作補全。");
+        if (choice === null || choice.trim() === "") { setCoverageNotice("已取消確認。"); return; }
+        postJson("/workspace/coverage/resolution/confirm", {
+          assessment_id: assessment.id,
+          assessment_revision: assessment.revision,
+          requirement_id: cell.requirement_id,
+          ...(cell.character_id === undefined ? {} : { character_id: cell.character_id }),
+          action: action,
+          choice: choice.trim(),
+          rationale: choice.trim(),
+        }).then(function (result) {
+          renderMutationInvalidation(result.downstream_invalidation);
+          setCoverageNotice("已確認 resolution。");
+          void loadCoverageCenterData();
+          void refreshWorkflowViews();
+        }).catch(function (error) {
+          setCoverageError(error);
+        });
       });
-    });
-    container.appendChild(confirmButton);
+      msgEl.appendChild(confirmButton);
+    }
   }).catch(function (error) {
-    setAreaError("coverage-message", error);
+    setCoverageError(error);
   });
 }
 
-function renderCoverage(payload) {
-  currentCoverage = payload;
-  var grid = byId("coverage-grid");
-  var message = byId("coverage-message");
-  grid.textContent = "";
-  if (payload === null || payload.assessment === undefined) {
-    message.textContent = "目前沒有覆蓋評估資料；請先完成來源處理與正式評估。";
-    return;
-  }
-  var parts = [];
-  parts.push("評估 " + payload.assessment.pass + (payload.assessment.current ? "（目前）" : "（已過期，請重新評估）"));
-  parts.push("requirement set " + payload.requirement_set.revision.slice(0, 8));
-  parts.push(payload.ready ? "已就緒" : "尚未就緒");
-  message.textContent = parts.join(" · ");
-  var cells = payload.cells || [];
-  for (var i = 0; i < cells.length; i++) {
-    var cell = cells[i];
-    var row = document.createElement("div");
-    row.className = "coverage-cell";
-    var title = document.createElement("div");
-    title.className = "coverage-cell-title";
-    var badge = document.createElement("span");
-    badge.className = "status-badge " + statusClass(cell.status);
-    badge.textContent = cell.status;
-    title.appendChild(badge);
-    var label = document.createElement("span");
-    label.textContent = coverageCellTitle(cell);
-    title.appendChild(label);
-    row.appendChild(title);
-    var meta = document.createElement("div");
-    meta.className = "muted";
-    var metaParts = [];
-    (cell.research_tasks || []).forEach(function (task) {
-      metaParts.push("任務 " + task.id.slice(0, 8) + " " + task.status + (task.predecessor_id ? "（承接 " + task.predecessor_id.slice(0, 8) + "）" : ""));
-    });
-    (cell.resolutions || []).forEach(function (res) {
-      metaParts.push("resolution " + res.mode + " " + res.status);
-    });
-    meta.textContent = metaParts.join("；");
-    row.appendChild(meta);
-    var actions = document.createElement("div");
-    actions.className = "coverage-actions";
-    (cell.actions || []).forEach(function (action) {
-      if (action === "research") {
-        actions.appendChild(coverageButton("來源研究", function () { startCoverageResearch(cell, false); }));
-      }
-      if (action === "revise_query") {
-        actions.appendChild(coverageButton("修改查詢", function () { openRecoveryDialog(cell, "revise_query"); }));
-      }
-      if (action === "revise_constraints") {
-        actions.appendChild(coverageButton("修改來源限制", function () { openRecoveryDialog(cell, "revise_constraints"); }));
-      }
-      if (action === "manual_url") {
-        actions.appendChild(coverageButton("手動提供 URL", function () { openRecoveryDialog(cell, "manual_url"); }));
-      }
-      if (action === "supplement") {
-        actions.appendChild(coverageButton("提供補充資料", function () { previewCoverageResolution(cell, "user_supplement"); }));
-      }
-      if (action === "creative_completion") {
-        actions.appendChild(coverageButton("授權創作補全", function () { previewCoverageResolution(cell, "creative_completion"); }));
-      }
-    });
-    row.appendChild(actions);
-    grid.appendChild(row);
-  }
-}
-
+// Compatibility alias for /workspace/dashboard/coverage
 async function loadCoverageData() {
-  try {
-    var payload = await requestJson("/workspace/dashboard/coverage");
-    renderCoverage(payload);
-    return payload;
-  } catch (error) {
-    setAreaError("coverage-message", error);
-    throw error;
-  }
+  return loadCoverageCenterData();
 }
 
 function renderCellActionButton(cell, actionOpt) {
   var button = document.createElement("button");
   button.type = "button";
   button.textContent = actionOpt.label;
+  button.setAttribute("data-cell-id", (cell.character_id || "world") + "__" + cell.requirement_id);
+  button.setAttribute("data-scope", cell.scope || (cell.character_id ? "character" : "world"));
   if (cell.character_id) button.setAttribute("data-character-id", cell.character_id);
   button.setAttribute("data-requirement-id", cell.requirement_id);
   if (cell.assessment_id) button.setAttribute("data-assessment-id", cell.assessment_id);
@@ -732,10 +667,14 @@ function renderCellActionButton(cell, actionOpt) {
 function coverageCenterCellElement(cell, tasks) {
   var row = document.createElement("div");
   row.className = "coverage-cell";
+  row.id = "coverage-cell-" + (cell.character_id ? cell.character_id : "world") + "-" + cell.requirement_id.replace(/\./g, "-");
+  row.setAttribute("data-cell-id", (cell.character_id || "world") + "__" + cell.requirement_id);
+  row.setAttribute("data-scope", cell.scope || (cell.character_id ? "character" : "world"));
   if (cell.character_id) row.setAttribute("data-character-id", cell.character_id);
   row.setAttribute("data-requirement-id", cell.requirement_id);
   if (cell.assessment_id) row.setAttribute("data-assessment-id", cell.assessment_id);
   if (cell.assessment_revision) row.setAttribute("data-assessment-revision", cell.assessment_revision);
+  row.setAttribute("data-status", cell.status);
 
   var title = document.createElement("div");
   title.className = "coverage-cell-title";
@@ -833,8 +772,21 @@ function renderCoverageCenter(payload) {
   currentCoverageCenter = payload;
   var container = byId("coverage-center");
   container.textContent = "";
-  if (payload === null || payload.matrix === null || payload.matrix === undefined) return;
+  if (payload === null || payload.matrix === null || payload.matrix === undefined) {
+    setCoverageNotice("尚未取得覆蓋矩陣資料。");
+    return;
+  }
   var matrix = payload.matrix;
+  var msgText = "";
+  if (matrix.assessment !== undefined) {
+    msgText = "評估 " + matrix.assessment.id + "@" + matrix.assessment.revision.slice(0, 8) + "（" + matrix.assessment.pass + (matrix.assessment.fresh ? "、目前" : "、已過期") + "）";
+    if (matrix.stale_components && matrix.stale_components.length > 0) {
+      msgText += " · 失效元件：" + matrix.stale_components.join(", ");
+    }
+  } else {
+    msgText = "目前沒有覆蓋評估資料；請先完成來源處理與正式評估。";
+  }
+  setCoverageNotice(msgText);
   var heading = document.createElement("div");
   heading.className = "coverage-center-heading";
   var headingParts = [];

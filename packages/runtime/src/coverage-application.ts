@@ -1164,35 +1164,43 @@ export async function coverageResearchRecover(
   }
 }
 
-/** Dashboard read model: requirement set, assessment, cells with actions and recovery choices. */
+/**
+ * Compatibility read model: projects the authoritative Coverage Center matrix
+ * into the legacy dashboardCoverage schema for backward compatibility.
+ * @deprecated Use dashboardCoverageCenter instead.
+ */
 export async function dashboardCoverage(deps: CoverageApplicationDeps): Promise<Record<string, unknown>> {
   const state = await deps.repository.read();
-  const requirementSet = state.coverage_requirement_sets.at(-1);
-  const assessment = state.coverage_assessments.at(-1);
+  const matrix = deriveCoverageCenterMatrix(state);
   const readiness = deriveCoverageReadiness(state);
-  const cells = (assessment?.items ?? []).map((item) => {
-    const characterId = item.character_id;
-    const researchTasks = state.coverage_research_tasks
-      .filter((task) => task.character_id === characterId && task.requirement_ids.includes(item.requirement_id))
-      .map((task) => ({ id: task.id, status: task.status, predecessor_id: task.predecessor_id, exhausted_reason: task.exhausted_reason }));
-    const resolutions = state.coverage_resolutions
-      .filter((resolution) => resolution.requirement_id === item.requirement_id && (characterId === undefined ? resolution.character_id === undefined : resolution.character_id === characterId))
-      .map((resolution) => ({ id: resolution.id, mode: resolution.mode, status: resolution.status, supersedes: resolution.supersedes }));
-    const exhausted = researchTasks.some((task) => task.status === "exhausted");
-    return {
-      character_id: characterId,
-      requirement_id: item.requirement_id,
-      status: item.status,
-      research_tasks: researchTasks,
-      resolutions: resolutions,
-      actions: exhausted
-        ? ["revise_query", "revise_constraints", "manual_url", "supplement", "creative_completion"]
-        : ["research", "supplement", "creative_completion"],
-    };
-  });
+
+  const cells = matrix.cells.map((cell) => ({
+    ...(cell.character_id === undefined ? {} : { character_id: cell.character_id }),
+    requirement_id: cell.requirement_id,
+    status: cell.status,
+    research_tasks: (cell.current_research_tasks ?? []).map((task) => ({
+      id: task.id,
+      status: task.status,
+      ...(task.predecessor_id === undefined ? {} : { predecessor_id: task.predecessor_id }),
+      ...(task.exhausted_reason === undefined ? {} : { exhausted_reason: task.exhausted_reason }),
+    })),
+    resolutions: (cell.current_resolutions ?? []).map((resolution) => ({
+      id: resolution.id,
+      mode: resolution.mode,
+      status: resolution.status,
+      ...(resolution.supersedes === undefined ? {} : { supersedes: resolution.supersedes }),
+    })),
+    actions: cell.actions,
+  }));
+
   return {
-    requirement_set: requirementSet === undefined ? undefined : { id: requirementSet.id, revision: requirementSet.revision },
-    assessment: assessment === undefined ? undefined : { id: assessment.id, revision: assessment.revision, pass: assessment.pass, current: coverageAssessmentFreshness(state, assessment) },
+    requirement_set: matrix.requirement_set,
+    assessment: matrix.assessment === undefined ? undefined : {
+      id: matrix.assessment.id,
+      revision: matrix.assessment.revision,
+      pass: matrix.assessment.pass,
+      current: matrix.assessment.fresh,
+    },
     ready: readiness.ready,
     cells,
   };
