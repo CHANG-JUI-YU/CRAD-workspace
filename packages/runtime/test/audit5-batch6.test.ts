@@ -287,11 +287,9 @@ describe("Audit 5 batch 6: workflow invalidation read model (runtime)", () => {
       ...current,
       sources: [sourceRecord("source-1", "Alpha is calm and measured.")],
     }));
-    const current = await runtime.dashboardInvalidations();
-    expect(current.items.some((item) => item.reason_code === "COVERAGE_ASSESSMENT_STALE" && item.reason.includes("sources"))).toBe(true);
-    const started = await runtime.coverageResearchStart("director", assessment.id, assessment.revision);
-    expect(started.downstream_invalidation.invalidated).toBe(false);
+    await expect(runtime.coverageResearchStart("director", assessment.id, assessment.revision)).rejects.toThrow("COVERAGE_ASSESSMENT_STALE");
   });
+
 
   it("does not duplicate records when a coverage command is replayed", async () => {
     const { runtime, repository, assessment } = await withHealthyState();

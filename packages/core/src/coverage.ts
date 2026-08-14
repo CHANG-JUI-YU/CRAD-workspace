@@ -674,3 +674,37 @@ export function coverageFactProjectionRevision(state: Pick<ProjectState, "facts"
     }),
   );
 }
+
+export interface CoverageCellActionOption {
+  action: "research" | "supplement" | "creative_completion" | "revise_query" | "revise_constraints" | "manual_url" | "reassess" | "view_details";
+  label: string;
+  enabled: boolean;
+  disabled_reason?: string;
+  prerequisite?: {
+    action: string;
+    target_panel?: string;
+    target_id?: string;
+  };
+  scope?: {
+    character_id?: string;
+    requirement_id: string;
+    assessment_id?: string;
+    assessment_revision?: string;
+  };
+}
+
+export interface CoverageRequirementExplanation {
+  character_id?: string;
+  scope: "character" | "world";
+  requirement_id: string;
+  requirement_label: string;
+  status: string;
+  resolution_mode?: "source" | "user_supplement" | "creative_completion";
+  reason: string;
+  missing_prerequisite?: string;
+  accepted_fact_ids: string[];
+  source_ids: string[];
+  resolution_ids: string[];
+  assessment_id: string;
+  assessment_revision: string;
+}

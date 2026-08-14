@@ -182,9 +182,62 @@ async function loadCoverageData() {
   }
 }
 
+function renderCellActionButton(cell, actionOpt) {
+  var button = document.createElement("button");
+  button.type = "button";
+  button.textContent = actionOpt.label;
+  if (cell.character_id) button.setAttribute("data-character-id", cell.character_id);
+  button.setAttribute("data-requirement-id", cell.requirement_id);
+  if (cell.assessment_id) button.setAttribute("data-assessment-id", cell.assessment_id);
+  if (cell.assessment_revision) button.setAttribute("data-assessment-revision", cell.assessment_revision);
+  button.setAttribute("data-action", actionOpt.action);
+
+  if (!actionOpt.enabled) {
+    button.disabled = true;
+    if (actionOpt.disabled_reason) {
+      button.title = actionOpt.disabled_reason;
+    }
+  }
+
+  button.addEventListener("click", function () {
+    if (!actionOpt.enabled) {
+      if (actionOpt.prerequisite && actionOpt.prerequisite.target_panel) {
+        switchPanel(actionOpt.prerequisite.target_panel);
+      }
+      return;
+    }
+    if (actionOpt.action === "research") {
+      startCoverageResearch(cell);
+    } else if (actionOpt.action === "revise_query") {
+      recoverCoverageTask(cell, "revise_query", "新的 query seeds（逗號分隔）：");
+    } else if (actionOpt.action === "revise_constraints") {
+      recoverCoverageTask(cell, "revise_constraints", "新的 source constraints（逗號分隔）：");
+    } else if (actionOpt.action === "manual_url") {
+      recoverCoverageTask(cell, "manual_url", "請貼上 URL：");
+    } else if (actionOpt.action === "supplement") {
+      previewCoverageResolution(cell, "user_supplement");
+    } else if (actionOpt.action === "creative_completion") {
+      previewCoverageResolution(cell, "creative_completion");
+    } else if (actionOpt.action === "reassess") {
+      switchPanel("coverage");
+    } else if (actionOpt.action === "view_details") {
+      if (actionOpt.prerequisite && actionOpt.prerequisite.target_panel) {
+        switchPanel(actionOpt.prerequisite.target_panel);
+      }
+    }
+  });
+
+  return button;
+}
+
 function coverageCenterCellElement(cell, tasks) {
   var row = document.createElement("div");
   row.className = "coverage-cell";
+  if (cell.character_id) row.setAttribute("data-character-id", cell.character_id);
+  row.setAttribute("data-requirement-id", cell.requirement_id);
+  if (cell.assessment_id) row.setAttribute("data-assessment-id", cell.assessment_id);
+  if (cell.assessment_revision) row.setAttribute("data-assessment-revision", cell.assessment_revision);
+
   var title = document.createElement("div");
   title.className = "coverage-cell-title";
   var badge = document.createElement("span");
@@ -202,6 +255,7 @@ function coverageCenterCellElement(cell, tasks) {
   if (cell.dimension_path) metaParts.push("維度 " + cell.dimension_path);
   if (cell.scope) metaParts.push(cell.scope === "world" ? "世界範圍" : "角色範圍");
   if (cell.reason) metaParts.push(cell.reason);
+  if (cell.missing_prerequisite) metaParts.push("前置需求：" + cell.missing_prerequisite);
   meta.textContent = metaParts.join(" · ");
   row.appendChild(meta);
   var details = document.createElement("div");
@@ -233,29 +287,36 @@ function coverageCenterCellElement(cell, tasks) {
   row.appendChild(taskList);
   var actions = document.createElement("div");
   actions.className = "coverage-actions";
-  (cell.actions || []).forEach(function (action) {
-    if (action === "research") {
-      actions.appendChild(coverageButton("來源研究", function () { startCoverageResearch(cell); }));
-    }
-    if (action === "revise_query") {
-      actions.appendChild(coverageButton("修改查詢", function () { recoverCoverageTask(cell, "revise_query", "新的 query seeds（逗號分隔）："); }));
-    }
-    if (action === "revise_constraints") {
-      actions.appendChild(coverageButton("修改來源限制", function () { recoverCoverageTask(cell, "revise_constraints", "新的 source constraints（逗號分隔）："); }));
-    }
-    if (action === "manual_url") {
-      actions.appendChild(coverageButton("手動提供 URL", function () { recoverCoverageTask(cell, "manual_url", "請貼上 URL："); }));
-    }
-    if (action === "supplement") {
-      actions.appendChild(coverageButton("提供補充資料", function () { previewCoverageResolution(cell, "user_supplement"); }));
-    }
-    if (action === "creative_completion") {
-      actions.appendChild(coverageButton("授權創作補全", function () { previewCoverageResolution(cell, "creative_completion"); }));
-    }
-  });
+  if (cell.typed_actions && cell.typed_actions.length > 0) {
+    cell.typed_actions.forEach(function (opt) {
+      actions.appendChild(renderCellActionButton(cell, opt));
+    });
+  } else {
+    (cell.actions || []).forEach(function (action) {
+      if (action === "research") {
+        actions.appendChild(coverageButton("來源研究", function () { startCoverageResearch(cell); }));
+      }
+      if (action === "revise_query") {
+        actions.appendChild(coverageButton("修改查詢", function () { recoverCoverageTask(cell, "revise_query", "新的 query seeds（逗號分隔）："); }));
+      }
+      if (action === "revise_constraints") {
+        actions.appendChild(coverageButton("修改來源限制", function () { recoverCoverageTask(cell, "revise_constraints", "新的 source constraints（逗號分隔）："); }));
+      }
+      if (action === "manual_url") {
+        actions.appendChild(coverageButton("手動提供 URL", function () { recoverCoverageTask(cell, "manual_url", "請貼上 URL："); }));
+      }
+      if (action === "supplement") {
+        actions.appendChild(coverageButton("提供補充資料", function () { previewCoverageResolution(cell, "user_supplement"); }));
+      }
+      if (action === "creative_completion") {
+        actions.appendChild(coverageButton("授權創作補全", function () { previewCoverageResolution(cell, "creative_completion"); }));
+      }
+    });
+  }
   row.appendChild(actions);
   return row;
 }
+
 
 function renderCoverageCenter(payload) {
   currentCoverageCenter = payload;

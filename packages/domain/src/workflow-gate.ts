@@ -1,7 +1,8 @@
 import { artifactDependencyFingerprint, computeBuildPlan, computeProjectProjection, coverageFactProjectionRevision, createEntityMatcher, factReferencesEntity, parseWardrobeMarkdown, relationshipPerspectiveEntries, type ArtifactRecord, type BuildPlan, type FactReviewDecisionRecord, type IssueSeverity, type ProjectState } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, type RequiredArtifactManifest } from "./required-artifacts.js";
 import { contradictingAcceptedFacts } from "./knowledge.js";
-import { coverageAssessmentFreshness, projectActiveCoverageBindings, requirementsResolved, sourceFactsReady } from "./coverage-assessment.js";
+import { coverageAssessmentFreshness, deriveCoverageRequirementExplanations, projectActiveCoverageBindings, requirementsResolved, sourceFactsReady } from "./coverage-assessment.js";
+
 
 export type WorkflowGatePhase = "draft" | "publish";
 
@@ -412,37 +413,9 @@ function reportFacts(state: ProjectState, diagnostics: WorkflowDiagnostic[]): vo
       fact_ids: acceptedOutsideRun.map((fact) => fact.id),
     });
   }
-
-  // Coverage is only a source-adaptation obligation. Original-character
-  // projects may intentionally have no source-derived coverage register.
-  const intentProjection = computeProjectProjection(state).intent;
-  if (intentProjection.is_source_adaptation) {
-    const subjects = intentProjection.roster;
-    if (subjects.length > 0) {
-      const acceptedFacts = accepted;
-      const matcher = createEntityMatcher(state);
-      const requiredPrimary = ["identity", "personality", "speech", "habits", "background", "relationships"];
-      const optionalPrimary = ["appearance", "goals", "abilities", "world_context"];
-      const requiredSupporting = ["identity", "personality", "relationships"];
-      const missingCoverage: string[] = [];
-      subjects.forEach((subject) => {
-        const subjectFacts = acceptedFacts.filter((fact) => factReferencesEntity(fact, matcher, subject.id));
-        const covered = new Set(subjectFacts.flatMap((fact) => (fact.coverage ?? []).map(normalized)));
-        const required = subject.is_primary ? requiredPrimary : requiredSupporting;
-        for (const dimension of required) if (!covered.has(normalized(dimension))) missingCoverage.push(`${subject.id}/${dimension}`);
-        if (subject.is_primary && !optionalPrimary.some((dimension) => covered.has(normalized(dimension)))) missingCoverage.push(`${subject.id}/one-of-${optionalPrimary.join("|")}`);
-      });
-      if (missingCoverage.length > 0) {
-        add(diagnostics, {
-          code: "FACT_COVERAGE_INCOMPLETE",
-          message: `Source-derived fact coverage is incomplete for roster entities: ${missingCoverage.join(", ")}.`,
-          severity: "error",
-          fact_ids: accepted.map((fact) => fact.id),
-        });
-      }
-    }
-  }
 }
+
+
 
 function reportDerivedLinks(state: ProjectState, artifacts: ArtifactRecord[], diagnostics: WorkflowDiagnostic[]): void {
   const characters = referenceSet(artifacts);

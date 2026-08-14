@@ -13,6 +13,7 @@ import {
   claimResearchTask,
   createResearchBatchFromAssessment,
   createUserSupplementSource,
+  coverageAssessmentFreshness,
   deriveCoverageCenterMatrix,
   deriveCoverageReadiness,
   deriveDownstreamInvalidation,
@@ -48,11 +49,22 @@ export interface CoverageCommandOutcome {
 }
 
 function assertAssessmentMatches(state: ProjectState, assessmentId: string, assessmentRevision: string): void {
-  const assessment = state.coverage_assessments.find((item) => item.id === assessmentId);
-  if (assessment === undefined || assessment.revision !== assessmentRevision) {
-    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "The coverage assessment changed since the dashboard was loaded; reload and retry.", true);
+  const latestAssessment = state.coverage_assessments.at(-1);
+  if (latestAssessment === undefined || latestAssessment.id !== assessmentId || latestAssessment.revision !== assessmentRevision) {
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "The coverage assessment changed or is not the current assessment; reload and retry.", true);
+  }
+  if (latestAssessment.pass !== "formal") {
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "The coverage assessment pass is not formal; run a formal assessment first.", true);
+  }
+  const currentReqSet = state.coverage_requirement_sets.at(-1);
+  if (currentReqSet === undefined || currentReqSet.id !== latestAssessment.requirement_set_id || currentReqSet.revision !== latestAssessment.requirement_set_revision) {
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "The requirement set changed since the coverage assessment was performed.", true);
+  }
+  if (!coverageAssessmentFreshness(state, latestAssessment)) {
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "The coverage assessment is stale due to changed inputs (blueprint, sources, facts, or review run).", true);
   }
 }
+
 
 function executionInputFor(operation: OperationRecord, actor: string, agentId: string, role: string): ExecutionContext {
   return executionContextFromOperation(operation, { auditActor: actor, executionAgent: { id: agentId, role } });
@@ -120,32 +132,39 @@ function coverageOperation(actor: string | undefined, type: string, payload: Rec
 /** Start coverage research: create a batch and queued tasks for the current assessment. */
 export async function executeCoverageResearchStart(deps: CoverageApplicationDeps, state: ProjectState, operation: OperationRecord, actor: string): Promise<CoverageCommandOutcome> {
   const command = operation.command;
-  const assessmentId = command !== undefined && command.type === "coverage_research_start" ? command.payload.assessment_id : state.coverage_assessments.at(-1)?.id;
-  if (assessmentId === undefined) throw new CoreError("COVERAGE_ASSESSMENT_REQUIRED", "No coverage assessment exists; run an assessment first.", true);
-  const assessment = state.coverage_assessments.find((item) => item.id === assessmentId);
-  if (assessment === undefined) throw new CoreError("COVERAGE_ASSESSMENT_REQUIRED", `Coverage assessment ${assessmentId} does not exist.`, true);
+  const latestAssessment = state.coverage_assessments.at(-1);
+  const assessmentId = command !== undefined && command.type === "coverage_research_start" ? command.payload.assessment_id : latestAssessment?.id;
+  const assessmentRevision = command !== undefined && command.type === "coverage_research_start" ? command.payload.assessment_revision : latestAssessment?.revision;
+  if (assessmentId === undefined || assessmentRevision === undefined) {
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "No coverage assessment exists; run a formal assessment first.", true);
+  }
+  assertAssessmentMatches(state, assessmentId, assessmentRevision);
   const { batch, tasks, state: mutated } = createResearchBatchFromAssessment(state, assessmentId, "director");
   return {
     state: mutated,
     result: { batch_id: batch.id, task_ids: tasks.map((task) => task.id) },
     auditEvents: [{
       id: internalId("audit"), operation_id: operation.id, event: "coverage.research.started", actor,
-      occurred_at: now(), details: { batch_id: batch.id, task_ids: tasks.map((task) => task.id), assessment_id: assessmentId, assessment_revision: assessment.revision },
+      occurred_at: now(), details: { batch_id: batch.id, task_ids: tasks.map((task) => task.id), assessment_id: assessmentId, assessment_revision: assessmentRevision },
     }],
   };
 }
 
 export async function coverageResearchStart(deps: CoverageApplicationDeps, actor: string, assessmentId?: string, assessmentRevision?: string): Promise<Record<string, unknown>> {
   const state = await deps.repository.read();
-  if (assessmentId !== undefined) {
-    if (assessmentRevision === undefined) throw new CoreError("COVERAGE_ASSESSMENT_STALE", "assessment_revision is required when assessment_id is provided.", true);
-    assertAssessmentMatches(state, assessmentId, assessmentRevision);
+  const latestAssessment = state.coverage_assessments.at(-1);
+  const targetId = assessmentId ?? latestAssessment?.id;
+  const targetRevision = assessmentRevision ?? latestAssessment?.revision;
+  if (targetId === undefined || targetRevision === undefined) {
+    throw new CoreError("COVERAGE_ASSESSMENT_STALE", "No coverage assessment exists; run a formal assessment first.", true);
   }
-  const operation = coverageOperation(actor, "coverage_research_start", { ...(assessmentId === undefined ? {} : { assessment_id: assessmentId }), ...(assessmentRevision === undefined ? {} : { assessment_revision: assessmentRevision }) }, "source-researcher", "researcher");
+  assertAssessmentMatches(state, targetId, targetRevision);
+  const operation = coverageOperation(actor, "coverage_research_start", { assessment_id: targetId, assessment_revision: targetRevision }, "source-researcher", "researcher");
   const outcome = await executeCoverageResearchStart(deps, state, operation, actor);
   const result = await commitCommand(deps, state, operation, outcome);
   return { ...result, ...outcome.result };
 }
+
 
 /** Claim the next queued research task for a batch. */
 export async function executeCoverageResearchClaim(deps: CoverageApplicationDeps, state: ProjectState, operation: OperationRecord, actor: string): Promise<CoverageCommandOutcome> {

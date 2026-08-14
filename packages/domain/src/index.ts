@@ -26,11 +26,14 @@ export {
   buildCoverageSnapshot,
   buildDefaultRequirementSet,
   coverageAssessmentFreshness,
+  currentResolutions,
   deriveArtifactCoverageScope,
   deriveArtifactScopeResolutionIds,
   deriveCoverageReadiness,
+  deriveCoverageRequirementExplanations,
   fulfillUserSupplementResolution,
   isCoverageSensitiveArtifactKind,
+  isCurrentResolution,
   previewResolutionConsequences,
   projectActiveCoverageBindings,
   recordUserDecisionAndResolution,
@@ -43,6 +46,7 @@ export {
   type CoverageBlocker,
   type ResolutionConsequencesPreview,
 } from "./coverage-assessment.js";
+
 export * from "./research-orchestration.js";
 export { ReviewService, type IssueUpdateAction, type IssueUpdateInput, type IssueUpdateResult, type ReviewExecutionResult } from "./review.js";
 export { validateWorkflow, type WorkflowDiagnostic, type WorkflowGatePhase, type WorkflowGateResult } from "./workflow-gate.js";
