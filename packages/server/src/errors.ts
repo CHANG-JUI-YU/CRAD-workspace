@@ -6,6 +6,7 @@ export interface ErrorPayload {
   impact: string;
   next_actions: string[];
   error: string;
+  details?: Record<string, unknown>;
 }
 
 interface ErrorCatalogEntry {
@@ -469,9 +470,21 @@ export function structuredError(error: unknown): ErrorPayload {
     const code = (error as { code: string }).code;
     const message = error instanceof Error ? error.message : String(error);
     const recoverable = "recoverable" in error && (error as { recoverable?: unknown }).recoverable === true;
+    const details = "details" in error && typeof (error as { details?: unknown }).details === "object" && (error as { details?: unknown }).details !== null
+      ? (error as { details: Record<string, unknown> }).details
+      : undefined;
     const cataloged = ERROR_CATALOG[code];
     if (cataloged !== undefined) {
-      return { code, category: cataloged.category, recoverable, message_zh: cataloged.message_zh, impact: cataloged.impact, next_actions: cataloged.next_actions, error: message };
+      return {
+        code,
+        category: cataloged.category,
+        recoverable,
+        message_zh: cataloged.message_zh,
+        impact: cataloged.impact,
+        next_actions: cataloged.next_actions,
+        error: message,
+        ...(details === undefined ? {} : { details }),
+      };
     }
     return {
       code,
@@ -481,6 +494,7 @@ export function structuredError(error: unknown): ErrorPayload {
       impact: "操作未完成，未產生任何變更。",
       next_actions: FALLBACK_NEXT_ACTIONS,
       error: message,
+      ...(details === undefined ? {} : { details }),
     };
   }
   const message = error instanceof Error ? error.message : String(error);

@@ -1,4 +1,4 @@
-import type { AttachmentStore, ProvenanceCompositionSummary, ProvenanceOverrideRef, RepairInspection } from "@st-workspace/core";
+import type { AttachmentStore, PreparedPublishSnapshot, ProvenanceCompositionSummary, ProvenanceOverrideRef, RepairInspection } from "@st-workspace/core";
 import type { CardModeSelection } from "@st-workspace/compiler";
 import type { SourceFetcher } from "@st-workspace/domain";
 
@@ -152,6 +152,8 @@ export interface DashboardSnapshot {
 
 export interface DashboardBuildReadiness {
   modes: { zhuji: boolean; palette: boolean };
+  both_available?: boolean;
+  both_blockers?: Array<{ mode: "zhuji" | "palette"; reason: string; diagnostics: Array<{ code: string; message: string }> }>;
   primary_character?: { id: string; label: string; mode: string };
   export_modes?: string;
   selected_mode?: string;
@@ -197,13 +199,19 @@ export interface PublishProvenancePreviewResult {
   mode_selection?: CardModeSelection;
   composition?: ProvenanceCompositionSummary;
   historical_decisions: ProvenanceOverrideRef[];
+  prepared_snapshot?: PreparedPublishSnapshot;
+  both_readiness?: {
+    both_available: boolean;
+    both_blockers: Array<{ mode: "zhuji" | "palette"; reason: string; diagnostics: Array<{ code: string; message: string }> }>;
+  };
 }
 
 export interface PublishProvenanceConfirmInput {
   fingerprint: string;
-  mode_selection?: CardModeSelection;
-  idempotency_key?: string;
-  operation_id?: string;
+  mode_selection?: CardModeSelection | undefined;
+  idempotency_key?: string | undefined;
+  operation_id?: string | undefined;
+  prepared_snapshot?: PreparedPublishSnapshot | Record<string, unknown> | undefined;
 }
 
 export interface DashboardProvenanceView {

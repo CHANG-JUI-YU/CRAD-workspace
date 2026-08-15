@@ -66,52 +66,52 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
       byId("load-operations").addEventListener("click", function () {
         void runTask("載入 Operations", loadOperationData);
       });
-      byId("check-readiness").addEventListener("click", function () {
-        void runTask("Publish 就緒檢查", async function () {
+      async function triggerCheckReadiness() {
+        return runTask("Publish 就緒檢查", async function () {
           var modeSelect = byId("readiness-mode");
           var modeValue = modeSelect instanceof HTMLSelectElement ? modeSelect.value : "";
           var endpoint = modeValue === "" ? "/workspace/publish/preview" : "/workspace/publish/preview?mode=" + encodeURIComponent(modeValue);
           var payload = await requestJson(endpoint);
+          var readinessInfo = await requestJson("/workspace/build/preview");
+          if (readinessInfo) {
+            updateBothModeOption(readinessInfo.modes, readinessInfo.export_modes, readinessInfo.both_blockers);
+          }
           var structured = await requestJson("/workspace/dashboard/publish-diagnostics");
           renderPublishDiagnostics(structured);
+          var hasBlocking = structured && Array.isArray(structured.rows) && structured.rows.some(function (r) { return r.severity === "error"; });
+          updatePublishStepper("readiness", hasBlocking ? "blocked" : "pass");
           return payload;
         });
-      });
-      byId("prepare-provenance").addEventListener("click", function () {
-        void runTask("準備發布確認", async function () {
+      }
+
+      async function triggerPrepareProvenance() {
+        return runTask("準備發布確認", async function () {
           var modeSelect = byId("readiness-mode");
           var modeValue = modeSelect instanceof HTMLSelectElement ? modeSelect.value : "";
           var endpoint = modeValue === "" ? "/workspace/publish/provenance/preview" : "/workspace/publish/provenance/preview?mode=" + encodeURIComponent(modeValue);
           var payload = await requestJson(endpoint);
+          if (payload && payload.both_readiness) {
+            updateBothModeOption(
+              { zhuji: payload.both_readiness.both_available, palette: payload.both_readiness.both_available },
+              undefined,
+              payload.both_readiness.both_blockers
+            );
+          }
           renderProvenanceComposition(payload);
           return payload;
         });
-      });
-      var modeSelectEl = byId("readiness-mode");
-      if (modeSelectEl) {
-        modeSelectEl.addEventListener("change", function () {
-          currentProvenanceConfirmation = null;
-          var summaryTarget = byId("provenance-summary");
-          if (summaryTarget) summaryTarget.textContent = "";
-          var confirmButton = byId("confirm-publish");
-          if (confirmButton) {
-            confirmButton.disabled = true;
-            confirmButton.textContent = "確認並發布";
-          }
-          var messageEl = byId("provenance-confirm-message");
-          if (messageEl) messageEl.textContent = "發布模式已變更；請重新點擊「準備發布確認」以產生新的確認資訊。";
-        });
       }
 
-      byId("confirm-publish").addEventListener("click", function () {
+      async function triggerConfirmPublish() {
         if (currentProvenanceConfirmation === null || currentProvenanceConfirmation === undefined) {
-          setNotice("warning", "請先點擊「準備發布確認」以載入發布資訊。");
+          setNotice("warning", "請先完成發布準備以載入發布資訊。");
           return;
         }
         if (currentProvenanceConfirmation.in_flight === true) {
           return;
         }
         var confirmButton = byId("confirm-publish");
+        var primaryCta = byId("publish-primary-cta");
         var messageEl = byId("provenance-confirm-message");
         var confirmation = currentProvenanceConfirmation;
 
@@ -122,14 +122,18 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
         if (confirmation.mode_selection !== undefined && confirmation.mode_selection !== "") {
           body.mode_selection = confirmation.mode_selection;
         }
-
-        confirmation.in_flight = true;
-        if (confirmButton) {
-          confirmButton.disabled = true;
-          confirmButton.textContent = "發布中...";
+        if (confirmation.prepared_snapshot !== undefined) {
+          body.prepared_snapshot = confirmation.prepared_snapshot;
         }
 
-        void runTask("確認並發布", async function () {
+        confirmation.in_flight = true;
+        if (confirmButton) confirmButton.disabled = true;
+        if (primaryCta) {
+          primaryCta.disabled = true;
+          primaryCta.textContent = "發布中...";
+        }
+
+        return runTask("確認並發布", async function () {
           try {
             var payload = await postJson("/workspace/publish/provenance/confirm", body);
             confirmation.result = payload;
@@ -145,20 +149,34 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
               if (payload.publish_id) parts.push("Publish ID: " + payload.publish_id);
               if (payload.published_at) parts.push("發布時間: " + payload.published_at);
               messageEl.textContent = parts.join(" · ");
+              updatePublishStepper("published", "pass");
               if (confirmButton) confirmButton.textContent = payload.idempotent_replay === true ? "已完成（可安全重試）" : "發布完成";
             } else if (payload && (payload.status === "running" || payload.status === "resolving" || payload.status === "created")) {
               messageEl.textContent = "發布操作正在背景進行中（狀態：" + payload.status + "）…";
-              if (confirmButton) confirmButton.textContent = "處理中...";
+              if (primaryCta) primaryCta.textContent = "處理中...";
             } else {
               messageEl.textContent = "發布未完成：" + ((payload && payload.summary) || (payload && payload.status) || "請重新準備確認。");
-              if (confirmButton) confirmButton.textContent = "確認並發布";
+              updatePublishStepper("provenance_reviewed", "blocked");
             }
             await Promise.allSettled([loadDashboardData(), loadProvenanceHistory()]);
             return payload;
           } catch (error) {
             var errorMsg = (error && error.message) ? error.message : String(error);
-            if (errorMsg.indexOf("IDEMPOTENCY_CONFLICT") !== -1 || (error && error.code === "IDEMPOTENCY_CONFLICT")) {
+            var isStale = errorMsg.indexOf("PROVENANCE_CONFIRMATION_STALE") !== -1 || (error && error.code === "PROVENANCE_CONFIRMATION_STALE");
+            var isConflict = errorMsg.indexOf("IDEMPOTENCY_CONFLICT") !== -1 || (error && error.code === "IDEMPOTENCY_CONFLICT");
+
+            if (isStale) {
+              var details = error && error.details;
+              if (details && Array.isArray(details.changed_inputs)) {
+                renderStaleDiff(details.changed_inputs);
+              }
+              messageEl.textContent = "發布確認已過期失效（輸入狀態已變更），請檢視差異並重新準備確認。";
+              var provCard = document.querySelector(".provenance-card");
+              if (provCard) provCard.classList.add("stale-border");
+              updatePublishStepper("inputs_frozen", "stale");
+            } else if (isConflict) {
               messageEl.textContent = "衝突錯誤：此確認識別已用於不同的發布內容，請重新準備發布確認。";
+              updatePublishStepper("provenance_reviewed", "blocked");
             } else {
               messageEl.textContent = "發布請求失敗：" + errorMsg + "（可再次點擊重試）";
             }
@@ -167,13 +185,52 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
             confirmation.in_flight = false;
             if (confirmButton && !confirmation.completed) {
               confirmButton.disabled = confirmation.fingerprint === "";
-              if (confirmButton.textContent === "發布中...") confirmButton.textContent = "確認並發布";
             } else if (confirmButton && confirmation.completed) {
               confirmButton.disabled = false;
             }
           }
         });
-      });
+      }
+
+      byId("check-readiness").addEventListener("click", function () { void triggerCheckReadiness(); });
+      byId("prepare-provenance").addEventListener("click", function () { void triggerPrepareProvenance(); });
+      byId("confirm-publish").addEventListener("click", function () { void triggerConfirmPublish(); });
+
+      var primaryCtaEl = byId("publish-primary-cta");
+      if (primaryCtaEl) {
+        primaryCtaEl.addEventListener("click", function () {
+          var action = primaryCtaEl.getAttribute("data-action") || "check_readiness";
+          if (action === "check_readiness") {
+            void triggerCheckReadiness();
+          } else if (action === "prepare_provenance") {
+            void triggerPrepareProvenance();
+          } else if (action === "confirm_publish") {
+            void triggerConfirmPublish();
+          }
+        });
+      }
+
+      var modeSelectEl = byId("readiness-mode");
+      if (modeSelectEl) {
+        modeSelectEl.addEventListener("change", function () {
+          currentProvenanceConfirmation = null;
+          var summaryTarget = byId("provenance-summary");
+          if (summaryTarget) summaryTarget.textContent = "";
+          var staleDiffTarget = byId("provenance-stale-diff");
+          if (staleDiffTarget) {
+            staleDiffTarget.style.display = "none";
+            staleDiffTarget.textContent = "";
+          }
+          var confirmButton = byId("confirm-publish");
+          if (confirmButton) {
+            confirmButton.disabled = true;
+            confirmButton.textContent = "確認並發布";
+          }
+          var messageEl = byId("provenance-confirm-message");
+          if (messageEl) messageEl.textContent = "發布模式已變更；請重新執行就緒檢查與發布準備。";
+          updatePublishStepper("readiness", "waiting");
+        });
+      }
       byId("check-build").addEventListener("click", function () {
         void runTask("打包預覽", async function () {
           var payload = await requestJson("/workspace/build/preview");

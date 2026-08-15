@@ -392,3 +392,390 @@ export function canonicalProvenancePublishMatches(
   const actualMode = typeof payload.mode_selection === "string" ? payload.mode_selection : undefined;
   return expectedMode === actualMode;
 }
+
+export type InputGroupStatus = "included" | "not_applicable" | "legacy_unavailable";
+
+export interface PreparedArtifactEntry {
+  key: string;
+  artifact_id: string;
+  kind: string;
+  revision: string;
+  content_hash?: string;
+}
+
+export interface PreparedOutputSummary {
+  mode: string;
+  json_path?: string;
+  png_path?: string;
+  is_dual_mode: boolean;
+  character_count: number;
+  artifact_count: number;
+  files: string[];
+}
+
+export interface PreparedGroupInfo<T = unknown> {
+  status: InputGroupStatus;
+  data?: T;
+  summary: string;
+}
+
+export interface PreparedPublishSnapshot {
+  version: "prepared-snapshot-v2";
+  project_id: string;
+  mode_selection?: string | undefined;
+  image_identity?: ProvenanceImageIdentity | undefined;
+  artifacts: PreparedArtifactEntry[];
+  artifact_count: number;
+  coverage?: {
+    assessment_id?: string | undefined;
+    assessment_revision?: string | undefined;
+    requirement_set_id?: string | undefined;
+    requirement_set_revision?: string | undefined;
+    fact_review_run_id?: string | undefined;
+    fact_review_projection_revision?: string | undefined;
+    fact_projection_revision?: string | undefined;
+    source_revisions: Array<{ source_id: string; revision: string }>;
+    resolution_ids: string[];
+    authoring_binding_ids: string[];
+    source_backed_count: number;
+    user_supplement_count: number;
+    creative_completion_count: number;
+  } | undefined;
+  quality_policy: {
+    level?: string | undefined;
+    blocking_severity?: string | undefined;
+    overrides: Array<{ code: string; severity: string }>;
+    override_audit: Array<{ code: string; configured_severity: string; against_effective_severity?: string | undefined; actor: string }>;
+  };
+  composition: ProvenanceCompositionSummary;
+  predicted_outputs: PreparedOutputSummary;
+  historical_decisions: ProvenanceOverrideRef[];
+  build_snapshot_hash: string;
+  fingerprint: string;
+  human_acknowledgement: string;
+  groups: {
+    mode: PreparedGroupInfo<{ mode: string }>;
+    image: PreparedGroupInfo<ProvenanceImageIdentity | undefined>;
+    artifacts: PreparedGroupInfo<{ count: number; revisions: Record<string, string> }>;
+    coverage: PreparedGroupInfo<{ assessment_revision?: string | undefined; source_revisions: Array<{ source_id: string; revision: string }> } | undefined>;
+    quality_policy: PreparedGroupInfo<{ level?: string | undefined; overrides: Record<string, string> }>;
+    outputs: PreparedGroupInfo<PreparedOutputSummary>;
+  };
+}
+
+export type StaleDiffCategory =
+  | "mode"
+  | "image"
+  | "artifact_revisions"
+  | "coverage"
+  | "facts_sources"
+  | "quality_policy"
+  | "output_selection";
+
+export interface ChangedInputItem {
+  category: StaleDiffCategory;
+  label: string;
+  before_summary: string;
+  after_summary: string;
+  target_panel: string;
+  anchor: string;
+}
+
+export interface ProvenanceStaleReport {
+  is_stale: boolean;
+  changed_inputs: ChangedInputItem[];
+  reason?: string | undefined;
+}
+
+export function buildPreparedPublishSnapshot(
+  state: ProjectState,
+  plan: BuildPlan,
+  modeSelection: string | null | undefined,
+  coverageSnapshot: CoverageSnapshot | undefined,
+  composition: ProvenanceCompositionSummary,
+  fingerprint: string,
+  imageIdentity?: ProvenanceImageIdentity,
+): PreparedPublishSnapshot {
+  const artifactHashes = new Map<string, string | null>();
+  for (const artifact of state.artifacts) {
+    artifactHashes.set(artifact.id, artifact.content_hash ?? null);
+  }
+
+  const artifacts: PreparedArtifactEntry[] = plan.entries
+    .map((entry) => ({
+      key: entry.key,
+      artifact_id: entry.artifact_id,
+      kind: entry.kind,
+      revision: entry.revision,
+      ...(artifactHashes.get(entry.artifact_id) ? { content_hash: artifactHashes.get(entry.artifact_id)! } : {}),
+    }))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+
+  const artifactRevisions: Record<string, string> = {};
+  for (const a of artifacts) {
+    artifactRevisions[a.key] = a.revision;
+  }
+
+  const effectiveMode = modeSelection ?? "default";
+  const isDualMode = effectiveMode === "both";
+  const characterCount = plan.entries.filter((e) => e.kind === "character").length;
+  const safeName = state.project_name || "card";
+  const jsonPath = `exports/${safeName}.json`;
+  const pngPath = `exports/${safeName}.png`;
+  const files = [jsonPath, pngPath];
+
+  const predictedOutputs: PreparedOutputSummary = {
+    mode: effectiveMode,
+    json_path: jsonPath,
+    png_path: pngPath,
+    is_dual_mode: isDualMode,
+    character_count: characterCount,
+    artifact_count: artifacts.length,
+    files,
+  };
+
+  const overrideEntries = Object.entries(state.quality_profile.overrides ?? {})
+    .map(([code, severity]) => ({ code, severity }))
+    .sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+
+  const overrideAudit = (state.quality_profile.override_audit ?? [])
+    .map((item) => ({
+      code: item.code,
+      configured_severity: item.configured_severity,
+      against_effective_severity: item.against_effective_severity,
+      actor: item.actor,
+    }))
+    .sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+
+  const qualityOverridesRecord: Record<string, string> = {};
+  for (const item of overrideEntries) {
+    qualityOverridesRecord[item.code] = item.severity;
+  }
+
+  const hasCoverage = coverageSnapshot !== undefined;
+  const hasImage = imageIdentity !== undefined && imageIdentity.mode === "uploaded";
+
+  const groups = {
+    mode: {
+      status: "included" as InputGroupStatus,
+      data: { mode: effectiveMode },
+      summary: `發布模式：${effectiveMode}${isDualMode ? "（雙模式整合輸出）" : ""}`,
+    },
+    image: {
+      status: (hasImage ? "included" : "not_applicable") as InputGroupStatus,
+      data: imageIdentity,
+      summary: hasImage ? `已配置封面圖片（Blob ${imageIdentity?.blob_hash?.slice(0, 12) ?? "無"}）` : "未配置封面圖片（使用預設佔位）",
+    },
+    artifacts: {
+      status: "included" as InputGroupStatus,
+      data: { count: artifacts.length, revisions: artifactRevisions },
+      summary: `共 ${artifacts.length} 個發布組件 Artifacts`,
+    },
+    coverage: {
+      status: (hasCoverage ? "included" : "not_applicable") as InputGroupStatus,
+      data: hasCoverage
+        ? {
+            assessment_revision: coverageSnapshot?.assessment_revision,
+            source_revisions: sortedRevisions(coverageSnapshot?.source_revisions ?? []),
+          }
+        : undefined,
+      summary: hasCoverage
+        ? `Coverage 評估 ${coverageSnapshot?.assessment_id ?? ""}, ${composition.source_backed.count} 來源佐證, ${composition.user_supplement.count} 使用者補充, ${composition.creative_completion.count} 創作補全`
+        : "非來源改編專案（不適用 Coverage 評估）",
+    },
+    quality_policy: {
+      status: "included" as InputGroupStatus,
+      data: { level: state.quality_profile.level, overrides: qualityOverridesRecord },
+      summary: `品質門檻：${state.quality_profile.level ?? "預設"}，${overrideEntries.length} 項覆寫`,
+    },
+    outputs: {
+      status: "included" as InputGroupStatus,
+      data: predictedOutputs,
+      summary: `預期輸出：${files.join("、")}`,
+    },
+  };
+
+  const humanAcknowledgement =
+    "我確認並批准目前畫面所顯示的模式、圖片、Artifacts、Coverage、Facts、來源、品質政策與輸出組成；本次發布只適用於這份不可變快照。";
+
+  return {
+    version: "prepared-snapshot-v2",
+    project_id: state.project_id || "",
+    mode_selection: modeSelection ?? undefined,
+    image_identity: imageIdentity,
+    artifacts,
+    artifact_count: artifacts.length,
+    coverage: hasCoverage
+      ? {
+          assessment_id: coverageSnapshot?.assessment_id,
+          assessment_revision: coverageSnapshot?.assessment_revision,
+          requirement_set_id: coverageSnapshot?.requirement_set_id,
+          requirement_set_revision: coverageSnapshot?.requirement_set_revision,
+          fact_review_run_id: coverageSnapshot?.fact_review_run_id,
+          fact_review_projection_revision: coverageSnapshot?.fact_review_projection_revision,
+          fact_projection_revision: coverageSnapshot?.fact_projection_revision,
+          source_revisions: sortedRevisions(coverageSnapshot?.source_revisions ?? []),
+          resolution_ids: [...(coverageSnapshot?.resolution_ids ?? [])].sort(),
+          authoring_binding_ids: [...(coverageSnapshot?.authoring_binding_ids ?? [])].sort(),
+          source_backed_count: composition.source_backed.count,
+          user_supplement_count: composition.user_supplement.count,
+          creative_completion_count: composition.creative_completion.count,
+        }
+      : undefined,
+    quality_policy: {
+      level: state.quality_profile.level,
+      blocking_severity: state.quality_profile.blocking_severity,
+      overrides: overrideEntries,
+      override_audit: overrideAudit,
+    },
+    composition,
+    predicted_outputs: predictedOutputs,
+    historical_decisions: deriveHistoricalDecisionRefs(state, coverageSnapshot),
+    build_snapshot_hash: composition.build_snapshot_hash,
+    fingerprint,
+    human_acknowledgement: humanAcknowledgement,
+    groups,
+  };
+}
+
+export function comparePreparedSnapshotDiff(
+  prepared: PreparedPublishSnapshot,
+  current: PreparedPublishSnapshot,
+): ProvenanceStaleReport {
+  const changedInputs: ChangedInputItem[] = [];
+
+  // 1. Mode comparison
+  if (prepared.mode_selection !== current.mode_selection) {
+    changedInputs.push({
+      category: "mode",
+      label: "發布模式",
+      before_summary: `原模式：${prepared.mode_selection ?? "預設"}`,
+      after_summary: `現模式：${current.mode_selection ?? "預設"}`,
+      target_panel: "publish",
+      anchor: "readiness-mode",
+    });
+  }
+
+  // 2. Image comparison
+  const prepImg = prepared.image_identity;
+  const currImg = current.image_identity;
+  if (
+    prepImg?.mode !== currImg?.mode ||
+    prepImg?.image_id !== currImg?.image_id ||
+    prepImg?.blob_hash !== currImg?.blob_hash ||
+    prepImg?.transformation_revision !== currImg?.transformation_revision
+  ) {
+    changedInputs.push({
+      category: "image",
+      label: "封面圖片",
+      before_summary: prepImg?.mode === "uploaded" ? `圖片 ID ${prepImg.image_id ?? "未知"}（Blob ${prepImg.blob_hash?.slice(0, 8) ?? ""}）` : "預設佔位",
+      after_summary: currImg?.mode === "uploaded" ? `圖片 ID ${currImg.image_id ?? "未知"}（Blob ${currImg.blob_hash?.slice(0, 8) ?? ""}）` : "預設佔位",
+      target_panel: "publish",
+      anchor: "provenance-summary",
+    });
+  }
+
+  // 3. Artifact revisions comparison
+  const prepArtifacts = new Map(prepared.artifacts.map((a) => [a.key, a]));
+  const currArtifacts = new Map(current.artifacts.map((a) => [a.key, a]));
+  const artifactDiffs: string[] = [];
+
+  for (const [key, pArt] of prepArtifacts.entries()) {
+    const cArt = currArtifacts.get(key);
+    if (!cArt) {
+      artifactDiffs.push(`已移除組件 ${key}`);
+    } else if (pArt.revision !== cArt.revision || pArt.content_hash !== cArt.content_hash) {
+      artifactDiffs.push(`組件 ${key}（${pArt.revision.slice(0, 8)} → ${cArt.revision.slice(0, 8)}）`);
+    }
+  }
+  for (const key of currArtifacts.keys()) {
+    if (!prepArtifacts.has(key)) {
+      artifactDiffs.push(`新增組件 ${key}`);
+    }
+  }
+
+  if (artifactDiffs.length > 0) {
+    changedInputs.push({
+      category: "artifact_revisions",
+      label: "Artifact 組件版本",
+      before_summary: `${prepared.artifacts.length} 個組件`,
+      after_summary: `${artifactDiffs.join("；")}`,
+      target_panel: "artifacts",
+      anchor: "artifact-list",
+    });
+  }
+
+  // 4. Coverage snapshot comparison
+  const prepCov = prepared.coverage;
+  const currCov = current.coverage;
+  if (
+    prepCov?.assessment_id !== currCov?.assessment_id ||
+    prepCov?.assessment_revision !== currCov?.assessment_revision ||
+    prepCov?.requirement_set_revision !== currCov?.requirement_set_revision ||
+    prepCov?.source_backed_count !== currCov?.source_backed_count ||
+    prepCov?.user_supplement_count !== currCov?.user_supplement_count ||
+    prepCov?.creative_completion_count !== currCov?.creative_completion_count ||
+    JSON.stringify(prepCov?.resolution_ids) !== JSON.stringify(currCov?.resolution_ids) ||
+    JSON.stringify(prepCov?.authoring_binding_ids) !== JSON.stringify(currCov?.authoring_binding_ids)
+  ) {
+    changedInputs.push({
+      category: "coverage",
+      label: "Coverage 評估快照",
+      before_summary: prepCov ? `評估版本 ${prepCov.assessment_revision?.slice(0, 8) ?? "無"}，佐證 ${prepCov.source_backed_count}` : "無",
+      after_summary: currCov ? `評估版本 ${currCov.assessment_revision?.slice(0, 8) ?? "無"}，佐證 ${currCov.source_backed_count}` : "無",
+      target_panel: "coverage",
+      anchor: "coverage-assessment-panel",
+    });
+  }
+
+  // 5. Facts / Sources comparison
+  const prepSources = JSON.stringify(prepCov?.source_revisions ?? []);
+  const currSources = JSON.stringify(currCov?.source_revisions ?? []);
+  if (
+    prepCov?.fact_review_run_id !== currCov?.fact_review_run_id ||
+    prepCov?.fact_projection_revision !== currCov?.fact_projection_revision ||
+    prepSources !== currSources
+  ) {
+    changedInputs.push({
+      category: "facts_sources",
+      label: "來源與事實審查",
+      before_summary: `審查 Run ${prepCov?.fact_review_run_id ?? "無"}，投影 ${prepCov?.fact_projection_revision?.slice(0, 8) ?? "無"}`,
+      after_summary: `審查 Run ${currCov?.fact_review_run_id ?? "無"}，投影 ${currCov?.fact_projection_revision?.slice(0, 8) ?? "無"}`,
+      target_panel: "sources",
+      anchor: "source-fact-heading",
+    });
+  }
+
+  // 6. Quality policy comparison
+  const prepQuality = JSON.stringify(prepared.quality_policy);
+  const currQuality = JSON.stringify(current.quality_policy);
+  if (prepQuality !== currQuality) {
+    changedInputs.push({
+      category: "quality_policy",
+      label: "品質門檻與覆寫",
+      before_summary: `門檻 ${prepared.quality_policy.level ?? "預設"}，${prepared.quality_policy.overrides.length} 項覆寫`,
+      after_summary: `門檻 ${current.quality_policy.level ?? "預設"}，${current.quality_policy.overrides.length} 項覆寫`,
+      target_panel: "quality",
+      anchor: "quality-heading",
+    });
+  }
+
+  // 7. Output selection comparison
+  if (JSON.stringify(prepared.predicted_outputs) !== JSON.stringify(current.predicted_outputs)) {
+    changedInputs.push({
+      category: "output_selection",
+      label: "預期輸出檔案",
+      before_summary: prepared.predicted_outputs.files.join(", "),
+      after_summary: current.predicted_outputs.files.join(", "),
+      target_panel: "publish",
+      anchor: "provenance-summary",
+    });
+  }
+
+  const isStale = changedInputs.length > 0 || prepared.fingerprint !== current.fingerprint;
+  return {
+    is_stale: isStale,
+    changed_inputs: changedInputs,
+    reason: isStale ? `Provenance 組成已變更（共 ${changedInputs.length} 項差異），請重新準備發布確認。` : undefined,
+  };
+}

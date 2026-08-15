@@ -4,8 +4,10 @@ import {
   buildZhujiTemplateContext,
   buildTemplateContext,
   beginInterview,
+  buildPreparedPublishSnapshot,
   buildProvenanceCompositionSummary,
   canonicalJson,
+  comparePreparedSnapshotDiff,
   computeBuildPlan,
   computeBuildSnapshotHash,
   computeProjectProjection,
@@ -73,7 +75,9 @@ import {
   type CoverageSnapshot,
   type ExecutionContext,
   type ExecutionLeaseContext,
+  type PreparedPublishSnapshot,
   type ProvenancePublishCommandPayload,
+  type ProvenanceStaleReport,
 } from "@st-workspace/core";
 import {
   AuthoringService,
@@ -396,6 +400,8 @@ export interface DashboardSnapshot {
 
 export interface DashboardBuildReadiness {
   modes: { zhuji: boolean; palette: boolean };
+  both_available?: boolean;
+  both_blockers?: Array<{ mode: "zhuji" | "palette"; reason: string; diagnostics: Array<{ code: string; message: string }> }>;
   primary_character?: { id: string; label: string; mode: string };
   export_modes?: string;
   selected_mode?: string;
@@ -411,6 +417,7 @@ export interface DashboardBuildReadiness {
   png_expected: boolean;
   missing: string[];
   diagnostics: Array<{ code: string; severity: string; message: string }>;
+  provenance_summary?: import("@st-workspace/core").ProvenanceCompositionSummary;
 }
 
 export interface TavernCheckResult {
@@ -2632,12 +2639,19 @@ export class WorkspaceRuntime {
     const state = await this.repository.read();
     const projection = computeProjectProjection(state);
     const manifest = buildRequiredArtifactManifest(state);
+    const readiness = await this.buildReadiness();
+    const bothReadiness = {
+      both_available: readiness.both_available ?? false,
+      both_blockers: readiness.both_blockers ?? [],
+    };
+
     const modeResolution = resolveBuildModeSelection(state, mode);
     if (modeResolution.status !== "ok") {
       return {
         available: false,
         reason: modeResolution.reason ?? "MODE_SELECTION_REQUIRED",
         historical_decisions: deriveHistoricalDecisionRefs(state, undefined),
+        both_readiness: bothReadiness,
       };
     }
     const effectiveMode = modeResolution.mode_selection;
@@ -2646,23 +2660,46 @@ export class WorkspaceRuntime {
     let coverageSnapshot: CoverageSnapshot | undefined;
     if (projection.intent.is_source_adaptation) {
       if (latestAssessment === undefined || latestAssessment.pass !== "formal") {
-        return { available: false, reason: "COVERAGE_ASSESSMENT_REQUIRED", historical_decisions: deriveHistoricalDecisionRefs(state, undefined) };
+        return {
+          available: false,
+          reason: "COVERAGE_ASSESSMENT_REQUIRED",
+          historical_decisions: deriveHistoricalDecisionRefs(state, undefined),
+          both_readiness: bothReadiness,
+        };
       }
       if (!coverageAssessmentFreshness(state, latestAssessment)) {
-        return { available: false, reason: "COVERAGE_ASSESSMENT_STALE", historical_decisions: deriveHistoricalDecisionRefs(state, undefined) };
+        return {
+          available: false,
+          reason: "COVERAGE_ASSESSMENT_STALE",
+          historical_decisions: deriveHistoricalDecisionRefs(state, undefined),
+          both_readiness: bothReadiness,
+        };
       }
       coverageSnapshot = buildCoverageSnapshot(state, latestAssessment, plan);
     }
     const imageIdentity = resolveCoverImageIdentity(state, manifest?.primary_character_id).identity;
     const buildSnapshotHash = computeBuildSnapshotHash(state, plan, effectiveMode, coverageSnapshot, imageIdentity);
     const composition = buildProvenanceCompositionSummary(state, coverageSnapshot, buildSnapshotHash, undefined, imageIdentity);
+    const fingerprint = provenanceConfirmationFingerprint(composition);
+    const preparedSnapshot = buildPreparedPublishSnapshot(
+      state,
+      plan,
+      effectiveMode,
+      coverageSnapshot,
+      composition,
+      fingerprint,
+      imageIdentity,
+    );
+
     return {
       available: true,
-      fingerprint: provenanceConfirmationFingerprint(composition),
+      fingerprint,
       build_snapshot_hash: buildSnapshotHash,
       ...(effectiveMode === undefined ? {} : { mode_selection: effectiveMode }),
       composition,
       historical_decisions: deriveHistoricalDecisionRefs(state, coverageSnapshot),
+      prepared_snapshot: preparedSnapshot,
+      both_readiness: bothReadiness,
     };
   }
 
@@ -2745,7 +2782,16 @@ export class WorkspaceRuntime {
       throw new CoreError("PROVENANCE_CONFIRMATION_STALE", `Provenance composition is not ready for confirmation: ${preview.reason ?? "unavailable"}`, true);
     }
     if (preview.fingerprint !== input.fingerprint) {
-      throw new CoreError("PROVENANCE_CONFIRMATION_STALE", "Provenance composition changed after preview; please re-preview before confirming.", true);
+      let staleReport: ProvenanceStaleReport | undefined;
+      if (input.prepared_snapshot !== undefined && preview.prepared_snapshot !== undefined) {
+        staleReport = comparePreparedSnapshotDiff(input.prepared_snapshot as PreparedPublishSnapshot, preview.prepared_snapshot);
+      }
+      const message = staleReport?.reason ?? "Provenance composition changed after preview; please re-preview before confirming.";
+      const error = new CoreError("PROVENANCE_CONFIRMATION_STALE", message, true);
+      if (staleReport !== undefined) {
+        (error as any).details = { changed_inputs: staleReport.changed_inputs };
+      }
+      throw error;
     }
 
     const operationId = input.operation_id ?? internalId("operation");

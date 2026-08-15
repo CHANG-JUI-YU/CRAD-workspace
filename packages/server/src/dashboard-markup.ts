@@ -144,26 +144,34 @@ export const DASHBOARD_MARKUP = `<body>
     <section class="panel panel-wide" aria-labelledby="readiness-heading">
       <div class="panel-heading">
         <div>
-          <h2 id="readiness-heading">Publish 就緒檢查</h2>
-          <p class="muted">正式裁決來自既有 workflow gate；顯示每條診斷的 code 與嚴重度。</p>
+          <h2 id="readiness-heading">Publish 權威發布中心</h2>
+          <p class="muted">嚴格遵循五階段發布狀態機，以可追溯的 Provenance 快照完成不可變確認與發布。</p>
         </div>
       </div>
-      <div class="form-actions">
+      <div id="publish-stepper" class="publish-stepper" aria-label="發布流程階段">
+        <div class="stepper-step current" data-step="readiness"><span class="step-num">1</span><span class="step-label">發布就緒</span><span class="step-badge">waiting</span></div>
+        <div class="stepper-step" data-step="inputs_frozen"><span class="step-num">2</span><span class="step-label">輸入凍結</span><span class="step-badge">waiting</span></div>
+        <div class="stepper-step" data-step="provenance_reviewed"><span class="step-num">3</span><span class="step-label">Provenance 審查</span><span class="step-badge">waiting</span></div>
+        <div class="stepper-step" data-step="confirmed"><span class="step-num">4</span><span class="step-label">發布確認</span><span class="step-badge">waiting</span></div>
+        <div class="stepper-step" data-step="published"><span class="step-num">5</span><span class="step-label">發布完成</span><span class="step-badge">waiting</span></div>
+      </div>
+      <div class="form-actions publish-controls">
         <select id="readiness-mode" aria-label="就緒檢查打包模式">
           <option value="">依專案自動判斷</option>
           <option value="zhuji">Zhuji</option>
           <option value="palette">Palette</option>
           <option value="both" id="readiness-both-mode" disabled>Both（兩者）</option>
         </select>
-        <button id="check-readiness" class="primary" type="button">重新檢查</button>
+        <button id="publish-primary-cta" class="primary" type="button">檢查發布就緒</button>
+        <button id="check-readiness" type="button" style="display:none;">重新檢查</button>
+        <button id="prepare-provenance" type="button" style="display:none;">準備發布確認</button>
+        <button id="confirm-publish" type="button" style="display:none;" disabled>確認並發布</button>
       </div>
+      <div id="both-mode-blocker-info" class="both-blocker-info" style="display:none;"></div>
       <div id="readiness-message" class="panel-message" aria-live="polite">尚未執行就緒檢查。</div>
       <div id="readiness-list" class="readiness-list"></div>
+      <div id="provenance-stale-diff" class="provenance-stale-diff" style="display:none;"></div>
       <div id="provenance-summary" class="provenance-summary"></div>
-      <div class="form-actions">
-        <button id="prepare-provenance" type="button">準備發布確認</button>
-        <button id="confirm-publish" class="primary" type="button" disabled>確認並發布</button>
-      </div>
       <div id="provenance-confirm-message" class="panel-message" aria-live="polite">尚未準備 provenance 確認。</div>
       <div id="provenance-history" class="provenance-history"></div>
     </section>

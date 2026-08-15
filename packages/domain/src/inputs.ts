@@ -19,6 +19,7 @@ export const publishProvenanceConfirmSchema = z.object({
   mode_selection: z.enum(["zhuji", "palette", "both"]).optional(),
   idempotency_key: z.string().min(1).optional(),
   operation_id: z.string().min(1).optional(),
+  prepared_snapshot: z.record(z.string(), z.unknown()).optional(),
 }).strict();
 export type PublishProvenanceConfirmInput = z.infer<typeof publishProvenanceConfirmSchema>;
 

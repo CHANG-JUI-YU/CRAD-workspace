@@ -100,17 +100,89 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         }
       }
 
-      function updateBothModeOption(modes, exportModes) {
+      var publishStepperState = {
+        stage: "readiness",
+        status: "waiting",
+        readinessOk: false,
+        previewData: null,
+        staleDiff: null
+      };
+
+      function updatePublishStepper(stage, status, details) {
+        publishStepperState.stage = stage;
+        publishStepperState.status = status;
+        var stageOrder = ["readiness", "inputs_frozen", "provenance_reviewed", "confirmed", "published"];
+        var currentIdx = stageOrder.indexOf(stage);
+
+        var cta = byId("publish-primary-cta");
+        var stepperEl = byId("publish-stepper");
+        if (stepperEl) {
+          var stepEls = stepperEl.querySelectorAll(".stepper-step");
+          for (var i = 0; i < stepEls.length; i += 1) {
+            var el = stepEls[i];
+            var stepKey = el.getAttribute("data-step");
+            var stepIdx = stageOrder.indexOf(stepKey);
+            var badge = el.querySelector(".step-badge");
+            el.className = "stepper-step";
+            if (stepIdx < currentIdx) {
+              el.classList.add("pass");
+              if (badge) badge.textContent = "pass";
+            } else if (stepIdx === currentIdx) {
+              var cls = status === "stale" ? "stale" : (status === "blocked" ? "blocked" : (status === "pass" ? "pass" : "current"));
+              el.classList.add(cls);
+              if (badge) badge.textContent = status;
+            } else {
+              if (badge) badge.textContent = "waiting";
+            }
+          }
+        }
+
+        if (cta) {
+          cta.disabled = false;
+          if (stage === "readiness") {
+            cta.textContent = status === "blocked" ? "重新檢查就緒狀態" : (status === "pass" ? "凍結輸入並準備發布確認" : "檢查發布就緒");
+            cta.setAttribute("data-action", status === "pass" ? "prepare_provenance" : "check_readiness");
+          } else if (stage === "inputs_frozen") {
+            cta.textContent = status === "stale" ? "重新準備發布確認" : "凍結輸入並準備發布確認";
+            cta.setAttribute("data-action", "prepare_provenance");
+          } else if (stage === "provenance_reviewed") {
+            if (status === "stale") {
+              cta.textContent = "重新準備發布確認";
+              cta.setAttribute("data-action", "prepare_provenance");
+            } else {
+              var overridesCount = (details && details.overrides_count) || 0;
+              cta.textContent = overridesCount > 0 ? "確認此組成並發布（" + overridesCount + " 筆覆寫）" : "確認此組成並發布";
+              cta.setAttribute("data-action", "confirm_publish");
+            }
+          } else if (stage === "confirmed" || stage === "published") {
+            cta.textContent = "已發布（可安全重試）";
+            cta.setAttribute("data-action", "confirm_publish");
+          }
+        }
+      }
+
+      function updateBothModeOption(modes, exportModes, bothBlockers) {
         var option = byId("readiness-both-mode");
-        if (option === null || option === undefined) return;
+        var blockerInfoEl = byId("both-mode-blocker-info");
         var modesOk = isRecord(modes) && modes.zhuji === true && modes.palette === true;
         var manifestOk = exportModes === undefined || exportModes === null || exportModes === "both";
-        if (modesOk && manifestOk) {
-          option.disabled = false;
-          option.removeAttribute("title");
-        } else {
-          option.disabled = true;
-          option.setAttribute("title", "僅在 Zhuji 與 Palette 都可建置且 Blueprint 未限制單一模式時可用");
+        if (option !== null && option !== undefined) {
+          if (modesOk && manifestOk) {
+            option.disabled = false;
+            option.removeAttribute("title");
+          } else {
+            option.disabled = true;
+            option.setAttribute("title", "僅在 Zhuji 與 Palette 都可建置且 Blueprint 未限制單一模式時可用");
+          }
+        }
+        if (blockerInfoEl !== null && blockerInfoEl !== undefined) {
+          if (Array.isArray(bothBlockers) && bothBlockers.length > 0 && !(modesOk && manifestOk)) {
+            blockerInfoEl.style.display = "block";
+            blockerInfoEl.textContent = "Both 雙模式目前不可用：" + bothBlockers.map(function (b) { return b.reason; }).join("；");
+          } else {
+            blockerInfoEl.style.display = "none";
+            blockerInfoEl.textContent = "";
+          }
         }
       }
 
@@ -180,7 +252,8 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
           readiness: "readiness-list",
           quality: "quality-heading",
           builds: "build-heading",
-          publishes: "readiness-list"
+          publishes: "readiness-list",
+          publish: "readiness-list"
         };
         return panelIds[panel] || "readiness-list";
       }
@@ -208,7 +281,6 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
       }
 
       var lastDiagnosticHighlight = null;
-      var currentProvenanceConfirmation = null;
 
       function generateIdempotencyKey() {
         if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -451,66 +523,254 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         container.append(rowEl);
       }
 
+      function renderStaleDiff(changedInputs) {
+        var target = byId("provenance-stale-diff");
+        if (!target) return;
+        if (!Array.isArray(changedInputs) || changedInputs.length === 0) {
+          target.style.display = "none";
+          target.textContent = "";
+          return;
+        }
+        target.style.display = "block";
+        target.textContent = "";
+        var title = document.createElement("div");
+        title.className = "stale-diff-title";
+        title.textContent = "發布確認已失效（輸入已變更，共 " + changedInputs.length + " 項差異）：";
+        target.append(title);
+
+        for (var i = 0; i < changedInputs.length; i += 1) {
+          var item = changedInputs[i];
+          if (!isRecord(item)) continue;
+          var row = document.createElement("div");
+          row.className = "stale-diff-item";
+          var labelSpan = document.createElement("strong");
+          labelSpan.textContent = "【" + (item.label || item.category) + "】 ";
+          row.append(labelSpan);
+          var textSpan = document.createElement("span");
+          textSpan.textContent = (item.before_summary || "") + " -> " + (item.after_summary || "");
+          row.append(textSpan);
+          if (item.target_panel) {
+            var navBtn = document.createElement("button");
+            navBtn.type = "button";
+            navBtn.className = "action-link";
+            navBtn.style.marginLeft = "0.5rem";
+            navBtn.textContent = "前往面板";
+            navBtn.addEventListener("click", (function (tPanel) {
+              return function () { switchPanel(tPanel); };
+            })(item.target_panel));
+            row.append(navBtn);
+          }
+          target.append(row);
+        }
+      }
+
       function renderProvenanceComposition(preview) {
         var target = byId("provenance-summary");
         target.textContent = "";
         var confirmButton = byId("confirm-publish");
+        renderStaleDiff([]);
+
         if (!isRecord(preview)) {
           byId("provenance-confirm-message").textContent = "無法取得 provenance 資訊。";
           if (confirmButton) confirmButton.disabled = true;
           currentProvenanceConfirmation = null;
+          updatePublishStepper("readiness", "waiting");
           return;
         }
         if (preview.available !== true || !isRecord(preview.composition)) {
           byId("provenance-confirm-message").textContent = "尚未準備完成：" + (firstString(preview, ["reason"]) || "不可用") + "。請先完成 Fact Review 與 formal coverage assessment 後再試。";
           if (confirmButton) confirmButton.disabled = true;
           currentProvenanceConfirmation = null;
+          updatePublishStepper("readiness", "blocked");
           return;
         }
         var fingerprint = firstString(preview, ["fingerprint"]);
         var modeSelection = firstString(preview, ["mode_selection"]) || undefined;
         var projectId = (state && state.status && state.status.project_id) || "";
         var idempotencyKey = getOrCreateProvenanceIdempotencyKey(projectId, fingerprint, modeSelection);
+        var preparedSnapshot = preview.prepared_snapshot;
 
         currentProvenanceConfirmation = {
           fingerprint: fingerprint,
           mode_selection: modeSelection,
           idempotency_key: idempotencyKey,
+          prepared_snapshot: preparedSnapshot,
           in_flight: false,
           completed: false,
           result: null
         };
         var composition = preview.composition;
-        var box = document.createElement("div");
-        box.className = "workflow-stage";
+
+        var card = document.createElement("div");
+        card.className = "provenance-card";
+
+        var header = document.createElement("div");
+        header.className = "provenance-header";
+        var titleBox = document.createElement("div");
         var title = document.createElement("div");
-        title.className = "workflow-stage-title";
-        title.textContent = "發布來源組成（不可變 provenance）";
-        box.append(title);
-        var counts = document.createElement("div");
-        counts.className = "muted";
+        title.className = "provenance-title";
+        var isDual = modeSelection === "both";
+        title.textContent = "權威發布快照（Authoritative Provenance Card）" + (isDual ? "【雙模式 Both】" : "");
+        titleBox.append(title);
+        var subTitle = document.createElement("div");
+        subTitle.className = "muted";
+        subTitle.textContent = "Fingerprint: " + fingerprint.slice(0, 16) + "… · Build Snapshot: " + composition.build_snapshot_hash.slice(0, 16) + "…";
+        titleBox.append(subTitle);
+        header.append(titleBox);
+        card.append(header);
+
+        var groupsContainer = document.createElement("div");
+        groupsContainer.className = "provenance-groups";
+
+        // Group: Mode
+        var modeGroup = document.createElement("div");
+        modeGroup.className = "provenance-group-item";
+        var modeHead = document.createElement("div");
+        modeHead.className = "group-header";
+        modeHead.textContent = "1. 發布模式（Mode Selection）";
+        var modeBadge = document.createElement("span");
+        modeBadge.className = "group-status included";
+        modeBadge.textContent = "included";
+        modeHead.append(modeBadge);
+        modeGroup.append(modeHead);
+        var modeBody = document.createElement("div");
+        modeBody.className = "group-body";
+        modeBody.textContent = "選擇模式：" + (modeSelection || "預設") + (isDual ? "（同時打包 Zhuji 與 Palette 模組）" : "");
+        modeGroup.append(modeBody);
+        groupsContainer.append(modeGroup);
+
+        // Group: Image
+        var imageGroup = document.createElement("div");
+        imageGroup.className = "provenance-group-item";
+        var imageHead = document.createElement("div");
+        imageHead.className = "group-header";
+        imageHead.textContent = "2. 封面圖片（Cover Image Identity）";
+        var imageIdentity = isRecord(composition.image_identity) ? composition.image_identity : undefined;
+        var hasImage = imageIdentity && imageIdentity.mode === "uploaded";
+        var imgBadge = document.createElement("span");
+        imgBadge.className = "group-status " + (hasImage ? "included" : "not_applicable");
+        imgBadge.textContent = hasImage ? "included" : "not_applicable";
+        imageHead.append(imgBadge);
+        imageGroup.append(imageHead);
+        var imageBody = document.createElement("div");
+        imageBody.className = "group-body";
+        if (hasImage) {
+          var imgPreview = document.createElement("div");
+          imgPreview.className = "provenance-cover-preview";
+          if (imageIdentity.image_id) {
+            var thumb = document.createElement("img");
+            thumb.className = "provenance-cover-thumb";
+            thumb.src = "/workspace/images/" + encodeURIComponent(imageIdentity.image_id);
+            thumb.alt = "封面預覽";
+            imgPreview.append(thumb);
+          }
+          var imgText = document.createElement("div");
+          imgText.textContent = "圖片 ID: " + imageIdentity.image_id + " · Blob: " + (imageIdentity.blob_hash ? imageIdentity.blob_hash.slice(0, 12) : "無") + (imageIdentity.aspect_ratio ? " · 比例: " + imageIdentity.aspect_ratio : "");
+          imgPreview.append(imgText);
+          imageBody.append(imgPreview);
+        } else {
+          imageBody.textContent = "未配置上傳圖片，使用預設佔位圖。";
+        }
+        imageGroup.append(imageBody);
+        groupsContainer.append(imageGroup);
+
+        // Group: Artifacts
+        var artGroup = document.createElement("div");
+        artGroup.className = "provenance-group-item";
+        var artHead = document.createElement("div");
+        artHead.className = "group-header";
+        artHead.textContent = "3. 發布組件（Artifact Revisions）";
+        var artBadge = document.createElement("span");
+        artBadge.className = "group-status included";
+        artBadge.textContent = "included";
+        artHead.append(artBadge);
+        artGroup.append(artHead);
+        var artBody = document.createElement("div");
+        artBody.className = "group-body";
+        var artCount = (preparedSnapshot && preparedSnapshot.artifacts) ? preparedSnapshot.artifacts.length : 0;
+        artBody.textContent = "包含 " + artCount + " 個不可變 Artifact 組件版本。";
+        artGroup.append(artBody);
+        groupsContainer.append(artGroup);
+
+        // Group: Coverage & Facts
+        var covGroup = document.createElement("div");
+        covGroup.className = "provenance-group-item";
+        var covHead = document.createElement("div");
+        covHead.className = "group-header";
+        covHead.textContent = "4. 來源改編與事實覆蓋（Coverage & Facts）";
+        var hasCov = composition.assessment !== undefined;
+        var covBadge = document.createElement("span");
+        covBadge.className = "group-status " + (hasCov ? "included" : "not_applicable");
+        covBadge.textContent = hasCov ? "included" : "not_applicable";
+        covHead.append(covBadge);
+        covGroup.append(covHead);
+        var covBody = document.createElement("div");
+        covBody.className = "group-body";
         var countParts = [];
         if (composition.source_backed) countParts.push("來源佐證 " + composition.source_backed.count);
         if (composition.user_supplement) countParts.push("使用者補充 " + composition.user_supplement.count);
         if (composition.creative_completion) countParts.push("創作補全 " + composition.creative_completion.count);
-        if (Array.isArray(composition.overrides) && composition.overrides.length > 0) countParts.push("active override " + composition.overrides.length);
-        if (Array.isArray(composition.quality_overrides) && composition.quality_overrides.length > 0) countParts.push("品質覆寫 " + composition.quality_overrides.length);
-        counts.textContent = countParts.join(" · ");
-        box.append(counts);
-        box.append(provenanceSection("來源佐證 source-backed（" + (composition.source_backed ? composition.source_backed.count : 0) + "）", composition.source_backed ? composition.source_backed.refs : []));
-        var supplementSection = provenanceSection("使用者補充 user supplement（" + (composition.user_supplement ? composition.user_supplement.count : 0) + "）", composition.user_supplement ? composition.user_supplement.refs : []);
-        supplementSection.className += " supplement";
-        box.append(supplementSection);
-        var creativeSection = provenanceSection("創作補全 creative completion（" + (composition.creative_completion ? composition.creative_completion.count : 0) + "）", composition.creative_completion ? composition.creative_completion.refs : []);
-        creativeSection.className += " creative";
-        box.append(creativeSection);
+        covBody.textContent = hasCov ? countParts.join(" · ") : "非來源改編專案。";
+        covGroup.append(covBody);
+        groupsContainer.append(covGroup);
+
+        // Group: Quality Policy
+        var qualGroup = document.createElement("div");
+        qualGroup.className = "provenance-group-item";
+        var qualHead = document.createElement("div");
+        qualHead.className = "group-header";
+        qualHead.textContent = "5. 品質門檻與覆寫（Quality Policy）";
+        var qualBadge = document.createElement("span");
+        qualBadge.className = "group-status included";
+        qualBadge.textContent = "included";
+        qualHead.append(qualBadge);
+        qualGroup.append(qualHead);
+        var qualBody = document.createElement("div");
+        qualBody.className = "group-body";
+        var qualOverrides = Array.isArray(composition.quality_overrides) ? composition.quality_overrides.length : 0;
+        qualBody.textContent = (preparedSnapshot && preparedSnapshot.quality_policy && preparedSnapshot.quality_policy.level ? "門檻：" + preparedSnapshot.quality_policy.level : "預設門檻") + " · " + qualOverrides + " 項品質覆寫。";
+        qualGroup.append(qualBody);
+        groupsContainer.append(qualGroup);
+
+        // Group: Predicted Outputs
+        var outGroup = document.createElement("div");
+        outGroup.className = "provenance-group-item";
+        var outHead = document.createElement("div");
+        outHead.className = "group-header";
+        outHead.textContent = "6. 預期發布產物（Predicted Outputs）";
+        var outBadge = document.createElement("span");
+        outBadge.className = "group-status included";
+        outBadge.textContent = "included";
+        outHead.append(outBadge);
+        outGroup.append(outHead);
+        var outBody = document.createElement("div");
+        outBody.className = "group-body";
+        var outFiles = (preparedSnapshot && preparedSnapshot.predicted_outputs && preparedSnapshot.predicted_outputs.files) ? preparedSnapshot.predicted_outputs.files : ["exports/card.json", "exports/card.png"];
+        outBody.textContent = "輸出檔案： " + outFiles.join("、 ");
+        outGroup.append(outBody);
+        groupsContainer.append(outGroup);
+
+        card.append(groupsContainer);
+
+        // Drill-downs
+        var drilldowns = document.createElement("div");
+        drilldowns.style.marginTop = "0.75rem";
+        drilldowns.append(provenanceSection("來源佐證 source-backed（" + (composition.source_backed ? composition.source_backed.count : 0) + "）", composition.source_backed ? composition.source_backed.refs : []));
+        var supSec = provenanceSection("使用者補充 user supplement（" + (composition.user_supplement ? composition.user_supplement.count : 0) + "）", composition.user_supplement ? composition.user_supplement.refs : []);
+        supSec.className += " supplement";
+        drilldowns.append(supSec);
+        var creaSec = provenanceSection("創作補全 creative completion（" + (composition.creative_completion ? composition.creative_completion.count : 0) + "）", composition.creative_completion ? composition.creative_completion.refs : []);
+        creaSec.className += " creative";
+        drilldowns.append(creaSec);
+
         var activeOverrideSection = document.createElement("details");
         activeOverrideSection.className = "provenance-section";
         var activeOverrideSummary = document.createElement("summary");
         activeOverrideSummary.textContent = "Active coverage decisions／overrides（" + (Array.isArray(composition.overrides) ? composition.overrides.length : 0) + "）";
         activeOverrideSection.append(activeOverrideSummary);
         activeOverrideSection.append(overrideList(composition.overrides));
-        box.append(activeOverrideSection);
+        drilldowns.append(activeOverrideSection);
+
         var qualityOverrideSection = document.createElement("details");
         qualityOverrideSection.className = "provenance-section";
         var qualityOverrideSummary = document.createElement("summary");
@@ -519,11 +779,12 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         qualityOverrideSection.append(overrideList(composition.quality_overrides.map(function (item) {
           return { decision_id: String(item.code), action: "quality_override", requirement_ids: [], rationale: item.reason, supersedes: undefined };
         })));
-        box.append(qualityOverrideSection);
+        drilldowns.append(qualityOverrideSection);
+
         var identities = document.createElement("details");
         identities.className = "provenance-section";
         var identitiesSummary = document.createElement("summary");
-        identitiesSummary.textContent = "Snapshot identities（完整值）";
+        identitiesSummary.textContent = "Snapshot identities（完整審計雜湊值）";
         identities.append(identitiesSummary);
         var identityBox = document.createElement("div");
         if (composition.assessment) hashRow("評估 assessment", composition.assessment.id + "@" + composition.assessment.revision, identityBox);
@@ -541,45 +802,35 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
           hashRow("build snapshot hash（build input identity）", composition.build_snapshot_hash, identityBox, legacyNote);
         }
         if (composition.compiled_content_hash) hashRow("compiled content hash（compiler output identity）", composition.compiled_content_hash, identityBox);
-        var imageIdentity = isRecord(composition.image_identity) ? composition.image_identity : undefined;
-        if (imageIdentity) {
-          var imageRow = document.createElement("div");
-          imageRow.className = "provenance-hash-row";
-          var imageLabel = document.createElement("span");
-          imageLabel.className = "muted";
-          imageLabel.textContent = "封面圖片 identity";
-          imageRow.append(imageLabel);
-          var imageValue = document.createElement("code");
-          imageValue.textContent = imageIdentity.mode === "placeholder" ? "placeholder（內建佔位圖）" : String(imageIdentity.image_id || "?");
-          imageRow.append(imageValue);
-          if (imageIdentity.mode === "placeholder") {
-            var placeholderBadge = document.createElement("span");
-            placeholderBadge.className = "status-badge cancelled";
-            placeholderBadge.textContent = "placeholder";
-            imageRow.append(placeholderBadge);
-          }
-          if (imageIdentity.blob_hash) {
-            imageRow.append(provenanceImageMeta("blob hash", imageIdentity.blob_hash));
-          }
-          if (imageIdentity.character_id) imageRow.append(provenanceImageMeta("character_id", imageIdentity.character_id));
-          if (imageIdentity.media_type) imageRow.append(provenanceImageMeta("media_type", imageIdentity.media_type));
-          if (imageIdentity.aspect_ratio) imageRow.append(provenanceImageMeta("aspect_ratio", imageIdentity.aspect_ratio));
-          if (isRecord(imageIdentity.crop)) {
-            imageRow.append(provenanceImageMeta("crop", imageIdentity.crop.width + "x" + imageIdentity.crop.height + "@" + imageIdentity.crop.offset_x + "," + imageIdentity.crop.offset_y));
-          }
-          if (imageIdentity.transformation_revision) imageRow.append(provenanceImageMeta("transformation revision", imageIdentity.transformation_revision));
-          identityBox.append(imageRow);
-        }
+        hashRow("provenance confirmation fingerprint", fingerprint, identityBox);
         identities.append(identityBox);
-        box.append(identities);
-        target.append(box);
+        drilldowns.append(identities);
+
+        card.append(drilldowns);
+
+        // Human readable acknowledgement box
+        var ackBox = document.createElement("div");
+        ackBox.className = "human-ack-box";
+        var ackTitle = document.createElement("strong");
+        ackTitle.textContent = "發布確認聲明：";
+        ackBox.append(ackTitle);
+        var ackText = document.createElement("div");
+        ackText.textContent = (preparedSnapshot && preparedSnapshot.human_acknowledgement)
+          ? preparedSnapshot.human_acknowledgement
+          : "我確認並批准目前畫面所顯示的模式、圖片、Artifacts、Coverage、Facts、來源、品質政策與輸出組成；本次發布只適用於這份不可變快照。";
+        ackBox.append(ackText);
+        card.append(ackBox);
+
+        target.append(card);
+
         if (confirmButton) {
           confirmButton.disabled = currentProvenanceConfirmation.fingerprint === "";
           confirmButton.textContent = Array.isArray(composition.overrides) && composition.overrides.length > 0
             ? "確認覆寫並發布（" + composition.overrides.length + " 筆 active override）"
             : "確認並發布";
         }
-        byId("provenance-confirm-message").textContent = "已準備；確認後將以同一份 immutable refs 保存到 Publish Record。";
+        byId("provenance-confirm-message").textContent = "已準備完成；確認後將以此份不可變快照（Fingerprint: " + fingerprint.slice(0, 8) + "）執行發布。";
+        updatePublishStepper("provenance_reviewed", "current", { overrides_count: (composition.overrides ? composition.overrides.length : 0) });
       }
 
       function renderProvenanceHistory(view) {

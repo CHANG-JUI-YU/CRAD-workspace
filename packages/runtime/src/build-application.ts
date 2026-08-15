@@ -344,10 +344,31 @@ export async function buildReadiness(deps: BuildApplicationDeps): Promise<Dashbo
     json: publishedCardExportPath(state.project_name, state.project_id, current, outputMode),
     png: publishedCardPngExportPath(state.project_name, state.project_id, current, outputMode),
   };
+  const bothAvailable = modes.zhuji && modes.palette;
+  const bothBlockers: Array<{ mode: "zhuji" | "palette"; reason: string; diagnostics: Array<{ code: string; message: string }> }> = [];
+  if (!modes.zhuji) {
+    const zhujiDiag = (manifest?.diagnostics ?? []).filter((d) => d.code.toLowerCase().includes("zhuji") || d.message.toLowerCase().includes("zhuji"));
+    bothBlockers.push({
+      mode: "zhuji",
+      reason: "Zhuji 模式未就緒（缺少必要模組或審查未通過）",
+      diagnostics: zhujiDiag.length > 0 ? zhujiDiag : [{ code: "ZHUJI_MODULES_INCOMPLETE", message: "Zhuji 模組未完全準備完成" }],
+    });
+  }
+  if (!modes.palette) {
+    const paletteDiag = (manifest?.diagnostics ?? []).filter((d) => d.code.toLowerCase().includes("palette") || d.message.toLowerCase().includes("palette"));
+    bothBlockers.push({
+      mode: "palette",
+      reason: "Palette 模式未就緒（缺少必要模組或審查未通過）",
+      diagnostics: paletteDiag.length > 0 ? paletteDiag : [{ code: "PALETTE_MODULES_INCOMPLETE", message: "Palette 模組未完全準備完成" }],
+    });
+  }
+
   const missing = manifest === undefined ? [] : manifest.characters.flatMap((character) => character.missing_modules.map((module) => `${character.character_id}:${module}`));
   const latestBuild = [...state.builds].reverse().find((build) => build.status === "previewed" || build.status === "built");
   return {
     modes,
+    both_available: bothAvailable,
+    ...(bothBlockers.length === 0 ? {} : { both_blockers: bothBlockers }),
     ...(primary === undefined ? {} : { primary_character: primary }),
     ...(manifest === undefined ? {} : { export_modes: manifest.export_modes }),
     ...(outputMode === undefined || outputMode === "both" ? {} : { selected_mode: outputMode }),
