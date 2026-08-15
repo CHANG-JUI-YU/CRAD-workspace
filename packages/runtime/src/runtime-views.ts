@@ -1,4 +1,4 @@
-import type { AttachmentStore, PreparedPublishSnapshot, ProvenanceCompositionSummary, ProvenanceOverrideRef, RepairInspection } from "@st-workspace/core";
+import type { AttachmentStore, CoverImageFreshnessResult, PreparedPublishSnapshot, ProvenanceCompositionSummary, ProvenanceOverrideRef, PublishedOutputPlan, RepairInspection } from "@st-workspace/core";
 import type { CardModeSelection } from "@st-workspace/compiler";
 import type { SourceFetcher } from "@st-workspace/domain";
 
@@ -124,6 +124,8 @@ export interface DashboardSnapshot {
   roster?: Array<{ id: string; label: string; display_name?: string; mode?: string }>;
   primary_character_id?: string;
   images_stale: boolean;
+  images_stale_reason?: string;
+  images_freshness: CoverImageFreshnessResult;
   facts: DashboardFactView[];
   sources: Array<{ id: string; candidate_id: string; title: string; revision: string; media_type: string; original_name?: string; url?: string; official?: boolean; chunk_count: number; canonical_chars: number; selection_snapshot?: unknown }>;
   candidates: Array<{ id: string; title: string; snippet?: string; url?: string; domain?: string; status: string; official?: boolean; failure?: { code: string; message: string }; selection_snapshot?: unknown }>;
@@ -197,6 +199,7 @@ export interface PublishProvenancePreviewResult {
   fingerprint?: string;
   build_snapshot_hash?: string;
   mode_selection?: CardModeSelection;
+  output_plan?: PublishedOutputPlan;
   composition?: ProvenanceCompositionSummary;
   historical_decisions: ProvenanceOverrideRef[];
   prepared_snapshot?: PreparedPublishSnapshot;

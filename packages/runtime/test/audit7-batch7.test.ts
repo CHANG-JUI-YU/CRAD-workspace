@@ -332,7 +332,7 @@ describe("Audit 7 Batch 7 - Runtime Prepared Snapshot & Stale Diff & Both Mode",
     expect(snap.version).toBe("prepared-snapshot-v2");
     expect(snap.groups.mode.status).toBe("included");
     expect(snap.groups.artifacts.status).toBe("included");
-    expect(snap.predicted_outputs.files).toContain("exports/Test Project.json");
+    expect(snap.predicted_outputs.files).toContain("exports/Test-Project-珠璣角色卡.json");
     expect(snap.human_acknowledgement).toContain("我確認並批准目前畫面所顯示的模式");
   });
 

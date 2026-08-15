@@ -12,6 +12,7 @@ import {
   publishedCardExportPath,
   publishedCardPngExportPath,
   resolveCoverImageIdentity,
+  derivePublishedOutputPlan,
   type BuildRecord,
   type OperationRecord,
   type ProjectRepository,
@@ -44,7 +45,7 @@ function updateOperation(operation: OperationRecord, patch: Partial<OperationRec
 export class BuildService {
   constructor(private readonly repository: ProjectRepository) {}
 
-  async run(operationId: string, request: string, actorInput: ExecutionActorInput, options: { mode_selection?: CardModeSelection; expected_provenance_fingerprint?: string } = {}): Promise<BuildExecutionResult> {
+  async run(operationId: string, request: string, actorInput: ExecutionActorInput, options: { mode_selection?: CardModeSelection; expected_provenance_fingerprint?: string; expected_output_plan?: unknown } = {}): Promise<BuildExecutionResult> {
     const { auditActor: actor, context: execution } = resolveExecutionActors(actorInput);
     await assertExecutionLease(this.repository, execution);
     const initial = await this.repository.read();
@@ -220,9 +221,35 @@ export class BuildService {
       }
     }
     const coverageSnapshot = latestAssessment === undefined ? undefined : buildCoverageSnapshot(initial, latestAssessment, plan);
-    const buildSnapshotHash = computeBuildSnapshotHash(initial, plan, modeSelection, coverageSnapshot, imageIdentity);
-    const provenanceSummary = buildProvenanceCompositionSummary(initial, coverageSnapshot, buildSnapshotHash, hash, imageIdentity);
+    const outputPlan = derivePublishedOutputPlan(initial, modeSelection);
+    const buildSnapshotHash = computeBuildSnapshotHash(initial, plan, modeSelection, coverageSnapshot, imageIdentity, outputPlan);
+    const provenanceSummary = buildProvenanceCompositionSummary(initial, coverageSnapshot, buildSnapshotHash, hash, imageIdentity, outputPlan);
     const confirmationFingerprint = provenanceConfirmationFingerprint(provenanceSummary);
+    if (options.expected_output_plan !== undefined && canonicalJson(outputPlan) !== canonicalJson(options.expected_output_plan)) {
+      const summary = "Output plan mismatch: the confirmed export paths no longer match the current project; please re-preview before publishing.";
+      await this.repository.commit(initial.revision, (current) => {
+        assertExecutionLeaseForOperation(current.operations.find((item) => item.id === operationId), execution);
+        return {
+          ...current,
+          operations: current.operations.map((item) => item.id === operationId ? updateOperation(item, {
+            status: "blocked",
+            question: summary,
+            result_summary: summary,
+            progress: [...item.progress, { item_id: operationId, status: "blocked", message: "output plan mismatch" }],
+          }) : item),
+          audit: [...current.audit, {
+            id: internalId("audit"),
+            operation_id: operationId,
+            event: "publish.output_plan_mismatch",
+            actor,
+            occurred_at: now(),
+            project_revision: current.revision + 1,
+            details: { expected: options.expected_output_plan, actual: outputPlan, codes: ["OUTPUT_PLAN_MISMATCH"] },
+          }],
+        };
+      });
+      return { status: "blocked", summary };
+    }
     if (options.expected_provenance_fingerprint !== undefined && options.expected_provenance_fingerprint !== confirmationFingerprint) {
       const summary = "Provenance confirmation mismatch: build inputs changed after preview; please re-preview before publishing.";
       await this.repository.commit(initial.revision, (current) => {
@@ -303,6 +330,7 @@ export class BuildService {
       created_at: now(),
       ...(coverageSnapshot === undefined ? {} : { coverage_snapshot: coverageSnapshot }),
       provenance_summary: provenanceSummary,
+      output_plan: outputPlan,
     } : undefined;
 
     const warningCount = buildWarnings.length + compiled.diagnostics.filter((item) => item.severity === "warning").length;

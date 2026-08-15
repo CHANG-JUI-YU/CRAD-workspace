@@ -1,6 +1,6 @@
 import { canonicalCardJson, characterCardV3Schema, type CharacterCardV3 } from "@st-workspace/adapters-ccv3";
 import { isBuiltInPlaceholderImage, readCardFromPng, readPngImageInfo } from "@st-workspace/adapters-png";
-import { computeProjectProjection, contentHash, publishedCardExportPath, publishedCardPngExportPath, type ProjectRepository, type RepairInspection, type RepairReport } from "@st-workspace/core";
+import { computeProjectProjection, contentHash, deriveCoverImageFreshness, publishedCardExportPath, publishedCardPngExportPath, type ProjectRepository, type RepairInspection, type RepairReport } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, resolveBuildModeSelection, reviewRunProjectionRevision, validateWorkflow, type WorkflowGateResult } from "@st-workspace/domain";
 import { availableCardModesRuntime, latestByKey } from "./operation-runner.js";
 import type { DashboardBlueprint, DashboardBuildReadiness, DashboardSnapshot, TavernCheckResult, TavernCompatibilityReport } from "./runtime-views.js";
@@ -30,7 +30,11 @@ export async function dashboardSnapshot(deps: BuildApplicationDeps): Promise<Das
   }
   const imageManifest = buildRequiredArtifactManifest(state);
   const latestPublish = state.publishes.at(-1);
-  const latestImageUpdate = state.images.reduce((latest, image) => image.updated_at > latest ? image.updated_at : latest, "");
+  const latestBuild = state.builds.at(-1);
+  const recordedImageIdentity = latestBuild?.provenance_summary?.image_identity ?? latestPublish?.provenance_summary?.image_identity;
+  const imageFreshness = latestPublish === undefined
+    ? { status: "unknown" as const, reason: "尚未發布。" }
+    : deriveCoverImageFreshness(state, recordedImageIdentity, imageManifest?.primary_character_id);
   const dashboardBase = {
     project: {
       project_id: state.project_id,
@@ -50,7 +54,9 @@ export async function dashboardSnapshot(deps: BuildApplicationDeps): Promise<Das
       })),
       ...(imageManifest.primary_character_id === undefined ? {} : { primary_character_id: imageManifest.primary_character_id }),
     }),
-    images_stale: latestPublish !== undefined && latestImageUpdate !== "" && latestImageUpdate > latestPublish.created_at,
+    images_stale: imageFreshness.status === "stale",
+    ...(imageFreshness.reason === undefined ? {} : { images_stale_reason: imageFreshness.reason }),
+    images_freshness: imageFreshness,
     prechecks: state.blueprint_prechecks.map((precheck) => ({
       id: precheck.id,
       status: precheck.status,

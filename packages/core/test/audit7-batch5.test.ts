@@ -119,8 +119,8 @@ describe("#75 build snapshot hash binds the image identity", () => {
   }
 
   it("uses version build-snapshot-v2", () => {
-    expect(BUILD_SNAPSHOT_PAYLOAD_VERSION).toBe("build-snapshot-v2");
-    expect(PROVENANCE_CONFIRMATION_VERSION).toBe("provenance-confirmation-v2");
+    expect(BUILD_SNAPSHOT_PAYLOAD_VERSION).toBe("build-snapshot-v3");
+    expect(PROVENANCE_CONFIRMATION_VERSION).toBe("provenance-confirmation-v3");
   });
 
   it("changes when the blob hash changes", () => {

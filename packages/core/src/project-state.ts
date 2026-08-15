@@ -15,6 +15,7 @@ import {
 } from "./coverage.js";
 import type { OperationCommand, OperationRecord, AuditEvent } from "./operations.js";
 import type { ProvenanceCompositionSummary } from "./provenance.js";
+import type { PublishedOutputPlan } from "./output-plan.js";
 
 export type OperationStatus =
   | "created"
@@ -407,6 +408,7 @@ export interface PublishRecord {
   created_at: string;
   coverage_snapshot?: CoverageSnapshot;
   provenance_summary?: ProvenanceCompositionSummary;
+  output_plan?: PublishedOutputPlan;
 }
 
 export interface ImportRecord {

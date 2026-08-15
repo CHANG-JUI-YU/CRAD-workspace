@@ -29,6 +29,7 @@ import {
   publishedCardPngExportPath,
   provenanceConfirmationFingerprint,
   resolveCoverImageIdentity,
+  derivePublishedOutputPlan,
   templateJsonSchemaFor,
   templateProposalValueSchema,
   zhujiProposalJsonSchema,
@@ -2678,8 +2679,9 @@ export class WorkspaceRuntime {
       coverageSnapshot = buildCoverageSnapshot(state, latestAssessment, plan);
     }
     const imageIdentity = resolveCoverImageIdentity(state, manifest?.primary_character_id).identity;
-    const buildSnapshotHash = computeBuildSnapshotHash(state, plan, effectiveMode, coverageSnapshot, imageIdentity);
-    const composition = buildProvenanceCompositionSummary(state, coverageSnapshot, buildSnapshotHash, undefined, imageIdentity);
+    const outputPlan = derivePublishedOutputPlan(state, effectiveMode);
+    const buildSnapshotHash = computeBuildSnapshotHash(state, plan, effectiveMode, coverageSnapshot, imageIdentity, outputPlan);
+    const composition = buildProvenanceCompositionSummary(state, coverageSnapshot, buildSnapshotHash, undefined, imageIdentity, outputPlan);
     const fingerprint = provenanceConfirmationFingerprint(composition);
     const preparedSnapshot = buildPreparedPublishSnapshot(
       state,
@@ -2696,6 +2698,7 @@ export class WorkspaceRuntime {
       fingerprint,
       build_snapshot_hash: buildSnapshotHash,
       ...(effectiveMode === undefined ? {} : { mode_selection: effectiveMode }),
+      output_plan: outputPlan,
       composition,
       historical_decisions: deriveHistoricalDecisionRefs(state, coverageSnapshot),
       prepared_snapshot: preparedSnapshot,
@@ -2878,6 +2881,7 @@ export class WorkspaceRuntime {
       const result = await this.build.run(operation.id, "發布（provenance 已確認）", execution, {
         ...(effectiveMode === undefined ? {} : { mode_selection: effectiveMode }),
         expected_provenance_fingerprint: input.fingerprint,
+        ...(preview.output_plan === undefined ? {} : { expected_output_plan: preview.output_plan }),
       });
       const latest = await this.repository.read();
       const finalOperation = latest.operations.find((item) => item.id === operation.id);

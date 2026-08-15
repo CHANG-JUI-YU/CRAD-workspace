@@ -11,6 +11,7 @@ export { z } from "zod";
 export * from "./core-utilities.js";
 export * from "./coverage.js";
 export * from "./provenance.js";
+export * from "./output-plan.js";
 export * from "./coverage-command-identity.js";
 export * from "./project-state.js";
 export * from "./fact-taxonomy.js";

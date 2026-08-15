@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { decodeOperationCommand } from "./operations.js";
 import { provenanceCompositionSummarySchema } from "./provenance.js";
+import { publishedOutputPlanSchema } from "./output-plan.js";
 import {
   authoringCoverageBindingSchema,
   coverageAssessmentSchema,
@@ -334,6 +335,7 @@ const publishSchema = z.object({
   created_at: z.string().datetime({ offset: true }),
   coverage_snapshot: coverageSnapshotSchema.optional(),
   provenance_summary: provenanceCompositionSummarySchema.optional(),
+  output_plan: publishedOutputPlanSchema.optional(),
 }).strict();
 
 const importSchema = z.object({

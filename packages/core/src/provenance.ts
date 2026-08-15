@@ -3,6 +3,8 @@ import type { CoverageSnapshot } from "./coverage.js";
 import type { ImageRecord, ProjectState } from "./project-state.js";
 import type { BuildPlan } from "./project-projection.js";
 import { canonicalJson, contentHash } from "./core-utilities.js";
+import { derivePublishedOutputPlan, publishedOutputPlanSchema, type PublishedOutputPlan } from "./output-plan.js";
+import type { CardExportMode } from "./export-paths.js";
 
 export interface ProvenanceImageCrop {
   width: number;
@@ -61,6 +63,7 @@ export interface ProvenanceCompositionSummary {
   build_snapshot_hash: string;
   compiled_content_hash?: string;
   image_identity?: ProvenanceImageIdentity;
+  output_plan?: PublishedOutputPlan;
 }
 
 const provenanceCoverageRefSchema = z.object({
@@ -120,6 +123,7 @@ export const provenanceCompositionSummarySchema = z.object({
   build_snapshot_hash: z.string().min(1),
   compiled_content_hash: z.string().min(1).optional(),
   image_identity: provenanceImageIdentitySchema.optional(),
+  output_plan: publishedOutputPlanSchema.optional(),
 }).strict();
 
 function refsFrom(values: readonly { character_id?: string; requirement_id: string }[]): ProvenanceCoverageRef[] {
@@ -193,7 +197,7 @@ export function deriveHistoricalDecisionRefs(state: ProjectState, coverageSnapsh
     }));
 }
 
-export const BUILD_SNAPSHOT_PAYLOAD_VERSION = "build-snapshot-v2";
+export const BUILD_SNAPSHOT_PAYLOAD_VERSION = "build-snapshot-v3";
 
 export function imageTransformationRevision(crop: ProvenanceImageCrop | undefined, aspectRatio: string | undefined): string | undefined {
   if (crop === undefined && aspectRatio === undefined) {
@@ -245,12 +249,45 @@ export function resolveCoverImageIdentity(state: ProjectState, primaryCharacterI
   return { identity, selected };
 }
 
+export type CoverImageFreshnessStatus = "fresh" | "stale" | "unknown";
+
+export interface CoverImageFreshnessResult {
+  status: CoverImageFreshnessStatus;
+  reason?: string;
+}
+
+export function deriveCoverImageFreshness(state: ProjectState, recordedIdentity: ProvenanceImageIdentity | undefined, primaryCharacterId?: string): CoverImageFreshnessResult {
+  if (recordedIdentity === undefined) {
+    return { status: "unknown", reason: "此發布為舊版記錄，未保存封面 identity，無法判定封面是否已變更。" };
+  }
+  const current = resolveCoverImageIdentity(state, primaryCharacterId).identity;
+  if (canonicalJson(current) === canonicalJson(recordedIdentity)) {
+    return { status: "fresh" };
+  }
+  if (current.mode !== recordedIdentity.mode) {
+    return {
+      status: "stale",
+      reason: current.mode === "placeholder"
+        ? "目前依正式規則解析為內建佔位圖，與已發布封面不同。"
+        : "目前依正式規則解析為正式圖片，與已發布的佔位封面不同。",
+    };
+  }
+  if (current.image_id !== recordedIdentity.image_id) {
+    return { status: "stale", reason: "目前依正式規則選取的封面圖片與已發布封面不同。" };
+  }
+  if (current.blob_hash !== recordedIdentity.blob_hash) {
+    return { status: "stale", reason: "封面圖片內容（blob）已變更。" };
+  }
+  return { status: "stale", reason: "封面圖片屬性（裁切、比例或變換）已變更。" };
+}
+
 export function computeBuildSnapshotHash(
   state: ProjectState,
   plan: BuildPlan,
   modeSelection: string | null | undefined,
   coverageSnapshot: CoverageSnapshot | undefined,
   imageIdentity?: ProvenanceImageIdentity,
+  outputPlan?: PublishedOutputPlan,
 ): string {
   const artifactHashes = new Map<string, string | null>();
   for (const artifact of state.artifacts) {
@@ -296,11 +333,12 @@ export function computeBuildSnapshotHash(
       override_audit: overrideAudit,
     },
     image: imageIdentity ?? null,
+    output_plan: outputPlan ?? null,
   };
   return contentHash(canonicalJson(payload));
 }
 
-export const PROVENANCE_CONFIRMATION_VERSION = "provenance-confirmation-v2";
+export const PROVENANCE_CONFIRMATION_VERSION = "provenance-confirmation-v3";
 
 export function provenanceConfirmationFingerprint(composition: ProvenanceCompositionSummary): string {
   const payload = {
@@ -327,11 +365,12 @@ export function provenanceConfirmationFingerprint(composition: ProvenanceComposi
     fact_projection_revision: composition.fact_projection_revision ?? null,
     coverage_snapshot_hash: composition.coverage_snapshot_hash ?? null,
     image: composition.image_identity ?? null,
+    output_plan: composition.output_plan ?? null,
   };
   return contentHash(canonicalJson(payload));
 }
 
-export function buildProvenanceCompositionSummary(state: ProjectState, coverageSnapshot: CoverageSnapshot | undefined, buildSnapshotHash: string, compiledContentHash?: string, imageIdentity?: ProvenanceImageIdentity): ProvenanceCompositionSummary {
+export function buildProvenanceCompositionSummary(state: ProjectState, coverageSnapshot: CoverageSnapshot | undefined, buildSnapshotHash: string, compiledContentHash?: string, imageIdentity?: ProvenanceImageIdentity, outputPlan?: PublishedOutputPlan): ProvenanceCompositionSummary {
   const qualityAudit = state.quality_profile.override_audit ?? [];
   const qualityOverrides: ProvenanceQualityOverrideRef[] = qualityAudit.length > 0
     ? qualityAudit
@@ -362,6 +401,7 @@ export function buildProvenanceCompositionSummary(state: ProjectState, coverageS
     build_snapshot_hash: buildSnapshotHash,
     ...(compiledContentHash === undefined ? {} : { compiled_content_hash: compiledContentHash }),
     ...(imageIdentity === undefined ? {} : { image_identity: imageIdentity }),
+    ...(outputPlan === undefined ? {} : { output_plan: outputPlan }),
   };
 }
 
@@ -519,9 +559,9 @@ export function buildPreparedPublishSnapshot(
   const effectiveMode = modeSelection ?? "default";
   const isDualMode = effectiveMode === "both";
   const characterCount = plan.entries.filter((e) => e.kind === "character").length;
-  const safeName = state.project_name || "card";
-  const jsonPath = `exports/${safeName}.json`;
-  const pngPath = `exports/${safeName}.png`;
+  const outputPlan = derivePublishedOutputPlan(state, modeSelection === null || modeSelection === undefined ? undefined : modeSelection as CardExportMode);
+  const jsonPath = outputPlan.json_path;
+  const pngPath = outputPlan.png_path;
   const files = [jsonPath, pngPath];
 
   const predictedOutputs: PreparedOutputSummary = {

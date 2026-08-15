@@ -1385,7 +1385,9 @@ describe("natural language runtime boundary", () => {
         ],
       }));
       snapshot = await runtime.dashboardSnapshot();
-      expect(snapshot.images_stale).toBe(true);
+      expect(snapshot.images_freshness.status).toBe("unknown");
+      expect(snapshot.images_stale).toBe(false);
+      expect(snapshot.images_stale_reason).toContain("舊版記錄");
       await runtime.removeProjectImage(upload.image_id, "server");
       state = await repository.read();
       expect(state.images).toHaveLength(0);

@@ -1,12 +1,14 @@
 import {
   CoreError,
   computeProjectProjection,
+  deriveCoverImageFreshness,
   qualityLevelForProfile,
   z,
   type ArtifactKind,
   type ArtifactRecord,
   type ArtifactStatus,
   type AuditEvent,
+  type CoverImageFreshnessResult,
   type FactClassification,
   type FactRecord,
   type IssueSeverity,
@@ -144,6 +146,8 @@ export interface DashboardSummary {
   primary_character_id?: string;
   images: DashboardImageView[];
   images_stale: boolean;
+  images_stale_reason?: string;
+  images_freshness: CoverImageFreshnessResult;
   quality: {
     level: string;
     blocking_severity: string;
@@ -786,7 +790,10 @@ export function buildDashboardSummary(state: ProjectState, repair: RepairInspect
   const manifest = buildRequiredArtifactManifest(state);
   const latestPublish = state.publishes.at(-1);
   const latestBuild = state.builds.at(-1);
-  const latestImageUpdate = state.images.reduce((latest, image) => image.updated_at > latest ? image.updated_at : latest, "");
+  const recordedImageIdentity = latestBuild?.provenance_summary?.image_identity ?? latestPublish?.provenance_summary?.image_identity;
+  const imageFreshness = latestPublish === undefined
+    ? { status: "unknown" as const, reason: "尚未發布。" }
+    : deriveCoverImageFreshness(state, recordedImageIdentity, manifest?.primary_character_id);
   const roster = manifestRoster(manifest, state);
   const primaryCharacterId = manifest?.primary_character_id ?? projection.intent.primary_character_id;
   const blueprint = projection.blueprint === undefined ? undefined : {
@@ -867,7 +874,9 @@ export function buildDashboardSummary(state: ProjectState, repair: RepairInspect
     ...(roster === undefined ? {} : { roster }),
     ...(primaryCharacterId === undefined ? {} : { primary_character_id: primaryCharacterId }),
     images,
-    images_stale: latestPublish !== undefined && latestImageUpdate !== "" && latestImageUpdate > latestPublish.created_at,
+    images_stale: imageFreshness.status === "stale",
+    ...(imageFreshness.reason === undefined ? {} : { images_stale_reason: imageFreshness.reason }),
+    images_freshness: imageFreshness,
     quality: {
       level: qualityLevelForProfile(state.quality_profile),
       blocking_severity: state.quality_profile.blocking_severity,

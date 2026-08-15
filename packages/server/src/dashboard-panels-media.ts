@@ -427,6 +427,9 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
           if (payload.images_stale === true) {
             staleBanner.hidden = false;
             staleBanner.textContent = "圖片已變更，最新發布的輸出已過期；請重新打包（Preview／發布）。";
+          } else if (payload.images_freshness !== undefined && payload.images_freshness.status === "unknown") {
+            staleBanner.hidden = false;
+            staleBanner.textContent = "無法判定封面圖片是否最新（此發布為舊版記錄，未保存封面 identity）。";
           } else {
             staleBanner.hidden = true;
           }
