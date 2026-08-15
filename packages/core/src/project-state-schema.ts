@@ -390,6 +390,8 @@ const operationSchema = z.object({
   attempt: z.number().int().nonnegative().optional(),
   last_error: z.string().optional(),
   execution_snapshot: internalExecutionSnapshotSchema.optional(),
+  command_digest: z.string().optional(),
+  command_digest_version: z.number().int().nonnegative().optional(),
 }).strict();
 
 const auditEventSchema = z.object({

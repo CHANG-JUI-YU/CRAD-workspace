@@ -436,6 +436,7 @@ export interface OperationAttachmentRef {
   id: string;
   name: string;
   media_type?: string;
+  content_hash?: string;
 }
 
 export interface ProjectState {

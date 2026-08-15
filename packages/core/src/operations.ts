@@ -88,6 +88,7 @@ export const coverageSupplementCommandPayloadSchema = z.object({
     id: z.string().min(1),
     name: z.string().min(1),
     media_type: z.string().optional(),
+    content_hash: z.string().min(1).optional(),
   }).strict()).optional(),
 }).strict();
 
@@ -104,6 +105,7 @@ export const coverageResearchRecoverCommandPayloadSchema = z.object({
     id: z.string().min(1),
     name: z.string().min(1),
     media_type: z.string().optional(),
+    content_hash: z.string().min(1).optional(),
   }).strict()).optional(),
 }).strict();
 
@@ -112,9 +114,10 @@ const operationAttachmentRefsSchema = z.array(z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   media_type: z.string().optional(),
+  content_hash: z.string().min(1).optional(),
 }).strict()).transform((refs): OperationAttachmentRef[] => refs.map((ref) => ref.media_type === undefined
-  ? { id: ref.id, name: ref.name }
-  : { id: ref.id, name: ref.name, media_type: ref.media_type }));
+  ? { id: ref.id, name: ref.name, ...(ref.content_hash === undefined ? {} : { content_hash: ref.content_hash }) }
+  : { id: ref.id, name: ref.name, media_type: ref.media_type, ...(ref.content_hash === undefined ? {} : { content_hash: ref.content_hash }) }));
 
 export interface OperationCommandInvalidPayload {
   code: "OPERATION_COMMAND_INVALID";
@@ -263,6 +266,8 @@ export interface OperationRecord {
   attempt?: number;
   last_error?: string;
   execution_snapshot?: InternalExecutionSnapshot;
+  command_digest?: string;
+  command_digest_version?: number;
 }
 
 export interface AuditEvent {

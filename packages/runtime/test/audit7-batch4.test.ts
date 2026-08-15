@@ -238,6 +238,6 @@ describe("Audit 7 Batch 4 - Runtime Supplement Lineage & Retry", () => {
         rationale: "測試",
         url: "https://example.com/fail",
       }),
-    ).rejects.toThrowError(/was initiated for requirement/);
+    ).rejects.toMatchObject({ code: "OPERATION_COMMAND_MISMATCH" });
   });
 });

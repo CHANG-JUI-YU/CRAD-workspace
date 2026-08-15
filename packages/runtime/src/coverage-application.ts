@@ -1,8 +1,12 @@
 import {
   CoreError,
+  canonicalCoverageCommandIdentity,
+  computeCoverageAttachmentIdentities,
   executionContextFromOperation,
   internalId,
   type AuditEvent,
+  type CoverageAttachmentIdentity,
+  type CoverageCommandIdentity,
   type CoverageResearchLineageLink,
   type CoverageResearchStartScope,
   type CoverageResearchTarget,
@@ -53,7 +57,7 @@ import {
   type ResolutionConsequencesPreview,
   type SourceFetcher,
 } from "@st-workspace/domain";
-import { type AttachmentStore, type OperationAttachmentRef } from "@st-workspace/core";
+import { type AttachmentStore, contentHash, type OperationAttachmentRef, type StagedAttachmentSession } from "@st-workspace/core";
 import { now } from "./operation-runner.js";
 import {
   fetchAndValidateUrlContent,
@@ -108,6 +112,10 @@ function executionInputFor(operation: OperationRecord, actor: string, agentId: s
   return executionContextFromOperation(operation, { auditActor: actor, executionAgent: { id: agentId, role } });
 }
 
+function contentHashOf(content: Uint8Array): string {
+  return contentHash(Buffer.from(content.buffer, content.byteOffset, content.byteLength));
+}
+
 function coverageOperation(
   actor: string | undefined,
   type: string,
@@ -116,7 +124,13 @@ function coverageOperation(
   role: string,
   existingOperationId?: string,
   attachmentRefs?: OperationAttachmentRef[],
+  attachmentIdentities?: readonly CoverageAttachmentIdentity[],
 ): OperationRecord {
+  const identity: CoverageCommandIdentity = canonicalCoverageCommandIdentity(
+    type,
+    payload,
+    attachmentIdentities ?? [],
+  );
   return {
     id: existingOperationId ?? internalId("operation"),
     kind: "knowledge",
@@ -132,6 +146,8 @@ function coverageOperation(
       payload,
       ...(attachmentRefs === undefined || attachmentRefs.length === 0 ? {} : { attachment_refs: attachmentRefs }),
     },
+    command_digest: identity.digest,
+    command_digest_version: identity.version,
     execution_snapshot: {
       execution_agent_id: agentId,
       execution_agent_role: role,
@@ -146,11 +162,12 @@ async function checkReplayCoverageCommand(
   deps: CoverageApplicationDeps,
   operation: OperationRecord,
   marker: string,
+  attachmentIdentities: readonly CoverageAttachmentIdentity[] = [],
 ): Promise<CoverageCommandResult | undefined> {
   const state = await deps.repository.read();
   const existingOp = state.operations.find((op) => op.id === operation.id);
 
-  // If existing operation exists and has command payload, verify consistency on retry
+  // Immutable command identity: compare the complete canonical command digest when an existing operation is present.
   if (existingOp !== undefined && existingOp.command !== undefined && operation.command !== undefined) {
     if (existingOp.command.type !== operation.command.type) {
       throw new CoreError(
@@ -159,34 +176,43 @@ async function checkReplayCoverageCommand(
         true,
       );
     }
-    const existingPayload = existingOp.command.payload as Record<string, unknown> | undefined;
-    const currentPayload = operation.command.payload as Record<string, unknown> | undefined;
-    const existingReqId = existingPayload?.requirement_id;
-    const currentReqId = currentPayload?.requirement_id;
-    if (existingReqId !== undefined && currentReqId !== undefined && existingReqId !== currentReqId) {
-      throw new CoreError(
-        "OPERATION_COMMAND_MISMATCH",
-        `Operation "${operation.id}" was initiated for requirement "${String(existingReqId)}", cannot retry with "${String(currentReqId)}".`,
-        true,
-      );
+    const currentIdentity = canonicalCoverageCommandIdentity(operation.command.type, operation.command.payload, attachmentIdentities);
+    if (existingOp.command_digest !== undefined) {
+      if (existingOp.command_digest !== currentIdentity.digest) {
+        throw new CoreError(
+          "OPERATION_COMMAND_MISMATCH",
+          `Operation "${operation.id}" was recorded with an immutable command identity (${existingOp.command_digest.slice(0, 8)}…), cannot retry with a different command (${currentIdentity.digest.slice(0, 8)}…).`,
+          true,
+        );
+      }
+    } else {
+      // Legacy operation without a persisted digest: reconstruct from the stored payload when the command carried no attachments.
+      const existingPayload = existingOp.command.payload as Record<string, unknown> | undefined;
+      const existingRefs = (existingPayload?.attachment_refs as OperationAttachmentRef[] | undefined) ?? (existingOp.command as { attachment_refs?: OperationAttachmentRef[] }).attachment_refs;
+      if (existingRefs !== undefined && existingRefs.length > 0) {
+        throw new CoreError(
+          "OPERATION_COMMAND_MISMATCH",
+          `Operation "${operation.id}" is a legacy operation with attachments whose command identity cannot be verified; use a new operation id.`,
+          true,
+        );
+      }
+      const legacyIdentity = canonicalCoverageCommandIdentity(existingOp.command.type, existingPayload, []);
+      if (legacyIdentity.digest !== currentIdentity.digest) {
+        throw new CoreError(
+          "OPERATION_COMMAND_MISMATCH",
+          `Operation "${operation.id}" is a legacy operation whose command identity (${legacyIdentity.digest.slice(0, 8)}…) cannot be matched to the retried command (${currentIdentity.digest.slice(0, 8)}…).`,
+          true,
+        );
+      }
     }
-    const existingCharId = existingPayload?.character_id;
-    const currentCharId = currentPayload?.character_id;
-    if (existingCharId !== currentCharId) {
-      throw new CoreError(
-        "OPERATION_COMMAND_MISMATCH",
-        `Operation "${operation.id}" was initiated for character "${String(existingCharId ?? "world")}", cannot retry with "${String(currentCharId ?? "world")}".`,
-        true,
-      );
-    }
-  }
-
-  // If operation failed previously, do not replay the failure result; allow execution to proceed
-  if (existingOp !== undefined && existingOp.status === "failed") {
-    return undefined;
   }
 
   const auditEvent = state.audit.find((item) => item.operation_id === operation.id && item.event === marker);
+
+  // A previously failed operation with the identical immutable command is a legal retry: run it again.
+  if (auditEvent === undefined && existingOp !== undefined && existingOp.status === "failed") {
+    return undefined;
+  }
 
   if (auditEvent === undefined && (existingOp === undefined || existingOp.status === "running")) {
     return undefined;
@@ -937,13 +963,12 @@ export async function coverageSupplement(
   const state = await deps.repository.read();
 
   const operationId = input.operation_id ?? internalId("operation");
+  const attachmentIdentities = computeCoverageAttachmentIdentities(attachments);
   let savedRefs: OperationAttachmentRef[] | undefined;
   if (attachments.length > 0) {
-    if (deps.attachmentStore !== undefined) {
-      savedRefs = await deps.attachmentStore.save(operationId, attachments);
-    } else {
+    if (deps.attachmentStore === undefined) {
       savedRefs = attachments.map((a) => ({
-        id: internalId("attachment"),
+        id: contentHashOf(a.content),
         name: a.name,
         ...(a.media_type === undefined ? {} : { media_type: a.media_type }),
       }));
@@ -971,18 +996,57 @@ export async function coverageSupplement(
     "orchestrator",
     operationId,
     savedRefs,
+    attachmentIdentities,
   );
 
-  const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.supplement.provided");
-  if (replayed !== undefined) return replayed;
+  const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.supplement.provided", attachmentIdentities);
+  if (replayed !== undefined) {
+    if (deps.attachmentStore !== undefined && savedRefs !== undefined && savedRefs.length > 0) {
+      await repairMissingAttachments(deps, operationId, savedRefs, attachments);
+    }
+    return replayed;
+  }
 
   assertAssessmentMatches(state, input.assessment_id, input.assessment_revision);
 
+  let session: StagedAttachmentSession | undefined;
   try {
+    if (attachments.length > 0 && deps.attachmentStore !== undefined) {
+      session = await deps.attachmentStore.stage(operationId, attachments);
+      savedRefs = session.refs;
+      const operationWithRefs = { ...operation, command: { ...operation.command, ...(savedRefs.length > 0 ? { attachment_refs: savedRefs } : {}) } } as OperationRecord;
+      const outcome = await executeCoverageSupplement(deps, state, operationWithRefs, actor, attachments);
+      const result = await commitCommand(deps, state, operationWithRefs, outcome);
+      await deps.attachmentStore.finalize(session);
+      return result;
+    }
     const outcome = await executeCoverageSupplement(deps, state, operation, actor, attachments);
     return await commitCommand(deps, state, operation, outcome);
   } catch (error) {
+    if (session !== undefined && deps.attachmentStore !== undefined) {
+      await deps.attachmentStore.abort(session).catch(() => undefined);
+    }
     return await recordFailedOperation(deps, state, operation, error);
+  }
+}
+
+async function repairMissingAttachments(
+  deps: CoverageApplicationDeps,
+  operationId: string,
+  refs: OperationAttachmentRef[],
+  attachments: Array<{ name: string; content: Uint8Array; media_type?: string }>,
+): Promise<void> {
+  const store = deps.attachmentStore;
+  if (store === undefined) return;
+  const existing = await store.listOperationFiles(operationId);
+  const missing = refs.filter((ref) => !existing.some((file) => file === ref.id));
+  if (missing.length === 0) return;
+  const session = await store.stage(operationId, attachments);
+  try {
+    await store.finalize(session);
+  } catch (error) {
+    await store.abort(session).catch(() => undefined);
+    throw error;
   }
 }
 
@@ -1256,17 +1320,14 @@ export async function coverageResearchRecover(
 ): Promise<CoverageCommandResult> {
   const state = await deps.repository.read();
   const operationId = input.operation_id ?? internalId("operation");
+  const attachmentIdentities = computeCoverageAttachmentIdentities(attachments);
   let savedRefs: OperationAttachmentRef[] | undefined;
-  if (attachments.length > 0) {
-    if (deps.attachmentStore !== undefined) {
-      savedRefs = await deps.attachmentStore.save(operationId, attachments);
-    } else {
-      savedRefs = attachments.map((a) => ({
-        id: internalId("attachment"),
-        name: a.name,
-        ...(a.media_type === undefined ? {} : { media_type: a.media_type }),
-      }));
-    }
+  if (attachments.length > 0 && deps.attachmentStore === undefined) {
+    savedRefs = attachments.map((a) => ({
+      id: contentHashOf(a.content),
+      name: a.name,
+      ...(a.media_type === undefined ? {} : { media_type: a.media_type }),
+    }));
   }
 
   const operation = coverageOperation(
@@ -1286,15 +1347,34 @@ export async function coverageResearchRecover(
     "researcher",
     operationId,
     savedRefs,
+    attachmentIdentities,
   );
 
-  const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.research.recovered");
-  if (replayed !== undefined) return replayed;
+  const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.research.recovered", attachmentIdentities);
+  if (replayed !== undefined) {
+    if (deps.attachmentStore !== undefined && savedRefs !== undefined && savedRefs.length > 0) {
+      await repairMissingAttachments(deps, operationId, savedRefs, attachments);
+    }
+    return replayed;
+  }
 
+  let session: StagedAttachmentSession | undefined;
   try {
+    if (attachments.length > 0 && deps.attachmentStore !== undefined) {
+      session = await deps.attachmentStore.stage(operationId, attachments);
+      savedRefs = session.refs;
+      const operationWithRefs = { ...operation, command: { ...operation.command, ...(savedRefs.length > 0 ? { attachment_refs: savedRefs } : {}) } } as OperationRecord;
+      const outcome = await executeCoverageResearchRecover(deps, state, operationWithRefs, actor, attachments);
+      const result = await commitCommand(deps, state, operationWithRefs, outcome);
+      await deps.attachmentStore.finalize(session);
+      return result;
+    }
     const outcome = await executeCoverageResearchRecover(deps, state, operation, actor, attachments);
     return await commitCommand(deps, state, operation, outcome);
   } catch (error) {
+    if (session !== undefined && deps.attachmentStore !== undefined) {
+      await deps.attachmentStore.abort(session).catch(() => undefined);
+    }
     return await recordFailedOperation(deps, state, operation, error);
   }
 }
