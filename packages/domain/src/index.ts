@@ -74,9 +74,12 @@ export {
 export { assertExecutionLease, assertExecutionLeaseForOperation, resolveExecutionActors, type ExecutionActorInput, type ResolvedExecutionActors } from "./execution-context.js";
 export {
   deriveStructuredPublishDiagnostics,
+  type DiagnosticAffectedObject,
+  type DiagnosticRemediationGroup,
   type PublishDiagnosticAffected,
   type PublishDiagnosticAffectedKind,
   type PublishDiagnosticRow,
+  type PublishDiagnosticsSummary,
   type PublishDiagnosticTarget,
   type StructuredPublishDiagnostics,
 } from "./publish-diagnostics.js";
@@ -90,9 +93,13 @@ export {
   type CoverageCenterMatrix,
   type CoverageCenterResolutionRef,
   type CoverageCenterTaskRef,
+  type ResearchLineageChain,
+  type ResearchLineageTaskNode,
   type ResearchMonitor,
   type ResearchMonitorBatchView,
   type ResearchMonitorTaskView,
+  type ResearchRequirementLineage,
+  type ResearchTaskOriginKind,
 } from "./coverage-center.js";
 export {
   deriveAssessmentWideResearchProjection,

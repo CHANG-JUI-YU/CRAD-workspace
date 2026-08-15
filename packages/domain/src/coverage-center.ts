@@ -108,6 +108,47 @@ export interface CoverageCenterMatrix {
   cells: CoverageCenterCell[];
 }
 
+export type ResearchTaskOriginKind = "newly_created" | "reused_existing" | "successor_recovery" | "legacy_unknown";
+
+export interface ResearchLineageTaskNode {
+  id: string;
+  batch_id: string;
+  character_id?: string;
+  requirement_ids: string[];
+  dimension_paths: string[];
+  status: string;
+  projected_status: string;
+  attempt: number;
+  claim_generation: number;
+  is_in_flight: boolean;
+  is_terminal: boolean;
+  origin_kind: ResearchTaskOriginKind;
+  predecessor_id?: string;
+  successor_ids: string[];
+  exhausted_reason?: string;
+  recovery_action?: string;
+  recovery_operation_id?: string;
+  candidate_source_ids: string[];
+  operation_ids: string[];
+  audit_event_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResearchLineageChain {
+  root_task_id: string;
+  nodes: ResearchLineageTaskNode[];
+}
+
+export interface ResearchRequirementLineage {
+  batch_id: string;
+  scope: "character" | "world";
+  character_id?: string;
+  requirement_id: string;
+  requirement_label: string;
+  chains: ResearchLineageChain[];
+}
+
 export interface ResearchMonitorTaskView {
   id: string;
   batch_id: string;
@@ -128,6 +169,13 @@ export interface ResearchMonitorTaskView {
   predecessor_id?: string;
   successor_ids: string[];
   candidate_source_ids: string[];
+  is_in_flight: boolean;
+  is_terminal: boolean;
+  origin_kind: ResearchTaskOriginKind;
+  recovery_action?: string;
+  recovery_operation_id?: string;
+  operation_ids: string[];
+  audit_event_ids: string[];
   created_at: string;
   updated_at: string;
 }
@@ -148,6 +196,7 @@ export interface ResearchMonitorBatchView {
 export interface ResearchMonitor {
   batches: ResearchMonitorBatchView[];
   tasks: ResearchMonitorTaskView[];
+  lineages: ResearchRequirementLineage[];
 }
 
 const CELL_STATUS_MAP: Readonly<Record<string, CoverageCenterCellStatus>> = {
@@ -697,10 +746,116 @@ function taskProjectedStatus(task: ResearchTaskRecord, nowIso: string): string {
 }
 
 export function deriveResearchMonitor(state: ProjectState, nowIso: string): ResearchMonitor {
+  const startedAudits = state.audit.filter((a) => a.event === "coverage.research.started");
+  const recoveredAudits = state.audit.filter((a) => a.event === "coverage.research.recovered");
+
+  const taskRecoveryInfoMap = new Map<string, { action?: string; successor_id?: string; predecessor_id?: string; operation_id?: string }>();
+  for (const a of recoveredAudits) {
+    const d = a.details as Record<string, unknown> | undefined;
+    const predTaskId = typeof d?.task_id === "string" ? d.task_id : undefined;
+    const succTaskId = typeof d?.successor_task_id === "string" ? d.successor_task_id : undefined;
+    const action = typeof d?.action === "string" ? d.action : undefined;
+    const opId = a.operation_id;
+
+    if (predTaskId !== undefined) {
+      taskRecoveryInfoMap.set(predTaskId, {
+        ...(action === undefined ? {} : { action }),
+        ...(succTaskId === undefined ? {} : { successor_id: succTaskId }),
+        ...(opId === undefined ? {} : { operation_id: opId }),
+      });
+    }
+    if (succTaskId !== undefined) {
+      taskRecoveryInfoMap.set(succTaskId, {
+        ...(action === undefined ? {} : { action }),
+        ...(predTaskId === undefined ? {} : { predecessor_id: predTaskId }),
+        ...(opId === undefined ? {} : { operation_id: opId }),
+      });
+    }
+  }
+
   const tasks: ResearchMonitorTaskView[] = state.coverage_research_tasks.map((task) => {
     const successors = state.coverage_research_tasks.filter((other) => other.predecessor_id === task.id).map((other) => other.id);
     const lineage = state.coverage_research_lineages.filter((link) => link.task_id === task.id);
     const candidateSourceIds = [...new Set(lineage.flatMap((link) => [link.candidate_id, link.source_id]).filter((id): id is string => id !== undefined))];
+
+    const projected = taskProjectedStatus(task, nowIso);
+
+    // Terminal status: completed, exhausted, failed, stale, cancelled, or superseded by a successor
+    const isTerminal =
+      task.status === "completed" ||
+      task.status === "exhausted" ||
+      task.status === "failed" ||
+      task.status === "stale" ||
+      task.status === "cancelled" ||
+      successors.length > 0;
+
+    const isInFlight = !isTerminal && (
+      task.status === "queued" ||
+      task.status === "claimed" ||
+      task.status === "running" ||
+      projected === "lease_expired"
+    );
+
+    // Origin kind derived from audit evidence
+    let originKind: ResearchTaskOriginKind = "legacy_unknown";
+    const recInfo = taskRecoveryInfoMap.get(task.id);
+    const hasRecoveredAudit = recoveredAudits.some((a) => {
+      const d = a.details as Record<string, unknown> | undefined;
+      return d?.successor_task_id === task.id || (task.predecessor_id !== undefined && d?.task_id === task.predecessor_id);
+    });
+
+    if (hasRecoveredAudit || (task.predecessor_id !== undefined && recInfo?.action !== undefined)) {
+      originKind = "successor_recovery";
+    } else {
+      let matchedStarted = false;
+      for (const a of startedAudits) {
+        const d = a.details as Record<string, unknown> | undefined;
+        const taskIds = Array.isArray(d?.task_ids) ? (d?.task_ids as string[]) : [];
+        const existingTaskIds = Array.isArray(d?.existing_task_ids) ? (d?.existing_task_ids as string[]) : [];
+        const isReused = d?.reused === true;
+
+        if (existingTaskIds.includes(task.id) || (isReused && taskIds.includes(task.id))) {
+          originKind = "reused_existing";
+          matchedStarted = true;
+          break;
+        } else if (taskIds.includes(task.id)) {
+          originKind = "newly_created";
+          matchedStarted = true;
+          break;
+        }
+      }
+      if (!matchedStarted) {
+        originKind = "legacy_unknown";
+      }
+    }
+
+    const opIds = new Set<string>();
+    const auditIds = new Set<string>();
+
+    for (const a of state.audit) {
+      const d = a.details as Record<string, unknown> | undefined;
+      const isRelated =
+        d?.task_id === task.id ||
+        d?.successor_task_id === task.id ||
+        (Array.isArray(d?.task_ids) && (d.task_ids as string[]).includes(task.id)) ||
+        (Array.isArray(d?.existing_task_ids) && (d.existing_task_ids as string[]).includes(task.id));
+
+      if (isRelated) {
+        if (a.id) auditIds.add(a.id);
+        if (a.operation_id) opIds.add(a.operation_id);
+      }
+    }
+
+    for (const op of state.operations) {
+      const p = op.command?.payload as Record<string, unknown> | undefined;
+      if (p?.task_id === task.id || p?.successor_task_id === task.id || (Array.isArray(p?.task_ids) && (p.task_ids as string[]).includes(task.id))) {
+        opIds.add(op.id);
+      }
+    }
+
+    const recoveryAction = recInfo?.action;
+    const recoveryOpId = recInfo?.operation_id;
+
     return {
       id: task.id,
       batch_id: task.batch_id,
@@ -710,7 +865,7 @@ export function deriveResearchMonitor(state: ProjectState, nowIso: string): Rese
       query_seeds: [...task.query_seeds],
       ...(task.source_constraints === undefined ? {} : { source_constraints: task.source_constraints }),
       status: task.status,
-      projected_status: taskProjectedStatus(task, nowIso),
+      projected_status: projected,
       ...(task.lease_owner === undefined ? {} : { lease_owner: task.lease_owner }),
       ...(task.lease_expires_at === undefined ? {} : { lease_expires_at: task.lease_expires_at }),
       claim_generation: task.claim_generation,
@@ -721,10 +876,112 @@ export function deriveResearchMonitor(state: ProjectState, nowIso: string): Rese
       ...(task.predecessor_id === undefined ? {} : { predecessor_id: task.predecessor_id }),
       successor_ids: successors,
       candidate_source_ids: candidateSourceIds,
+      is_in_flight: isInFlight,
+      is_terminal: isTerminal,
+      origin_kind: originKind,
+      ...(recoveryAction === undefined ? {} : { recovery_action: recoveryAction }),
+      ...(recoveryOpId === undefined ? {} : { recovery_operation_id: recoveryOpId }),
+      operation_ids: [...opIds],
+      audit_event_ids: [...auditIds],
       created_at: task.created_at,
       updated_at: task.updated_at,
     };
   });
+
+  const taskMap = new Map<string, ResearchMonitorTaskView>();
+  for (const t of tasks) taskMap.set(t.id, t);
+
+  const requirementCatalogMap = new Map<string, string>();
+  for (const def of COVERAGE_REQUIREMENT_CATALOG) {
+    requirementCatalogMap.set(def.id, def.label);
+  }
+
+  const lineageMap = new Map<string, {
+    batch_id: string;
+    scope: "character" | "world";
+    character_id?: string;
+    requirement_id: string;
+    requirement_label: string;
+    tasks: ResearchMonitorTaskView[];
+  }>();
+
+  for (const task of tasks) {
+    const scope = task.character_id ? "character" : "world";
+    for (const reqId of task.requirement_ids) {
+      const key = `${task.batch_id}__${task.character_id ?? "world"}__${reqId}`;
+      let entry = lineageMap.get(key);
+      if (entry === undefined) {
+        entry = {
+          batch_id: task.batch_id,
+          scope,
+          ...(task.character_id === undefined ? {} : { character_id: task.character_id }),
+          requirement_id: reqId,
+          requirement_label: requirementCatalogMap.get(reqId) ?? reqId,
+          tasks: [],
+        };
+        lineageMap.set(key, entry);
+      }
+      entry.tasks.push(task);
+    }
+  }
+
+  const lineages: ResearchRequirementLineage[] = Array.from(lineageMap.values()).map((entry) => {
+    const entryTaskIds = new Set(entry.tasks.map((t) => t.id));
+    const rootTasks = entry.tasks.filter((t) => !t.predecessor_id || !entryTaskIds.has(t.predecessor_id));
+
+    const chains: ResearchLineageChain[] = rootTasks.map((root) => {
+      const chainNodes: ResearchLineageTaskNode[] = [];
+      const visited = new Set<string>();
+      let current: ResearchMonitorTaskView | undefined = root;
+
+      while (current !== undefined && !visited.has(current.id)) {
+        visited.add(current.id);
+        const node: ResearchLineageTaskNode = {
+          id: current.id,
+          batch_id: current.batch_id,
+          ...(current.character_id === undefined ? {} : { character_id: current.character_id }),
+          requirement_ids: current.requirement_ids,
+          dimension_paths: current.dimension_paths,
+          status: current.status,
+          projected_status: current.projected_status,
+          attempt: current.attempt,
+          claim_generation: current.claim_generation,
+          is_in_flight: current.is_in_flight,
+          is_terminal: current.is_terminal,
+          origin_kind: current.origin_kind,
+          ...(current.predecessor_id === undefined ? {} : { predecessor_id: current.predecessor_id }),
+          successor_ids: current.successor_ids,
+          ...(current.exhausted_reason === undefined ? {} : { exhausted_reason: current.exhausted_reason }),
+          ...(current.recovery_action === undefined ? {} : { recovery_action: current.recovery_action }),
+          ...(current.recovery_operation_id === undefined ? {} : { recovery_operation_id: current.recovery_operation_id }),
+          candidate_source_ids: current.candidate_source_ids,
+          operation_ids: current.operation_ids,
+          audit_event_ids: current.audit_event_ids,
+          created_at: current.created_at,
+          updated_at: current.updated_at,
+        };
+        chainNodes.push(node);
+
+        const nextId: string | undefined = current.successor_ids.find((succId) => entryTaskIds.has(succId));
+        current = nextId !== undefined ? taskMap.get(nextId) : undefined;
+      }
+
+      return {
+        root_task_id: root.id,
+        nodes: chainNodes,
+      };
+    });
+
+    return {
+      batch_id: entry.batch_id,
+      scope: entry.scope,
+      ...(entry.character_id === undefined ? {} : { character_id: entry.character_id }),
+      requirement_id: entry.requirement_id,
+      requirement_label: entry.requirement_label,
+      chains,
+    };
+  });
+
   const batches: ResearchMonitorBatchView[] = state.coverage_research_batches.map((batch) => {
     const taskIds = state.coverage_research_tasks.filter((task) => task.batch_id === batch.id).map((task) => task.id);
     const summary: Record<string, number> = {};
@@ -746,7 +1003,8 @@ export function deriveResearchMonitor(state: ProjectState, nowIso: string): Rese
       task_status_summary: summary,
     };
   });
-  return { batches, tasks };
+
+  return { batches, tasks, lineages };
 }
 
 export function coverageAssessmentIsFresh(state: ProjectState): boolean {

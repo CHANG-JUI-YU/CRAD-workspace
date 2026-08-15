@@ -27,8 +27,40 @@ export interface PublishDiagnosticRow {
   target?: PublishDiagnosticTarget;
 }
 
+export interface DiagnosticAffectedObject {
+  object_identity: string;
+  kind: PublishDiagnosticAffectedKind;
+  id?: string;
+  character_id?: string;
+  requirement_id?: string;
+  target?: PublishDiagnosticTarget;
+  targets: PublishDiagnosticTarget[];
+  highest_severity: "error" | "warning";
+  diagnostics: PublishDiagnosticRow[];
+}
+
+export interface DiagnosticRemediationGroup {
+  remediation_key: string;
+  panel: string;
+  primary_next_action: string;
+  highest_severity: "error" | "warning";
+  affected_objects: DiagnosticAffectedObject[];
+  unscoped_diagnostics: PublishDiagnosticRow[];
+  target_count: number;
+}
+
+export interface PublishDiagnosticsSummary {
+  total_diagnostics: number;
+  error_count: number;
+  warning_count: number;
+  affected_object_count: number;
+  remediation_group_count: number;
+}
+
 export interface StructuredPublishDiagnostics {
   rows: PublishDiagnosticRow[];
+  groups: DiagnosticRemediationGroup[];
+  summary: PublishDiagnosticsSummary;
   has_unknown: boolean;
 }
 
@@ -71,14 +103,41 @@ const DIAGNOSTIC_MAPPING: Readonly<Record<string, DiagnosticMapping>> = {
   MODE_SELECTION_REQUIRED: { affectedKind: "build", panel: "readiness", nextAction: "選擇打包模式（zhuji 或 palette）再檢查就緒狀態" },
 };
 
+function computeObjectIdentity(affected: PublishDiagnosticAffected): string {
+  if (affected.kind === "coverage_cell") {
+    return `coverage_cell:${affected.character_id ?? "world"}__${affected.requirement_id ?? ""}`;
+  }
+  return `${affected.kind}:${affected.id ?? "default"}`;
+}
+
 export function deriveStructuredPublishDiagnostics(diagnostics: readonly WorkflowDiagnostic[]): StructuredPublishDiagnostics {
   const rows: PublishDiagnosticRow[] = [];
   let hasUnknown = false;
+  let errorCount = 0;
+  let warningCount = 0;
+
+  const groupMap = new Map<string, {
+    remediation_key: string;
+    panel: string;
+    primary_next_action: string;
+    highest_severity: "error" | "warning";
+    objectMap: Map<string, DiagnosticAffectedObject>;
+    unscoped_diagnostics: PublishDiagnosticRow[];
+  }>();
+
+  const allObjectIdentities = new Set<string>();
+
   for (const diagnostic of diagnostics) {
+    if (diagnostic.severity === "error") {
+      errorCount += 1;
+    } else {
+      warningCount += 1;
+    }
+
     const mapping = DIAGNOSTIC_MAPPING[diagnostic.code];
     if (mapping === undefined) {
       hasUnknown = true;
-      rows.push({
+      const row: PublishDiagnosticRow = {
         code: diagnostic.code,
         severity: diagnostic.severity,
         message: diagnostic.message,
@@ -86,9 +145,45 @@ export function deriveStructuredPublishDiagnostics(diagnostics: readonly Workflo
         next_action: "在 Readiness 面板檢視診斷",
         targets: [{ panel: "readiness" }],
         target: { panel: "readiness" },
-      });
+      };
+      rows.push(row);
+
+      const remKey = "readiness";
+      let group = groupMap.get(remKey);
+      if (group === undefined) {
+        group = {
+          remediation_key: remKey,
+          panel: "readiness",
+          primary_next_action: "在 Readiness 面板檢視診斷",
+          highest_severity: diagnostic.severity,
+          objectMap: new Map(),
+          unscoped_diagnostics: [],
+        };
+        groupMap.set(remKey, group);
+      } else if (diagnostic.severity === "error") {
+        group.highest_severity = "error";
+      }
+      group.unscoped_diagnostics.push(row);
       continue;
     }
+
+    const remKey = mapping.panel;
+    let group = groupMap.get(remKey);
+    if (group === undefined) {
+      group = {
+        remediation_key: remKey,
+        panel: mapping.panel,
+        primary_next_action: mapping.nextAction,
+        highest_severity: diagnostic.severity,
+        objectMap: new Map(),
+        unscoped_diagnostics: [],
+      };
+      groupMap.set(remKey, group);
+    } else if (diagnostic.severity === "error") {
+      group.highest_severity = "error";
+      group.primary_next_action = mapping.nextAction;
+    }
+
     const coverageRefs = diagnostic.coverage_refs ?? [];
     if (coverageRefs.length > 0) {
       const affected: PublishDiagnosticAffected[] = coverageRefs.map((ref) => (
@@ -101,7 +196,7 @@ export function deriveStructuredPublishDiagnostics(diagnostics: readonly Workflo
           ? { panel: mapping.panel, kind: "coverage_cell", requirement_id: ref.requirement_id }
           : { panel: mapping.panel, kind: "coverage_cell", character_id: ref.character_id, requirement_id: ref.requirement_id }
       ));
-      rows.push({
+      const row: PublishDiagnosticRow = {
         code: diagnostic.code,
         severity: diagnostic.severity,
         message: diagnostic.message,
@@ -109,14 +204,49 @@ export function deriveStructuredPublishDiagnostics(diagnostics: readonly Workflo
         next_action: mapping.nextAction,
         targets,
         ...(targets[0] === undefined ? {} : { target: targets[0] }),
-      });
+      };
+      rows.push(row);
+
+      for (let i = 0; i < affected.length; i += 1) {
+        const aff = affected[i]!;
+        const tgt = targets[i]!;
+        const objId = computeObjectIdentity(aff);
+        allObjectIdentities.add(objId);
+
+        let affObj = group.objectMap.get(objId);
+        if (affObj === undefined) {
+          affObj = {
+            object_identity: objId,
+            kind: aff.kind,
+            ...(aff.id === undefined ? {} : { id: aff.id }),
+            ...(aff.character_id === undefined ? {} : { character_id: aff.character_id }),
+            ...(aff.requirement_id === undefined ? {} : { requirement_id: aff.requirement_id }),
+            target: tgt,
+            targets: [tgt],
+            highest_severity: diagnostic.severity,
+            diagnostics: [row],
+          };
+          group.objectMap.set(objId, affObj);
+        } else {
+          if (diagnostic.severity === "error") {
+            affObj.highest_severity = "error";
+          }
+          if (!affObj.diagnostics.some((d) => d.code === row.code && d.message === row.message)) {
+            affObj.diagnostics.push(row);
+          }
+          if (!affObj.targets.some((t) => t.panel === tgt.panel && t.kind === tgt.kind && t.id === tgt.id && t.character_id === tgt.character_id && t.requirement_id === tgt.requirement_id)) {
+            affObj.targets.push(tgt);
+          }
+        }
+      }
       continue;
     }
+
     const ids = diagnostic.artifact_ids ?? diagnostic.fact_ids ?? diagnostic.source_ids ?? [];
     const objectKind: PublishDiagnosticAffectedKind = mapping.affectedKind === "coverage_cell" ? "fact" : mapping.affectedKind;
     const affected: PublishDiagnosticAffected[] = ids.map((id) => ({ kind: objectKind, id }));
     const targets: PublishDiagnosticTarget[] = ids.map((id) => ({ panel: mapping.panel, kind: objectKind, id }));
-    rows.push({
+    const row: PublishDiagnosticRow = {
       code: diagnostic.code,
       severity: diagnostic.severity,
       message: diagnostic.message,
@@ -126,7 +256,105 @@ export function deriveStructuredPublishDiagnostics(diagnostics: readonly Workflo
         ? { targets: [{ panel: mapping.panel }] }
         : { targets }),
       ...(targets[0] === undefined ? { target: { panel: mapping.panel } } : { target: targets[0] }),
-    });
+    };
+    rows.push(row);
+
+    if (affected.length === 0) {
+      group.unscoped_diagnostics.push(row);
+    } else {
+      for (let i = 0; i < affected.length; i += 1) {
+        const aff = affected[i]!;
+        const tgt: PublishDiagnosticTarget = targets[i] ?? {
+          panel: mapping.panel,
+          kind: objectKind,
+          ...(aff.id === undefined ? {} : { id: aff.id }),
+        };
+        const objId = computeObjectIdentity(aff);
+        allObjectIdentities.add(objId);
+
+        let affObj = group.objectMap.get(objId);
+        if (affObj === undefined) {
+          affObj = {
+            object_identity: objId,
+            kind: aff.kind,
+            ...(aff.id === undefined ? {} : { id: aff.id }),
+            target: tgt,
+            targets: [tgt],
+            highest_severity: diagnostic.severity,
+            diagnostics: [row],
+          };
+          group.objectMap.set(objId, affObj);
+        } else {
+          if (diagnostic.severity === "error") {
+            affObj.highest_severity = "error";
+          }
+          if (!affObj.diagnostics.some((d) => d.code === row.code && d.message === row.message)) {
+            affObj.diagnostics.push(row);
+          }
+          if (!affObj.targets.some((t) => t.panel === tgt.panel && t.kind === tgt.kind && t.id === tgt.id)) {
+            affObj.targets.push(tgt);
+          }
+        }
+      }
+    }
   }
-  return { rows, has_unknown: hasUnknown };
+
+  const groups: DiagnosticRemediationGroup[] = Array.from(groupMap.values()).map((rawGroup) => {
+    const affected_objects = Array.from(rawGroup.objectMap.values());
+
+    for (const obj of affected_objects) {
+      obj.diagnostics.sort((a, b) => {
+        if (a.severity !== b.severity) {
+          return a.severity === "error" ? -1 : 1;
+        }
+        return a.code.localeCompare(b.code);
+      });
+    }
+
+    affected_objects.sort((a, b) => {
+      if (a.highest_severity !== b.highest_severity) {
+        return a.highest_severity === "error" ? -1 : 1;
+      }
+      if (a.kind !== b.kind) {
+        return a.kind.localeCompare(b.kind);
+      }
+      return a.object_identity.localeCompare(b.object_identity);
+    });
+
+    rawGroup.unscoped_diagnostics.sort((a, b) => {
+      if (a.severity !== b.severity) {
+        return a.severity === "error" ? -1 : 1;
+      }
+      return a.code.localeCompare(b.code);
+    });
+
+    const targetCount = affected_objects.reduce((sum, o) => sum + Math.max(1, o.targets.length), 0) + rawGroup.unscoped_diagnostics.length;
+
+    return {
+      remediation_key: rawGroup.remediation_key,
+      panel: rawGroup.panel,
+      primary_next_action: rawGroup.primary_next_action,
+      highest_severity: rawGroup.highest_severity,
+      affected_objects,
+      unscoped_diagnostics: rawGroup.unscoped_diagnostics,
+      target_count: targetCount,
+    };
+  });
+
+  groups.sort((a, b) => {
+    if (a.highest_severity !== b.highest_severity) {
+      return a.highest_severity === "error" ? -1 : 1;
+    }
+    return a.remediation_key.localeCompare(b.remediation_key);
+  });
+
+  const summary: PublishDiagnosticsSummary = {
+    total_diagnostics: diagnostics.length,
+    error_count: errorCount,
+    warning_count: warningCount,
+    affected_object_count: allObjectIdentities.size,
+    remediation_group_count: groups.length,
+  };
+
+  return { rows, groups, summary, has_unknown: hasUnknown };
 }

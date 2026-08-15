@@ -674,8 +674,6 @@ export async function coverageResolutionConfirm(
   actor: string,
   input: CoverageResolutionConfirmInput,
 ): Promise<CoverageCommandResult> {
-  const state = await deps.repository.read();
-  assertAssessmentMatches(state, input.assessment_id, input.assessment_revision);
   const operation = coverageOperation(
     actor,
     "coverage_resolution_confirm",
@@ -687,6 +685,9 @@ export async function coverageResolutionConfirm(
 
   const replayed = await checkReplayCoverageCommand(deps, operation, "coverage.resolution.confirmed");
   if (replayed !== undefined) return replayed;
+
+  const state = await deps.repository.read();
+  assertAssessmentMatches(state, input.assessment_id, input.assessment_revision);
 
   try {
     const outcome = await executeCoverageResolutionConfirm(deps, state, operation, actor);

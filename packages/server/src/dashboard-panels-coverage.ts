@@ -567,6 +567,207 @@ function openSupplementDialog(cell, preview) {
   document.body.appendChild(overlay);
 }
 
+function openCreativeCompletionDialog(cell, preview) {
+  var assessment = coverageAssessmentRef();
+  if (assessment === undefined) return;
+
+  var activeElementBeforeModal = document.activeElement;
+  var operationId = typeof generateIdempotencyKey === "function" ? generateIdempotencyKey() : ("op-creative-" + Date.now());
+
+  var overlay = document.createElement("div");
+  overlay.className = "dialog-overlay";
+  overlay.setAttribute("role", "presentation");
+
+  var modal = document.createElement("div");
+  modal.className = "dialog-modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-labelledby", "creative-modal-title");
+  modal.setAttribute("aria-describedby", "creative-modal-desc");
+
+  var title = document.createElement("h3");
+  title.id = "creative-modal-title";
+  title.textContent = "創作補全授權（Creative Completion）";
+  modal.appendChild(title);
+
+  var warnBox = document.createElement("div");
+  warnBox.className = "creative-warning-box";
+  warnBox.textContent = "重要聲明：Creative Completion 是創作授權，不是 source-backed evidence，也不會建立來源佐證。";
+  modal.appendChild(warnBox);
+
+  var infoSection = document.createElement("div");
+  infoSection.id = "creative-modal-desc";
+  infoSection.className = "creative-info-section";
+
+  var scopeText = cell.character_id ? ("角色：" + cell.character_id) : "世界（World）";
+  var reqText = (cell.requirement_label || cell.requirement_id) + " (" + cell.requirement_id + ")";
+  var statusText = cell.status || "未覆蓋";
+  var assessText = assessment.id + "@" + (assessment.revision ? assessment.revision.slice(0, 8) : "");
+
+  var dl = document.createElement("dl");
+  dl.className = "creative-meta-dl";
+  function addMetaRow(term, val) {
+    var dt = document.createElement("dt");
+    dt.textContent = term;
+    var dd = document.createElement("dd");
+    dd.textContent = val;
+    dl.appendChild(dt);
+    dl.appendChild(dd);
+  }
+  addMetaRow("目標範圍：", scopeText);
+  addMetaRow("需求項目：", reqText);
+  addMetaRow("目前狀態：", statusText);
+  addMetaRow("評估版本：", assessText);
+  infoSection.appendChild(dl);
+
+  if (Array.isArray(preview.consequences) && preview.consequences.length > 0) {
+    var conHeader = document.createElement("div");
+    conHeader.className = "consequences-header";
+    conHeader.textContent = "預期影響：";
+    var conList = document.createElement("ul");
+    conList.className = "consequences-list";
+    for (var c = 0; c < preview.consequences.length; c += 1) {
+      var li = document.createElement("li");
+      li.textContent = preview.consequences[c];
+      conList.appendChild(li);
+    }
+    infoSection.appendChild(conHeader);
+    infoSection.appendChild(conList);
+  }
+  modal.appendChild(infoSection);
+
+  var form = document.createElement("div");
+  form.className = "creative-form";
+
+  var choiceLabel = document.createElement("label");
+  choiceLabel.textContent = "創作授權決策（必填）：";
+  var choiceInput = document.createElement("input");
+  choiceInput.type = "text";
+  choiceInput.className = "dialog-input";
+  choiceInput.value = "授權創作補全設定";
+  choiceInput.placeholder = "請輸入授權決策內容…";
+  choiceLabel.appendChild(choiceInput);
+  form.appendChild(choiceLabel);
+
+  var rationaleLabel = document.createElement("label");
+  rationaleLabel.textContent = "授權理由（必填）：";
+  var rationaleInput = document.createElement("textarea");
+  rationaleInput.className = "dialog-textarea";
+  rationaleInput.rows = 3;
+  rationaleInput.value = "多方搜尋無官方佐證來源，依既有設定合理推導補全。";
+  rationaleInput.placeholder = "請輸入授權依據與理由…";
+  rationaleLabel.appendChild(rationaleInput);
+  form.appendChild(rationaleLabel);
+
+  var errBox = document.createElement("div");
+  errBox.className = "dialog-error";
+  errBox.setAttribute("aria-live", "polite");
+  errBox.style.display = "none";
+  form.appendChild(errBox);
+
+  modal.appendChild(form);
+
+  var actionRow = document.createElement("div");
+  actionRow.className = "dialog-actions";
+
+  var cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.textContent = "取消";
+  cancelBtn.className = "btn-secondary";
+
+  function closeModal() {
+    overlay.remove();
+    document.removeEventListener("keydown", handleKeyDown);
+    if (activeElementBeforeModal && typeof activeElementBeforeModal.focus === "function") {
+      try { activeElementBeforeModal.focus(); } catch (e) {}
+    }
+  }
+
+  function handleKeyDown(event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeModal();
+    }
+  }
+
+  cancelBtn.addEventListener("click", closeModal);
+  document.addEventListener("keydown", handleKeyDown);
+  actionRow.appendChild(cancelBtn);
+
+  var submitBtn = document.createElement("button");
+  submitBtn.type = "button";
+  submitBtn.textContent = "確認創作補全授權";
+  submitBtn.className = "btn-primary";
+
+  submitBtn.addEventListener("click", async function () {
+    var choiceVal = choiceInput.value ? choiceInput.value.trim() : "";
+    var rationaleVal = rationaleInput.value ? rationaleInput.value.trim() : "";
+
+    if (!choiceVal || !rationaleVal) {
+      errBox.textContent = "「創作授權決策」與「授權理由」皆為必填欄位，不得為空。";
+      errBox.style.display = "block";
+      return;
+    }
+
+    errBox.style.display = "none";
+    submitBtn.disabled = true;
+    cancelBtn.disabled = true;
+    submitBtn.textContent = "提交授權中…";
+
+    try {
+      var result = await postJson("/workspace/coverage/resolution/confirm", {
+        assessment_id: assessment.id,
+        assessment_revision: assessment.revision,
+        requirement_id: cell.requirement_id,
+        ...(cell.character_id === undefined ? {} : { character_id: cell.character_id }),
+        action: "creative_completion",
+        choice: choiceVal,
+        rationale: rationaleVal,
+        operation_id: operationId,
+      });
+
+      closeModal();
+      setCoverageNotice("已成功確認創作補全授權。");
+      renderMutationInvalidation(result.downstream_invalidation);
+      await loadCoverageCenterData();
+      await refreshWorkflowViews();
+      if (typeof triggerCheckReadiness === "function") {
+        void triggerCheckReadiness();
+      }
+    } catch (error) {
+      cancelBtn.disabled = false;
+      submitBtn.disabled = false;
+      submitBtn.textContent = "重新提交授權";
+      var errMsg = error ? (error.message || String(error)) : "授權提交失敗";
+      if (errMsg.indexOf("STALE") >= 0 || errMsg.indexOf("過期") >= 0) {
+        errBox.textContent = "評估已過期，無法以舊版本授權創作補全。請重新執行 Coverage 評估。";
+        submitBtn.style.display = "none";
+        var reloadBtn = document.createElement("button");
+        reloadBtn.type = "button";
+        reloadBtn.textContent = "重新載入覆蓋中心";
+        reloadBtn.className = "btn-primary";
+        reloadBtn.addEventListener("click", function () {
+          closeModal();
+          void loadCoverageCenterData();
+        });
+        actionRow.appendChild(reloadBtn);
+      } else {
+        errBox.textContent = "授權失敗：" + errMsg;
+      }
+      errBox.style.display = "block";
+    }
+  });
+
+  actionRow.appendChild(submitBtn);
+  modal.appendChild(actionRow);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  setTimeout(function () {
+    choiceInput.focus();
+  }, 50);
+}
+
 function previewCoverageResolution(cell, action) {
   var assessment = coverageAssessmentRef();
   if (assessment === undefined) return;
@@ -581,30 +782,13 @@ function previewCoverageResolution(cell, action) {
       openSupplementDialog(cell, preview);
       return;
     }
+    if (action === "creative_completion") {
+      openCreativeCompletionDialog(cell, preview);
+      return;
+    }
     var msgEl = byId("coverage-center-message") || byId("coverage-message");
     if (msgEl) {
       msgEl.textContent = (preview.consequences || []).join("；");
-      var confirmButton = coverageButton("確認創作補全", function () {
-        var choice = window.prompt("請輸入確認理由：", "使用者授權創作補全。");
-        if (choice === null || choice.trim() === "") { setCoverageNotice("已取消確認。"); return; }
-        postJson("/workspace/coverage/resolution/confirm", {
-          assessment_id: assessment.id,
-          assessment_revision: assessment.revision,
-          requirement_id: cell.requirement_id,
-          ...(cell.character_id === undefined ? {} : { character_id: cell.character_id }),
-          action: action,
-          choice: choice.trim(),
-          rationale: choice.trim(),
-        }).then(function (result) {
-          renderMutationInvalidation(result.downstream_invalidation);
-          setCoverageNotice("已確認 resolution。");
-          void loadCoverageCenterData();
-          void refreshWorkflowViews();
-        }).catch(function (error) {
-          setCoverageError(error);
-        });
-      });
-      msgEl.appendChild(confirmButton);
     }
   }).catch(function (error) {
     setCoverageError(error);
@@ -903,22 +1087,212 @@ function renderCoverageCenter(payload) {
   container.appendChild(grid);
 }
 
+function openTaskContextModal(task) {
+  var activeElementBeforeModal = document.activeElement;
+
+  var overlay = document.createElement("div");
+  overlay.className = "dialog-overlay";
+  overlay.setAttribute("role", "presentation");
+
+  var modal = document.createElement("div");
+  modal.className = "dialog-modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-labelledby", "task-context-title");
+  modal.setAttribute("aria-describedby", "task-context-desc");
+
+  var title = document.createElement("h3");
+  title.id = "task-context-title";
+  title.textContent = "研究任務上下文（Task " + task.id + "）";
+  modal.appendChild(title);
+
+  var desc = document.createElement("div");
+  desc.id = "task-context-desc";
+  desc.className = "task-context-desc";
+
+  var originLabelMap = {
+    newly_created: "新建立（Newly-created）",
+    reused_existing: "既有重用（Reused-existing）",
+    successor_recovery: "修復衍生（Successor-recovery）",
+    legacy_unknown: "歷史紀錄（Legacy-unknown）",
+  };
+
+  var dl = document.createElement("dl");
+  dl.className = "task-context-dl";
+
+  var inFlightText = task.is_in_flight ? "進行中（In-flight）" : "歷史紀錄／已終止（Terminal history）";
+  var originText = originLabelMap[task.origin_kind] || task.origin_kind || "未知";
+
+  function addRow(term, val) {
+    var dt = document.createElement("dt");
+    dt.textContent = term;
+    var dd = document.createElement("dd");
+    dd.textContent = val;
+    dl.appendChild(dt);
+    dl.appendChild(dd);
+  }
+
+  addRow("任務 ID：", task.id);
+  addRow("所屬批次：", task.batch_id);
+  addRow("目標範圍：", task.character_id ? ("角色：" + task.character_id) : "世界（World）");
+  addRow("狀態：", task.projected_status || task.status);
+  addRow("執行狀態：", inFlightText);
+  addRow("任務來源：", originText);
+  addRow("嘗試次數 / 認領世代：", "attempt " + task.attempt + " / generation " + task.claim_generation);
+
+  if (task.requirement_ids && task.requirement_ids.length > 0) {
+    addRow("涵蓋需求：", task.requirement_ids.join(", "));
+  }
+  if (task.dimension_paths && task.dimension_paths.length > 0) {
+    addRow("維度路徑：", task.dimension_paths.join(", "));
+  }
+  if (task.exhausted_reason) {
+    addRow("耗盡原因：", task.exhausted_reason);
+  }
+  if (task.recovery_action) {
+    addRow("修復動作：", task.recovery_action);
+  }
+  if (task.predecessor_id) {
+    addRow("前身任務：", task.predecessor_id);
+  }
+  if (task.successor_ids && task.successor_ids.length > 0) {
+    addRow("後續任務：", task.successor_ids.join(", "));
+  }
+  if (task.candidate_source_ids && task.candidate_source_ids.length > 0) {
+    addRow("候選 / 來源：", task.candidate_source_ids.join(", "));
+  }
+  desc.appendChild(dl);
+
+  var opSection = document.createElement("div");
+  opSection.className = "task-context-ops";
+  var opTitle = document.createElement("h4");
+  opTitle.textContent = "關聯 Operations 與 Audit Events";
+  opSection.appendChild(opTitle);
+
+  if (Array.isArray(task.operation_ids) && task.operation_ids.length > 0) {
+    var opList = document.createElement("div");
+    opList.className = "task-op-list";
+    for (var i = 0; i < task.operation_ids.length; i += 1) {
+      var opId = task.operation_ids[i];
+      var opItem = document.createElement("div");
+      opItem.className = "task-op-item";
+      var opLabel = document.createElement("span");
+      opLabel.textContent = "Operation: " + opId;
+      opItem.appendChild(opLabel);
+      var jumpBtn = document.createElement("button");
+      jumpBtn.type = "button";
+      jumpBtn.className = "action-link";
+      jumpBtn.textContent = "前往 Operations 面板並聚焦";
+      jumpBtn.addEventListener("click", (function (targetOpId) {
+        return function () {
+          closeModal();
+          switchPanel("operations");
+          void revealDiagnosticTarget({ kind: "operation", id: targetOpId, panel: "operations" });
+        };
+      })(opId));
+      opItem.appendChild(jumpBtn);
+      opList.appendChild(opItem);
+    }
+    opSection.appendChild(opList);
+  } else {
+    var noOp = document.createElement("div");
+    noOp.className = "muted";
+    noOp.textContent = "無直接關聯的進行中 Operation（可能為歷史或手動建立）。";
+    opSection.appendChild(noOp);
+  }
+
+  if (Array.isArray(task.audit_event_ids) && task.audit_event_ids.length > 0) {
+    var auditList = document.createElement("div");
+    auditList.className = "task-audit-list muted";
+    auditList.textContent = "Audit Events: " + task.audit_event_ids.join(", ");
+    opSection.appendChild(auditList);
+  }
+
+  desc.appendChild(opSection);
+  modal.appendChild(desc);
+
+  var actionRow = document.createElement("div");
+  actionRow.className = "dialog-actions";
+  var closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.textContent = "關閉";
+  closeBtn.className = "btn-secondary";
+
+  function closeModal() {
+    overlay.remove();
+    document.removeEventListener("keydown", handleKeyDown);
+    if (activeElementBeforeModal && typeof activeElementBeforeModal.focus === "function") {
+      try { activeElementBeforeModal.focus(); } catch (e) {}
+    }
+  }
+
+  function handleKeyDown(event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeModal();
+    }
+  }
+
+  closeBtn.addEventListener("click", closeModal);
+  document.addEventListener("keydown", handleKeyDown);
+  actionRow.appendChild(closeBtn);
+  modal.appendChild(actionRow);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  setTimeout(function () { closeBtn.focus(); }, 50);
+}
+
 function researchTaskElement(task) {
   var row = document.createElement("div");
-  row.className = "workflow-stage";
+  row.className = "workflow-stage research-task-stage";
   row.id = "research-task-" + task.id;
+  row.setAttribute("data-object-kind", "research_task");
+  row.setAttribute("data-object-id", task.id);
   row.setAttribute("data-task-id", task.id);
+
   var title = document.createElement("div");
   title.className = "workflow-stage-title";
-  var badge = document.createElement("span");
+
   var projected = task.projected_status || task.status;
+  var badge = document.createElement("span");
   badge.className = "status-badge " + statusClass(projected);
   badge.textContent = projected;
   title.appendChild(badge);
+
+  var inFlightBadge = document.createElement("span");
+  inFlightBadge.className = "status-badge " + (task.is_in_flight ? "active" : "inactive");
+  inFlightBadge.textContent = task.is_in_flight ? "進行中" : "歷史";
+  title.appendChild(inFlightBadge);
+
+  if (task.origin_kind) {
+    var originBadge = document.createElement("span");
+    originBadge.className = "origin-badge origin-" + task.origin_kind;
+    var originNames = {
+      newly_created: "新建立",
+      reused_existing: "既有重用",
+      successor_recovery: "修復衍生",
+      legacy_unknown: "歷史",
+    };
+    originBadge.textContent = originNames[task.origin_kind] || task.origin_kind;
+    title.appendChild(originBadge);
+  }
+
   var label = document.createElement("span");
   label.textContent = "任務 " + task.id + (task.character_id ? "（" + task.character_id + "）" : "（世界）");
   title.appendChild(label);
+
+  var contextBtn = document.createElement("button");
+  contextBtn.type = "button";
+  contextBtn.className = "action-link";
+  contextBtn.textContent = "查看上下文";
+  contextBtn.addEventListener("click", function () {
+    openTaskContextModal(task);
+  });
+  title.appendChild(contextBtn);
+
   row.appendChild(title);
+
   var meta = document.createElement("div");
   meta.className = "muted";
   var metaParts = [];
@@ -932,6 +1306,7 @@ function researchTaskElement(task) {
   if (task.searched_queries && task.searched_queries.length > 0) metaParts.push("已查詢 " + task.searched_queries.join(", "));
   if (task.source_families && task.source_families.length > 0) metaParts.push("來源家族 " + task.source_families.join(", "));
   if (task.exhausted_reason) metaParts.push("耗盡原因 " + task.exhausted_reason);
+  if (task.recovery_action) metaParts.push("修復動作 " + task.recovery_action);
   if (task.predecessor_id) metaParts.push("前身 " + task.predecessor_id.slice(0, 8));
   if (task.successor_ids && task.successor_ids.length > 0) metaParts.push("後續 " + task.successor_ids.map(function (id) { return id.slice(0, 8); }).join(", "));
   if (task.candidate_source_ids && task.candidate_source_ids.length > 0) metaParts.push("候選/來源 " + task.candidate_source_ids.map(function (id) { return id.slice(0, 8); }).join(", "));
@@ -940,12 +1315,160 @@ function researchTaskElement(task) {
   return row;
 }
 
+function renderResearchLineages(lineages, tasks) {
+  var section = document.createElement("div");
+  section.className = "research-lineages-section";
+
+  var heading = document.createElement("h4");
+  heading.className = "lineages-title";
+  heading.textContent = "需求研究血統圖（Research Lineage Chains）";
+  section.appendChild(heading);
+
+  var taskMap = {};
+  if (Array.isArray(tasks)) {
+    for (var t = 0; t < tasks.length; t += 1) {
+      taskMap[tasks[t].id] = tasks[t];
+    }
+  }
+
+  if (!Array.isArray(lineages) || lineages.length === 0) {
+    var empty = document.createElement("div");
+    empty.className = "muted";
+    empty.textContent = "目前無研究血統鏈結。";
+    section.appendChild(empty);
+    return section;
+  }
+
+  for (var i = 0; i < lineages.length; i += 1) {
+    var lin = lineages[i];
+    var card = document.createElement("div");
+    card.className = "lineage-card";
+
+    var head = document.createElement("div");
+    head.className = "lineage-card-header";
+
+    var scopeTag = document.createElement("span");
+    scopeTag.className = "scope-tag " + (lin.scope === "character" ? "scope-character" : "scope-world");
+    scopeTag.textContent = lin.scope === "character" ? ("角色：" + (lin.character_id || "")) : "世界";
+    head.appendChild(scopeTag);
+
+    var reqTitle = document.createElement("strong");
+    reqTitle.textContent = " " + lin.requirement_label + " (" + lin.requirement_id + ")";
+    head.appendChild(reqTitle);
+
+    var batchSpan = document.createElement("span");
+    batchSpan.className = "muted lineage-batch-info";
+    batchSpan.textContent = " · 批次 " + lin.batch_id;
+    head.appendChild(batchSpan);
+
+    card.appendChild(head);
+
+    var chainsFlow = document.createElement("div");
+    chainsFlow.className = "lineage-chains-flow";
+
+    var chains = Array.isArray(lin.chains) ? lin.chains : [];
+    for (var c = 0; c < chains.length; c += 1) {
+      var chain = chains[c];
+      var chainRow = document.createElement("div");
+      chainRow.className = "lineage-chain-row";
+
+      var nodes = Array.isArray(chain.nodes) ? chain.nodes : [];
+      for (var n = 0; n < nodes.length; n += 1) {
+        var node = nodes[n];
+        var fullTask = taskMap[node.id] || node;
+
+        if (n > 0) {
+          var arrow = document.createElement("span");
+          arrow.className = "lineage-arrow";
+          arrow.textContent = "→";
+          chainRow.appendChild(arrow);
+        }
+
+        var nodeCard = document.createElement("div");
+        nodeCard.className = "lineage-node-card " + (node.is_in_flight ? "node-in-flight" : "node-terminal");
+
+        var nodeTop = document.createElement("div");
+        nodeTop.className = "node-top";
+        var nodeBadge = document.createElement("span");
+        nodeBadge.className = "status-badge " + statusClass(node.projected_status || node.status);
+        nodeBadge.textContent = node.projected_status || node.status;
+        nodeTop.appendChild(nodeBadge);
+
+        var nodeFlightBadge = document.createElement("span");
+        nodeFlightBadge.className = "flight-tag " + (node.is_in_flight ? "flight-active" : "flight-terminal");
+        nodeFlightBadge.textContent = node.is_in_flight ? "進行中" : "歷史";
+        nodeTop.appendChild(nodeFlightBadge);
+
+        if (node.origin_kind) {
+          var nodeOriginBadge = document.createElement("span");
+          nodeOriginBadge.className = "origin-badge origin-" + node.origin_kind;
+          var oNames = {
+            newly_created: "新建立",
+            reused_existing: "既有重用",
+            successor_recovery: "修復衍生",
+            legacy_unknown: "歷史",
+          };
+          nodeOriginBadge.textContent = oNames[node.origin_kind] || node.origin_kind;
+          nodeTop.appendChild(nodeOriginBadge);
+        }
+
+        nodeCard.appendChild(nodeTop);
+
+        var nodeMid = document.createElement("div");
+        nodeMid.className = "node-mid";
+        var taskIdLink = document.createElement("button");
+        taskIdLink.type = "button";
+        taskIdLink.className = "task-link-btn";
+        taskIdLink.textContent = "Task: " + node.id.slice(0, 10);
+        taskIdLink.title = "點擊檢視 Task " + node.id + " 上下文";
+        taskIdLink.addEventListener("click", (function (tObj) {
+          return function () { openTaskContextModal(tObj); };
+        })(fullTask));
+        nodeMid.appendChild(taskIdLink);
+
+        if (node.recovery_action) {
+          var recTag = document.createElement("span");
+          recTag.className = "recovery-action-tag";
+          recTag.textContent = "修復: " + node.recovery_action;
+          nodeMid.appendChild(recTag);
+        }
+        nodeCard.appendChild(nodeMid);
+
+        if (Array.isArray(node.operation_ids) && node.operation_ids.length > 0) {
+          var nodeBot = document.createElement("div");
+          nodeBot.className = "node-bot";
+          var opLink = document.createElement("button");
+          opLink.type = "button";
+          opLink.className = "action-link-small";
+          opLink.textContent = "前往 Op (" + node.operation_ids.length + ")";
+          opLink.addEventListener("click", (function (opId) {
+            return function () {
+              switchPanel("operations");
+              void revealDiagnosticTarget({ kind: "operation", id: opId, panel: "operations" });
+            };
+          })(node.operation_ids[0]));
+          nodeBot.appendChild(opLink);
+          nodeCard.appendChild(nodeBot);
+        }
+
+        chainRow.appendChild(nodeCard);
+      }
+      chainsFlow.appendChild(chainRow);
+    }
+    card.appendChild(chainsFlow);
+    section.appendChild(card);
+  }
+  return section;
+}
+
 function renderResearchMonitor(monitor) {
   var container = byId("research-monitor");
   container.textContent = "";
   if (monitor === null || monitor === undefined) return;
   var batches = monitor.batches || [];
   var tasks = monitor.tasks || [];
+  var lineages = monitor.lineages || [];
+
   for (var i = 0; i < batches.length; i++) {
     var batch = batches[i];
     var box = document.createElement("div");
@@ -977,6 +1500,16 @@ function renderResearchMonitor(monitor) {
     box.appendChild(meta);
     container.appendChild(box);
   }
+
+  if (lineages.length > 0) {
+    container.appendChild(renderResearchLineages(lineages, tasks));
+  }
+
+  var taskListHeader = document.createElement("h4");
+  taskListHeader.style.cssText = "margin: 16px 0 8px 0;";
+  taskListHeader.textContent = "全部研究任務清單 (" + tasks.length + ")";
+  container.appendChild(taskListHeader);
+
   for (var j = 0; j < tasks.length; j++) {
     container.appendChild(researchTaskElement(tasks[j]));
   }

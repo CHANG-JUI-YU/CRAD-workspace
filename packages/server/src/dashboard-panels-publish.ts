@@ -262,20 +262,38 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         return "coverage-cell-" + (characterId || "world") + "-" + String(requirementId).split(".").join("-");
       }
 
+      var currentDiagnosticNavToken = 0;
+
       function findDiagnosticObjectElement(target) {
         if (target === undefined || target === null) return null;
         if (target.kind === "coverage_cell") {
           if (target.requirement_id === undefined || target.requirement_id === null) return null;
           var cell = byId(coverageCellId(target.character_id, target.requirement_id));
           if (cell !== null && cell !== undefined) return cell;
+          if (typeof document.querySelector === "function") {
+            var cellByAttr = document.querySelector('[data-cell-id="' + (target.character_id || "world") + "__" + target.requirement_id + '"]');
+            if (cellByAttr !== null && cellByAttr !== undefined) return cellByAttr;
+          }
           return null;
         }
         if (target.kind === undefined || target.id === undefined || target.id === null) return null;
-        var matches = document.querySelectorAll("[data-object-kind]");
-        for (var i = 0; i < matches.length; i += 1) {
-          if (matches[i].getAttribute("data-object-kind") === target.kind && matches[i].getAttribute("data-object-id") === target.id) {
-            return matches[i];
+        var isReviewRun = target.kind === "review_run" || target.kind === "review-run";
+        if (typeof document.querySelectorAll === "function") {
+          var matches = document.querySelectorAll("[data-object-kind]");
+          for (var i = 0; i < matches.length; i += 1) {
+            var k = matches[i].getAttribute("data-object-kind");
+            var id = matches[i].getAttribute("data-object-id");
+            if ((k === target.kind || (isReviewRun && (k === "review_run" || k === "review-run"))) && id === target.id) {
+              return matches[i];
+            }
           }
+        }
+        if (typeof document.querySelector === "function") {
+          var selector = isReviewRun
+            ? '[data-object-kind="review_run"][data-object-id="' + target.id + '"], [data-object-kind="review-run"][data-object-id="' + target.id + '"]'
+            : '[data-object-kind="' + target.kind + '"][data-object-id="' + target.id + '"]';
+          var match = document.querySelector(selector);
+          if (match !== null && match !== undefined) return match;
         }
         return null;
       }
@@ -322,28 +340,106 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         anchor.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" });
       }
 
-      function revealDiagnosticTarget(target, code) {
-        if (target === undefined || target === null) return;
-        var element = findDiagnosticObjectElement(target);
-        if (element === null) element = byId(panelAnchorId(target.panel));
-        if (element === null || element === undefined) element = byId("readiness-list");
-        if (element === null || element === undefined) return;
-        clearDiagnosticHighlight();
-        element.classList.add("diagnostic-highlight");
-        element.setAttribute("data-diagnostic-code", code || target.panel || "");
-        element.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" });
-        if (typeof element.focus === "function") {
-          try {
-            element.focus({ preventScroll: true });
-          } catch (focusError) {
-            element.focus();
+      function revealDiagnosticTarget(target, code, btnEl) {
+        if (target === undefined || target === null) return Promise.resolve();
+        var token = typeof currentDiagnosticNavToken === "number" ? ++currentDiagnosticNavToken : 0;
+        var originalBtnText = btnEl ? btnEl.textContent : "";
+        if (btnEl) {
+          btnEl.disabled = true;
+          btnEl.textContent = "載入中…";
+        }
+
+        function highlightOrFallback() {
+          if (typeof currentDiagnosticNavToken === "number" && token !== currentDiagnosticNavToken) return;
+          var element = findDiagnosticObjectElement(target);
+          if (element !== null && element !== undefined) {
+            clearDiagnosticHighlight();
+            element.classList.add("diagnostic-highlight");
+            element.setAttribute("data-diagnostic-code", code || target.panel || "");
+            element.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "center" });
+            if (typeof element.focus === "function") {
+              try {
+                element.focus({ preventScroll: true });
+              } catch (focusError) {
+                element.focus();
+              }
+            }
+            lastDiagnosticHighlight = element;
+          } else {
+            var fallbackAnchor = byId(panelAnchorId(target.panel)) || byId("readiness-list");
+            if (fallbackAnchor !== null && fallbackAnchor !== undefined) {
+              clearDiagnosticHighlight();
+              fallbackAnchor.classList.add("diagnostic-highlight");
+              fallbackAnchor.setAttribute("data-diagnostic-code", code || target.panel || "");
+              fallbackAnchor.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" });
+              lastDiagnosticHighlight = fallbackAnchor;
+            }
+            var targetDesc = (target.kind || "物件") + (target.id ? " " + target.id : (target.requirement_id ? " " + target.requirement_id : ""));
+            var msg = "找不到指定物件（" + targetDesc + "），可能已刪除或診斷已更新；已退回 " + (target.panel || "Readiness") + " 面板。";
+            var msgEl = byId("readiness-message");
+            if (msgEl) msgEl.textContent = msg;
+            if (typeof setNotice === "function") setNotice("warning", msg);
           }
         }
-        lastDiagnosticHighlight = element;
+
+        var initialElement = findDiagnosticObjectElement(target);
+        if (initialElement !== null) {
+          highlightOrFallback();
+          if (btnEl) {
+            btnEl.disabled = false;
+            btnEl.textContent = originalBtnText;
+          }
+          return Promise.resolve();
+        }
+
+        var kind = target.kind;
+        var panel = target.panel;
+        var hasLoader = false;
+        var loadPromise = null;
+        if (kind === "artifact" || panel === "artifacts") {
+          if (typeof loadArtifactData === "function") { loadPromise = loadArtifactData(); hasLoader = true; }
+        } else if (kind === "source" || kind === "fact" || kind === "review_run" || kind === "review-run" || panel === "sources" || panel === "facts" || panel === "fact-review") {
+          if (typeof loadSourceFactData === "function") { loadPromise = loadSourceFactData(); hasLoader = true; }
+        } else if (kind === "coverage_cell" || panel === "coverage") {
+          if (typeof loadCoverageCenterData === "function") { loadPromise = loadCoverageCenterData(); hasLoader = true; }
+        } else if (kind === "operation" || panel === "operations") {
+          if (typeof loadOperationData === "function") { loadPromise = loadOperationData(); hasLoader = true; }
+        } else if (panel === "quality") {
+          if (typeof loadIssueData === "function") { loadPromise = loadIssueData(); hasLoader = true; }
+        } else if (panel === "precheck") {
+          if (typeof loadDashboardData === "function") { loadPromise = loadDashboardData(); hasLoader = true; }
+        }
+
+        if (!hasLoader) {
+          highlightOrFallback();
+          if (btnEl) {
+            btnEl.disabled = false;
+            btnEl.textContent = originalBtnText;
+          }
+          return Promise.resolve();
+        }
+
+        return Promise.resolve(loadPromise).then(function () {
+          highlightOrFallback();
+        }).catch(function (error) {
+          var errAnchor = byId(panelAnchorId(target.panel)) || byId("readiness-list");
+          if (errAnchor) {
+            clearDiagnosticHighlight();
+            errAnchor.classList.add("diagnostic-highlight");
+            errAnchor.setAttribute("data-diagnostic-code", code || target.panel || "");
+            errAnchor.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" });
+            lastDiagnosticHighlight = errAnchor;
+          }
+        }).finally(function () {
+          if (btnEl) {
+            btnEl.disabled = false;
+            btnEl.textContent = originalBtnText;
+          }
+        });
       }
 
       function navigateDiagnosticTarget(target) {
-        revealDiagnosticTarget(target);
+        void revealDiagnosticTarget(target);
       }
 
       function makeDiagnosticNavGroup(rowState) {
@@ -351,7 +447,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         group.className = "diagnostic-nav";
         var count = document.createElement("span");
         count.className = "diagnostic-nav-count";
-        count.textContent = "1 / " + rowState.targets.length;
+        count.textContent = (rowState.index + 1) + " / " + rowState.targets.length;
         var prev = document.createElement("button");
         prev.type = "button";
         prev.textContent = "上一個";
@@ -359,7 +455,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         prev.addEventListener("click", function () {
           rowState.index = (rowState.index - 1 + rowState.targets.length) % rowState.targets.length;
           count.textContent = (rowState.index + 1) + " / " + rowState.targets.length;
-          revealDiagnosticTarget(rowState.targets[rowState.index], rowState.code);
+          void revealDiagnosticTarget(rowState.targets[rowState.index], rowState.code, prev);
         });
         var next = document.createElement("button");
         next.type = "button";
@@ -368,68 +464,228 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         next.addEventListener("click", function () {
           rowState.index = (rowState.index + 1) % rowState.targets.length;
           count.textContent = (rowState.index + 1) + " / " + rowState.targets.length;
-          revealDiagnosticTarget(rowState.targets[rowState.index], rowState.code);
+          void revealDiagnosticTarget(rowState.targets[rowState.index], rowState.code, next);
         });
-        group.append(prev, count, next);
+        var go = document.createElement("button");
+        go.type = "button";
+        go.textContent = "前往";
+        go.setAttribute("aria-label", "前往目前受影響物件");
+        go.addEventListener("click", function () {
+          void revealDiagnosticTarget(rowState.targets[rowState.index], rowState.code, go);
+        });
+        group.append(prev, count, next, go);
         return group;
       }
 
       function renderPublishDiagnostics(structured) {
         var target = byId("readiness-list");
         target.textContent = "";
-        if (structured === null || structured === undefined || !Array.isArray(structured.rows) || structured.rows.length === 0) {
+        if (structured === null || structured === undefined || ((!Array.isArray(structured.groups) || structured.groups.length === 0) && (!Array.isArray(structured.rows) || structured.rows.length === 0))) {
           byId("readiness-message").textContent = "就緒：可以發布。";
           return;
         }
-        var blocking = structured.rows.filter(function (item) { return item.severity === "error"; });
-        byId("readiness-message").textContent = blocking.length === 0
-          ? "有 " + structured.rows.length + " 條警告，不阻擋發布。"
-          : "有 " + blocking.length + " 條阻擋診斷；修復後再發布。";
-        for (var i = 0; i < structured.rows.length; i += 1) {
-          var row = structured.rows[i];
-          if (!isRecord(row)) continue;
-          var line = document.createElement("div");
-          line.className = "readiness-row";
-          var badge = document.createElement("span");
-          badge.className = "status-badge " + (row.severity === "error" ? "error" : "active");
-          badge.textContent = row.severity === "error" ? "阻擋" : "警告";
-          line.append(badge);
-          var text = document.createElement("span");
-          text.textContent = (firstString(row, ["code"]) || "?") + "： " + (firstString(row, ["message"]) || "");
-          line.append(text);
-          var detail = document.createElement("span");
-          detail.className = "readiness-hint";
-          var detailParts = [];
-          if (Array.isArray(row.affected) && row.affected.length > 0) {
-            for (var a = 0; a < row.affected.length; a += 1) {
-              var affected = row.affected[a];
-              var affectedLabel = affected.kind + " " + (affected.id ? affected.id.slice(0, 12) : "?");
-              if (affected.character_id) affectedLabel += "（" + affected.character_id + "）";
-              if (affected.requirement_id) affectedLabel += "／" + affected.requirement_id;
-              detailParts.push(affectedLabel);
-            }
-          }
-          if (row.next_action) detailParts.push("下一步：" + row.next_action);
-          detail.textContent = detailParts.join("；");
-          line.append(detail);
-          var targets = Array.isArray(row.targets) && row.targets.length > 0
-            ? row.targets.slice()
-            : (row.target !== undefined && row.target !== null ? [row.target] : [{ panel: "readiness" }]);
-          if (targets.length > 1) {
-            line.append(makeDiagnosticNavGroup({ targets: targets, index: 0, code: row.code }));
-          } else {
-            var go = document.createElement("button");
-            go.type = "button";
-            go.textContent = "前往";
-            go.setAttribute("aria-label", "前往受影響物件或面板");
-            var singleTarget = targets[0];
-            go.addEventListener("click", (function (immutableTarget, immutableCode) {
-              return function () { revealDiagnosticTarget(immutableTarget, immutableCode); };
-            })(singleTarget, row.code));
-            line.append(go);
-          }
-          target.append(line);
+
+        var summary = structured.summary || {};
+        var errorCount = typeof summary.error_count === "number" ? summary.error_count : (structured.rows ? structured.rows.filter(function (r) { return r.severity === "error"; }).length : 0);
+        var warningCount = typeof summary.warning_count === "number" ? summary.warning_count : (structured.rows ? structured.rows.filter(function (r) { return r.severity === "warning"; }).length : 0);
+        var affectedCount = typeof summary.affected_object_count === "number" ? summary.affected_object_count : (structured.groups ? structured.groups.reduce(function (acc, g) { return acc + (g.affected_objects ? g.affected_objects.length : 0); }, 0) : 0);
+        var groupCount = typeof summary.remediation_group_count === "number" ? summary.remediation_group_count : (structured.groups ? structured.groups.length : 0);
+
+        if (errorCount === 0) {
+          byId("readiness-message").textContent = "有 " + warningCount + " 條警告，不阻擋發布；共涉及 " + affectedCount + " 個物件、" + groupCount + " 組修復路徑。";
+        } else {
+          byId("readiness-message").textContent = "有 " + errorCount + " 條阻擋診斷（另有 " + warningCount + " 條警告）；共涉及 " + affectedCount + " 個物件、" + groupCount + " 組修復路徑。修復後再發布。";
         }
+
+        if (Array.isArray(structured.groups) && structured.groups.length > 0) {
+          for (var g = 0; g < structured.groups.length; g += 1) {
+            var group = structured.groups[g];
+            if (!isRecord(group)) continue;
+            var groupCard = document.createElement("div");
+            groupCard.className = "diagnostic-group-card " + (group.highest_severity === "error" ? "severity-error" : "severity-warning");
+
+            var groupHeader = document.createElement("div");
+            groupHeader.className = "diagnostic-group-header";
+            var badge = document.createElement("span");
+            badge.className = "status-badge " + (group.highest_severity === "error" ? "error" : "active");
+            badge.textContent = group.highest_severity === "error" ? "阻擋" : "警告";
+            groupHeader.append(badge);
+
+            var groupTitle = document.createElement("strong");
+            groupTitle.className = "diagnostic-group-title";
+            groupTitle.textContent = "【" + (group.remediation_key || group.panel || "一般") + "】 主要下一步：" + (group.primary_next_action || "檢視診斷");
+            groupHeader.append(groupTitle);
+
+            var panelBtn = document.createElement("button");
+            panelBtn.type = "button";
+            panelBtn.className = "action-link";
+            panelBtn.textContent = "前往 " + (group.panel || "面板");
+            panelBtn.addEventListener("click", (function (p) {
+              return function () { switchPanel(p); };
+            })(group.panel));
+            groupHeader.append(panelBtn);
+            groupCard.append(groupHeader);
+
+            var objList = document.createElement("div");
+            objList.className = "diagnostic-object-list";
+
+            var affObjs = Array.isArray(group.affected_objects) ? group.affected_objects : [];
+            for (var o = 0; o < affObjs.length; o += 1) {
+              var obj = affObjs[o];
+              if (!isRecord(obj)) continue;
+              var objRow = document.createElement("div");
+              objRow.className = "diagnostic-object-row";
+
+              var objHead = document.createElement("div");
+              objHead.className = "diagnostic-object-head";
+              var objIdent = document.createElement("span");
+              objIdent.className = "diagnostic-object-id";
+              var label = obj.kind + " " + (obj.id ? obj.id.slice(0, 14) : "");
+              if (obj.character_id) label += "（" + obj.character_id + "）";
+              if (obj.requirement_id) label += "／" + obj.requirement_id;
+              objIdent.textContent = label;
+              objHead.append(objIdent);
+
+              var primaryDiag = (Array.isArray(obj.diagnostics) && obj.diagnostics.length > 0) ? obj.diagnostics[0] : null;
+              if (primaryDiag) {
+                var codeBadge = document.createElement("span");
+                codeBadge.className = "diagnostic-code-badge";
+                codeBadge.textContent = primaryDiag.code;
+                objHead.append(codeBadge);
+
+                var primaryMsg = document.createElement("span");
+                primaryMsg.className = "diagnostic-msg";
+                primaryMsg.textContent = primaryDiag.message;
+                objHead.append(primaryMsg);
+              }
+
+              var targets = Array.isArray(obj.targets) && obj.targets.length > 0
+                ? obj.targets.slice()
+                : (obj.target !== undefined && obj.target !== null ? [obj.target] : [{ panel: group.panel || "readiness" }]);
+
+              var navHolder = document.createElement("span");
+              navHolder.className = "diagnostic-nav-holder";
+              if (targets.length > 1) {
+                navHolder.append(makeDiagnosticNavGroup({ targets: targets, index: 0, code: primaryDiag ? primaryDiag.code : "" }));
+              } else {
+                var goBtn = document.createElement("button");
+                goBtn.type = "button";
+                goBtn.textContent = "前往";
+                goBtn.setAttribute("aria-label", "前往受影響物件");
+                var sTarget = targets[0];
+                goBtn.addEventListener("click", (function (targetObj, dCode, buttonElement) {
+                  return function () { void revealDiagnosticTarget(targetObj, dCode, buttonElement); };
+                })(sTarget, primaryDiag ? primaryDiag.code : "", goBtn));
+                navHolder.append(goBtn);
+              }
+              objHead.append(navHolder);
+              objRow.append(objHead);
+
+              if (Array.isArray(obj.diagnostics) && obj.diagnostics.length > 1) {
+                var secDetails = document.createElement("details");
+                secDetails.className = "secondary-diagnostics";
+                var secSummary = document.createElement("summary");
+                secSummary.textContent = "其他 " + (obj.diagnostics.length - 1) + " 項診斷代碼與說明";
+                secDetails.append(secSummary);
+                for (var dIdx = 1; dIdx < obj.diagnostics.length; dIdx += 1) {
+                  var secDiag = obj.diagnostics[dIdx];
+                  var secLine = document.createElement("div");
+                  secLine.className = "secondary-diagnostic-line";
+                  var secBadge = document.createElement("span");
+                  secBadge.className = "status-badge " + (secDiag.severity === "error" ? "error" : "active");
+                  secBadge.textContent = secDiag.severity === "error" ? "阻擋" : "警告";
+                  var secCode = document.createElement("strong");
+                  secCode.textContent = " " + secDiag.code + "：";
+                  var secText = document.createElement("span");
+                  secText.textContent = secDiag.message;
+                  secLine.append(secBadge, secCode, secText);
+                  secDetails.append(secLine);
+                }
+                objRow.append(secDetails);
+              }
+
+              objList.append(objRow);
+            }
+
+            var unscoped = Array.isArray(group.unscoped_diagnostics) ? group.unscoped_diagnostics : [];
+            for (var u = 0; u < unscoped.length; u += 1) {
+              var uDiag = unscoped[u];
+              if (!isRecord(uDiag)) continue;
+              var uRow = document.createElement("div");
+              uRow.className = "diagnostic-object-row unscoped-row";
+              var uHead = document.createElement("div");
+              uHead.className = "diagnostic-object-head";
+              var uBadge = document.createElement("span");
+              uBadge.className = "status-badge " + (uDiag.severity === "error" ? "error" : "active");
+              uBadge.textContent = uDiag.severity === "error" ? "阻擋" : "警告";
+              var uCode = document.createElement("strong");
+              uCode.textContent = " " + uDiag.code + "：";
+              var uText = document.createElement("span");
+              uText.textContent = uDiag.message;
+              uHead.append(uBadge, uCode, uText);
+              var uBtn = document.createElement("button");
+              uBtn.type = "button";
+              uBtn.textContent = "前往";
+              var uTarget = (Array.isArray(uDiag.targets) && uDiag.targets[0]) || uDiag.target || { panel: group.panel || "readiness" };
+              uBtn.addEventListener("click", (function (targetObj, dCode, buttonElement) {
+                return function () { void revealDiagnosticTarget(targetObj, dCode, buttonElement); };
+              })(uTarget, uDiag.code, uBtn));
+              uHead.append(uBtn);
+              uRow.append(uHead);
+              objList.append(uRow);
+            }
+
+            groupCard.append(objList);
+            target.append(groupCard);
+          }
+        } else {
+          for (var i = 0; i < structured.rows.length; i += 1) {
+            var row = structured.rows[i];
+            if (!isRecord(row)) continue;
+            var line = document.createElement("div");
+            line.className = "readiness-row";
+            var rBadge = document.createElement("span");
+            rBadge.className = "status-badge " + (row.severity === "error" ? "error" : "active");
+            rBadge.textContent = row.severity === "error" ? "阻擋" : "警告";
+            line.append(rBadge);
+            var rText = document.createElement("span");
+            rText.textContent = (firstString(row, ["code"]) || "?") + "： " + (firstString(row, ["message"]) || "");
+            line.append(rText);
+            var detail = document.createElement("span");
+            detail.className = "readiness-hint";
+            var detailParts = [];
+            if (Array.isArray(row.affected) && row.affected.length > 0) {
+              for (var a = 0; a < row.affected.length; a += 1) {
+                var affected = row.affected[a];
+                var affectedLabel = affected.kind + " " + (affected.id ? affected.id.slice(0, 12) : "?");
+                if (affected.character_id) affectedLabel += "（" + affected.character_id + "）";
+                if (affected.requirement_id) affectedLabel += "／" + affected.requirement_id;
+                detailParts.push(affectedLabel);
+              }
+            }
+            if (row.next_action) detailParts.push("下一步：" + row.next_action);
+            detail.textContent = detailParts.join("；");
+            line.append(detail);
+            var rTargets = Array.isArray(row.targets) && row.targets.length > 0
+              ? row.targets.slice()
+              : (row.target !== undefined && row.target !== null ? [row.target] : [{ panel: "readiness" }]);
+            if (rTargets.length > 1) {
+              line.append(makeDiagnosticNavGroup({ targets: rTargets, index: 0, code: row.code }));
+            } else {
+              var rGo = document.createElement("button");
+              rGo.type = "button";
+              rGo.textContent = "前往";
+              rGo.setAttribute("aria-label", "前往受影響物件或面板");
+              var singleTarget = rTargets[0];
+              rGo.addEventListener("click", (function (immutableTarget, immutableCode, buttonElement) {
+                return function () { void revealDiagnosticTarget(immutableTarget, immutableCode, buttonElement); };
+              })(singleTarget, row.code, rGo));
+              line.append(rGo);
+            }
+            target.append(line);
+          }
+        }
+
         if (structured.has_unknown === true) {
           var note = document.createElement("div");
           note.className = "muted";
@@ -1362,6 +1618,8 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
           var operation = visible[j];
           var row = document.createElement("div");
           row.className = "operation-row";
+          row.setAttribute("data-object-kind", "operation");
+          row.setAttribute("data-object-id", operation.id);
           var badge = document.createElement("span");
           badge.className = "status-badge " + statusClass(operation.status || "unknown");
           badge.textContent = firstString(operation, ["status"]) || "?";

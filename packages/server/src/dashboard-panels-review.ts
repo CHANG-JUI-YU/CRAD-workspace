@@ -475,7 +475,7 @@ export const DASHBOARD_PANELS_REVIEW_JS = `      function renderQuality(snapshot
         var runHeading = document.createElement("div");
         runHeading.className = "fact-row";
         if (firstString(latestRun, ["id"])) {
-          runHeading.setAttribute("data-object-kind", "review-run");
+          runHeading.setAttribute("data-object-kind", "review_run");
           runHeading.setAttribute("data-object-id", firstString(latestRun, ["id"]));
         }
         var runBadge = document.createElement("span");
