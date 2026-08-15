@@ -916,7 +916,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
           if (imageIdentity.image_id) {
             var thumb = document.createElement("img");
             thumb.className = "provenance-cover-thumb";
-            thumb.src = "/workspace/images/" + encodeURIComponent(imageIdentity.image_id);
+            setProtectedImageSource(thumb, "/workspace/images/" + encodeURIComponent(imageIdentity.image_id));
             thumb.alt = "封面預覽";
             imgPreview.append(thumb);
           }

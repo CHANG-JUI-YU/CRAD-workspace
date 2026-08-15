@@ -1,12 +1,38 @@
-export const DASHBOARD_API_JS = `      function tokenQuery() {
-        var match = /[?&]token=([^&]+)/u.exec(window.location.search || "");
-        return match ? "?token=" + encodeURIComponent(match[1] || "") : "";
+export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
+
+      function extractInitialToken() {
+        var search = new URLSearchParams(window.location.search || "");
+        var token = search.get("token");
+        if (token !== null && token !== "") {
+          dashboardAuthToken = token;
+          if (window.history && window.history.replaceState) {
+            window.history.replaceState(null, "", window.location.pathname + window.location.hash);
+          }
+        }
+      }
+
+      function authHeaders() {
+        return dashboardAuthToken === null ? {} : { Authorization: "Bearer " + dashboardAuthToken };
       }
 
       async function requestJson(path, options) {
+        var opts = options || { headers: { accept: "application/json" } };
+        var headers = {};
+        var callerHeaders = opts.headers || {};
+        for (var headerName in callerHeaders) {
+          if (Object.prototype.hasOwnProperty.call(callerHeaders, headerName)) {
+            headers[headerName] = callerHeaders[headerName];
+          }
+        }
+        var hasAuthorization = Object.keys(headers).some(function (headerName) {
+          return headerName.toLowerCase() === "authorization";
+        });
+        if (dashboardAuthToken !== null && !hasAuthorization) {
+          headers.Authorization = "Bearer " + dashboardAuthToken;
+        }
         var response;
         try {
-          response = await fetch(path + (path.indexOf("?") >= 0 ? "&" : "?") + tokenQuery().replace(/^\?/u, ""), options || { headers: { accept: "application/json" } });
+          response = await fetch(path, Object.assign({}, opts, { headers: headers }));
         } catch (error) {
           var networkError = new Error("無法連線到本機 server");
           networkError.kind = "network";
@@ -40,6 +66,27 @@ export const DASHBOARD_API_JS = `      function tokenQuery() {
           throw apiError;
         }
         return payload;
+      }
+
+      function setProtectedImageSource(img, endpoint) {
+        if (dashboardAuthToken === null) {
+          img.setAttribute("src", endpoint);
+          return;
+        }
+        fetch(endpoint, { headers: { Authorization: "Bearer " + dashboardAuthToken } })
+          .then(function (response) {
+            if (!response.ok) throw new Error("image request failed: " + response.status);
+            return response.blob();
+          })
+          .then(function (blob) {
+            var objectUrl = URL.createObjectURL(blob);
+            img.setAttribute("src", objectUrl);
+            img.onload = function () { URL.revokeObjectURL(objectUrl); };
+            img.onerror = function () { URL.revokeObjectURL(objectUrl); };
+          })
+          .catch(function () {
+            img.removeAttribute("src");
+          });
       }
 
       function postJson(path, value) {
@@ -148,5 +195,7 @@ export const DASHBOARD_API_JS = `      function tokenQuery() {
         renderLatestError(label, error, "請先完成輸入");
         setNotice("error", message + "下一步：補齊內容後再送出。");
       }
+
+      extractInitialToken();
 
 `;

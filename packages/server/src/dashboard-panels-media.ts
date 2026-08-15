@@ -116,7 +116,7 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
           var row = document.createElement("div");
           row.className = "fact-row";
           var preview = document.createElement("img");
-          preview.setAttribute("src", "/workspace/images/" + (firstString(image, ["id"]) || "") + tokenQuery());
+          setProtectedImageSource(preview, "/workspace/images/" + (firstString(image, ["id"]) || ""));
           preview.setAttribute("alt", "角色圖預覽");
           preview.className = "image-thumb";
           var text = document.createElement("span");

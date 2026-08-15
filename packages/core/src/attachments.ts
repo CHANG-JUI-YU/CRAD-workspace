@@ -3,7 +3,31 @@ import path from "node:path";
 import type { FileProjectRepository } from "./repository/file-project-repository.js";
 import type { OperationAttachmentRef } from "./project-state.js";
 import type { SourceAttachment } from "./core-utilities.js";
-import { CoreError, internalId } from "./core-utilities.js";
+import { contentHash, CoreError, internalId } from "./core-utilities.js";
+
+const SAFE_OPERATION_ID_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
+const MAX_OPERATION_ID_LENGTH = 200;
+
+/**
+ * Maps a caller-controlled operation id onto a single safe path segment.
+ * Ids that are already safe single segments pass through unchanged so existing
+ * legacy directories stay readable; anything that could traverse (separators,
+ * drive/UNC prefixes, dot segments, hidden leading dots, control characters,
+ * overlong values) is replaced by its content hash (fixed 64-hex segment).
+ */
+export function safeOperationIdSegment(operationId: string): string {
+  if (
+    operationId.length > 0
+    && operationId.length <= MAX_OPERATION_ID_LENGTH
+    && operationId !== "."
+    && operationId !== ".."
+    && !operationId.startsWith(".")
+    && SAFE_OPERATION_ID_SEGMENT.test(operationId)
+  ) {
+    return operationId;
+  }
+  return contentHash(operationId);
+}
 
 export interface AttachmentInspectionRef {
   id: string;
@@ -79,10 +103,20 @@ export class FileAttachmentStore implements AttachmentStore {
   }
 
   private directoryFor(operationId: string): string {
-    if (this.repository !== undefined) {
-      return path.join(this.repository.projectDirectory, ".workspace", "attachments", operationId);
+    const root = this.attachmentRoot();
+    const directory = path.resolve(path.join(root, safeOperationIdSegment(operationId)));
+    const resolvedRoot = path.resolve(root);
+    if (directory !== resolvedRoot && !directory.startsWith(resolvedRoot + path.sep)) {
+      throw new CoreError("ATTACHMENT_PATH_ESCAPE", `Attachment path for operation ${operationId} resolves outside the attachment root.`, false);
     }
-    return path.join(this.projectRoot, this.projectId, ".workspace", "attachments", operationId);
+    return directory;
+  }
+
+  private attachmentRoot(): string {
+    if (this.repository !== undefined) {
+      return path.join(this.repository.projectDirectory, ".workspace", "attachments");
+    }
+    return path.join(this.projectRoot, this.projectId, ".workspace", "attachments");
   }
 
   async save(operationId: string, attachments: readonly SourceAttachment[]): Promise<OperationAttachmentRef[]> {
