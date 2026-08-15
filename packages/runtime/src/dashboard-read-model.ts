@@ -155,6 +155,7 @@ export interface DashboardSummary {
   };
   latest_publish?: DashboardPublishView;
   latest_build?: DashboardBuildView;
+  latest_review_run?: DashboardReviewRunView;
   kpis?: SummaryKPIs;
   repair: { plan_hash: string; item_count: number; recoverable_count: number };
 }
@@ -446,24 +447,49 @@ function includesText(value: string, search: string | undefined): boolean {
   return search === undefined || value.toLocaleLowerCase().includes(search.toLocaleLowerCase());
 }
 
-function cursorFor(offset: number): string {
-  return `cursor:${Buffer.from(JSON.stringify({ offset }), "utf8").toString("base64url")}`;
+function cursorFor(offset: number, context: DashboardPageContext, filter: string | undefined): string {
+  return `cursor:${Buffer.from(JSON.stringify({ v: 2, offset, collection: context.collection, sort: "newest", filter: filter ?? null, revision: context.revision }), "utf8").toString("base64url")}`;
 }
 
-function offsetFor(cursor: string | undefined): number {
-  if (cursor === undefined) return 0;
+interface DashboardPageContext {
+  collection: string;
+  revision: number;
+}
+
+function cursorStateFor(cursor: string | undefined): { offset: number; collection: string; sort: string; filter: string | null; revision: number } | undefined {
+  if (cursor === undefined) return undefined;
   if (!cursor.startsWith("cursor:")) throw new CoreError("DASHBOARD_CURSOR_INVALID", "Dashboard cursor is invalid", true);
+  let value: { v?: unknown; offset?: unknown; collection?: unknown; sort?: unknown; filter?: unknown; revision?: unknown };
   try {
-    const value = JSON.parse(Buffer.from(cursor.slice("cursor:".length), "base64url").toString("utf8")) as { offset?: unknown };
-    if (typeof value.offset !== "number" || !Number.isInteger(value.offset) || value.offset < 0) throw new Error("invalid offset");
-    return value.offset;
+    value = JSON.parse(Buffer.from(cursor.slice("cursor:".length), "base64url").toString("utf8")) as typeof value;
   } catch {
     throw new CoreError("DASHBOARD_CURSOR_INVALID", "Dashboard cursor is invalid", true);
   }
+  if (value.v !== 2 || typeof value.offset !== "number" || !Number.isInteger(value.offset) || value.offset < 0 || typeof value.collection !== "string" || typeof value.sort !== "string" || (value.filter !== null && typeof value.filter !== "string") || typeof value.revision !== "number" || !Number.isInteger(value.revision) || value.revision < 0) {
+    throw new CoreError("DASHBOARD_CURSOR_INVALID", "Dashboard cursor is no longer supported; restart pagination from the first page", true);
+  }
+  return { offset: value.offset, collection: value.collection, sort: value.sort, filter: value.filter, revision: value.revision };
 }
 
-export function page<T>(items: readonly T[], query?: DashboardQuery): DashboardPage<T> {
-  const offset = offsetFor(query?.cursor);
+function checkCursorContext(cursor: string | undefined, context: DashboardPageContext, filter: string | null | undefined): number {
+  const state = cursorStateFor(cursor);
+  if (state === undefined) return 0;
+  if (state.collection !== context.collection || state.sort !== "newest" || state.filter !== (filter ?? null)) {
+    throw new CoreError("DASHBOARD_CURSOR_INVALID", "Dashboard cursor does not match the requested query; restart pagination", true);
+  }
+  if (state.revision !== context.revision) {
+    throw new CoreError("DASHBOARD_CURSOR_STALE", "The project state changed since this cursor was issued; restart pagination from the first page", true);
+  }
+  return state.offset;
+}
+
+function filterToken(filter: DashboardFilter | undefined): string | null {
+  return filter === undefined ? null : JSON.stringify(filter);
+}
+
+export function page<T>(items: readonly T[], query: DashboardQuery | undefined, context: DashboardPageContext): DashboardPage<T> {
+  const filter = filterToken(query?.filter);
+  const offset = checkCursorContext(query?.cursor, context, filter);
   const limit = Math.min(Math.max(query?.limit ?? DASHBOARD_PAGE_LIMIT, 1), DASHBOARD_MAX_PAGE_LIMIT);
   const selected = items.slice(offset, offset + limit);
   const nextOffset = offset + selected.length;
@@ -472,8 +498,17 @@ export function page<T>(items: readonly T[], query?: DashboardQuery): DashboardP
     total: items.length,
     limit,
     ...(query?.cursor === undefined ? {} : { cursor: query.cursor }),
-    ...(nextOffset < items.length ? { next_cursor: cursorFor(nextOffset) } : {}),
+    ...(nextOffset < items.length ? { next_cursor: cursorFor(nextOffset, context, filter ?? undefined) } : {}),
   };
+}
+
+export function sortByNewest<T extends { id: string }>(items: readonly T[], timeKey: (item: T) => string | undefined): T[] {
+  return [...items].sort((a, b) => {
+    const ta = timeKey(a) ?? "";
+    const tb = timeKey(b) ?? "";
+    if (ta !== tb) return ta < tb ? 1 : -1;
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  });
 }
 
 function errorClasses(state: ProjectState): Map<string, "recoverable" | "fatal"> {
@@ -790,6 +825,7 @@ export function buildDashboardSummary(state: ProjectState, repair: RepairInspect
   const manifest = buildRequiredArtifactManifest(state);
   const latestPublish = state.publishes.at(-1);
   const latestBuild = state.builds.at(-1);
+  const latestRun = latestReviewRun(state);
   const recordedImageIdentity = latestBuild?.provenance_summary?.image_identity ?? latestPublish?.provenance_summary?.image_identity;
   const imageFreshness = latestPublish === undefined
     ? { status: "unknown" as const, reason: "尚未發布。" }
@@ -884,6 +920,7 @@ export function buildDashboardSummary(state: ProjectState, repair: RepairInspect
     },
     ...(latestPublish === undefined ? {} : { latest_publish: mapPublish(latestPublish) }),
     ...(latestBuild === undefined ? {} : { latest_build: mapBuild(latestBuild) }),
+    ...(latestRun === undefined ? {} : { latest_review_run: latestRun }),
     kpis: deriveSummaryKPIs(state),
     repair: {
       plan_hash: repair.plan_hash,
@@ -911,7 +948,7 @@ export function queryDashboardArtifacts(state: ProjectState, options: DashboardA
     if (filter?.character_id !== undefined && !artifact.key.includes(filter.character_id)) return false;
     return includesText(`${artifact.key} ${artifact.name} ${artifact.kind}`, filter?.search);
   });
-  return page(artifacts.map((artifact) => mapArtifact(artifact, currentIds)), options.query);
+  return page(sortByNewest(artifacts, (artifact) => artifact.created_at).map((artifact) => mapArtifact(artifact, currentIds)), options.query, { collection: "artifacts", revision: state.revision });
 }
 
 export function dashboardArtifactDetail(state: ProjectState, id: string, revision?: string): DashboardArtifactDetail | undefined {
@@ -927,7 +964,7 @@ export function queryDashboardArtifactHistory(state: ProjectState, keyOrId: stri
   const key = artifact?.key ?? keyOrId;
   const currentIds = currentArtifactIds(state);
   const history = state.artifacts.filter((candidate) => candidate.key === key).map((candidate) => mapArtifact(candidate, currentIds));
-  return page(history, query);
+  return page(sortByNewest(history, (candidate) => candidate.created_at), query, { collection: "artifact-history", revision: state.revision });
 }
 
 export function queryDashboardFacts(state: ProjectState, options: DashboardFactQuery = {}): DashboardPage<DashboardFactView> {
@@ -940,7 +977,7 @@ export function queryDashboardFacts(state: ProjectState, options: DashboardFactQ
     if (filter?.subject !== undefined && fact.subject !== filter.subject) return false;
     return includesText(`${fact.statement} ${fact.subject ?? ""} ${fact.predicate ?? ""} ${fact.value ?? ""}`, filter?.search);
   });
-  return page(facts.map((fact) => mapFact(state, fact)), options.query);
+  return page(sortByNewest(facts, (fact) => fact.updated_at ?? fact.created_at).map((fact) => mapFact(state, fact)), options.query, { collection: "facts", revision: state.revision });
 }
 
 export function queryDashboardSources(state: ProjectState, options: DashboardSourceQuery = {}): DashboardPage<DashboardSourceView> {
@@ -951,7 +988,7 @@ export function queryDashboardSources(state: ProjectState, options: DashboardSou
     if (filter?.official !== undefined && candidate?.official !== filter.official) return false;
     return includesText(`${source.title} ${source.original_name ?? ""}`, filter?.search);
   });
-  return page(sources.map((source) => mapSource(state, source)), options.query);
+  return page(sortByNewest(sources, (source) => source.created_at).map((source) => mapSource(state, source)), options.query, { collection: "sources", revision: state.revision });
 }
 
 export function queryDashboardCandidates(state: ProjectState, options: DashboardSourceQuery = {}): DashboardPage<DashboardCandidateView> {
@@ -962,7 +999,7 @@ export function queryDashboardCandidates(state: ProjectState, options: Dashboard
     if (filter?.official !== undefined && candidate.official !== filter.official) return false;
     return includesText(`${candidate.title} ${candidate.url ?? ""} ${candidate.domain ?? ""}`, filter?.search);
   });
-  return page(candidates.map(mapCandidate), options.query);
+  return page(sortByNewest(candidates, (candidate) => candidate.approved_at ?? candidate.source_revision ?? "").map(mapCandidate), options.query, { collection: "candidates", revision: state.revision });
 }
 
 export function dashboardSourceDetail(state: ProjectState, id: string): DashboardSourceView | undefined {
@@ -983,7 +1020,7 @@ export function queryDashboardOperations(state: ProjectState, options: Dashboard
     if (filter?.kind !== undefined && operation.kind !== filter.kind) return false;
     return includesText(`${operation.kind} ${operation.request} ${operation.actor ?? ""}`, filter?.search);
   });
-  return page(operations.map((operation) => mapOperation(operation, classes)), options.query);
+  return page(sortByNewest(operations, (operation) => operation.created_at).map((operation) => mapOperation(operation, classes)), options.query, { collection: "operations", revision: state.revision });
 }
 
 export function dashboardOperationDetail(state: ProjectState, id: string): DashboardOperationDetail | undefined {
@@ -999,7 +1036,7 @@ export function queryDashboardAudit(state: ProjectState, options: DashboardAudit
     if (filter?.actor !== undefined && event.actor !== filter.actor) return false;
     return includesText(`${event.event} ${event.actor} ${event.operation_id}`, filter?.search);
   });
-  return page(events.map((event: AuditEvent) => ({
+  return page(sortByNewest(events, (event) => event.occurred_at).map((event: AuditEvent) => ({
     id: event.id,
     operation_id: event.operation_id,
     event: event.event,
@@ -1007,7 +1044,7 @@ export function queryDashboardAudit(state: ProjectState, options: DashboardAudit
     occurred_at: event.occurred_at,
     project_revision: event.project_revision,
     details: event.details,
-  })), options.query);
+  })), options.query, { collection: "audit", revision: state.revision });
 }
 
 export function queryDashboardIssues(state: ProjectState, options: DashboardIssueQuery = {}): DashboardPage<DashboardIssueView> {
@@ -1018,7 +1055,7 @@ export function queryDashboardIssues(state: ProjectState, options: DashboardIssu
     if (filter?.severity !== undefined && issue.effective_severity !== filter.severity) return false;
     return includesText(`${issue.code} ${issue.message}`, filter?.search);
   });
-  return page(issues.map(mapIssue), options.query);
+  return page(sortByNewest(issues, (issue) => issue.created_at).map(mapIssue), options.query, { collection: "issues", revision: state.revision });
 }
 
 export function queryDashboardReviews(state: ProjectState, options: DashboardReviewQuery = {}): DashboardPage<DashboardReviewView> {
@@ -1029,7 +1066,7 @@ export function queryDashboardReviews(state: ProjectState, options: DashboardRev
     if (filter?.status !== undefined && review.status !== filter.status) return false;
     return true;
   });
-  return page(reviews.map(mapReview), options.query);
+  return page(sortByNewest(reviews, (review) => review.created_at).map(mapReview), options.query, { collection: "reviews", revision: state.revision });
 }
 
 export function queryDashboardPublishes(state: ProjectState, options: DashboardPublishQuery = {}): DashboardPage<DashboardPublishView> {
@@ -1038,7 +1075,7 @@ export function queryDashboardPublishes(state: ProjectState, options: DashboardP
     if (filter?.operation_id !== undefined && publish.operation_id !== filter.operation_id) return false;
     return includesText(`${publish.id} ${publish.content_hash}`, filter?.search);
   });
-  return page(publishes.map(mapPublish), options.query);
+  return page(sortByNewest(publishes, (publish) => publish.created_at).map(mapPublish), options.query, { collection: "publishes", revision: state.revision });
 }
 
 export function queryDashboardBuilds(state: ProjectState, options: DashboardBuildQuery = {}): DashboardPage<DashboardBuildView> {
@@ -1048,7 +1085,7 @@ export function queryDashboardBuilds(state: ProjectState, options: DashboardBuil
     if (filter?.status !== undefined && build.status !== filter.status) return false;
     return true;
   });
-  return page(builds.map(mapBuild), options.query);
+  return page(sortByNewest(builds, (build) => build.created_at).map(mapBuild), options.query, { collection: "builds", revision: state.revision });
 }
 
 export function queryDashboardReviewRuns(state: ProjectState, options: DashboardReviewRunQuery = {}): DashboardPage<DashboardReviewRunView> {
@@ -1059,7 +1096,12 @@ export function queryDashboardReviewRuns(state: ProjectState, options: Dashboard
     if (filter?.curation_run_id !== undefined && run.curation_run_id !== filter.curation_run_id) return false;
     return true;
   });
-  return page(runs.map((run) => mapReviewRun(state, run)), options.query);
+  return page(sortByNewest(runs, (run) => run.created_at).map((run) => mapReviewRun(state, run)), options.query, { collection: "review-runs", revision: state.revision });
+}
+
+export function latestReviewRun(state: ProjectState): DashboardReviewRunView | undefined {
+  const sorted = sortByNewest(state.fact_review_runs, (run) => run.created_at);
+  return sorted.length === 0 ? undefined : mapReviewRun(state, sorted[0]!);
 }
 
 export function dashboardReviewRunDetail(state: ProjectState, id: string): DashboardReviewRunDetail | undefined {

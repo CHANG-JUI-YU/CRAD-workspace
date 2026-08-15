@@ -241,9 +241,17 @@ export const DASHBOARD_MARKUP = `<body>
         <button id="load-source-facts" type="button">載入來源與事實</button>
       </div>
       <div id="source-fact-message" class="panel-message" aria-live="polite">尚未取得來源與事實資料。</div>
+      <p class="muted" id="candidates-count" aria-live="polite"></p>
+      <button id="candidates-more" type="button" aria-label="載入更多候選來源">載入更多</button>
       <div id="candidate-list" class="candidate-list"></div>
+      <p class="muted" id="sources-count" aria-live="polite"></p>
+      <button id="sources-more" type="button" aria-label="載入更多來源">載入更多</button>
       <div id="source-list" class="source-list"></div>
+      <p class="muted" id="facts-count" aria-live="polite"></p>
+      <button id="facts-more" type="button" aria-label="載入更多事實">載入更多</button>
       <div id="fact-list" class="fact-list"></div>
+      <p class="muted" id="runs-count" aria-live="polite"></p>
+      <button id="runs-more" type="button" aria-label="載入更多審查回合">載入更多</button>
       <div id="fact-review-run" class="fact-list"></div>
       <div class="coverage-center-heading">
         <h3 id="evidence-heading">Fact Review 證據上下文</h3>

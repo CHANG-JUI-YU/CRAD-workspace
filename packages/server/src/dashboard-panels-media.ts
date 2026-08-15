@@ -346,6 +346,9 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
         }
       }
 
+      var currentLatestReviewRun = null;
+      var currentSfCollections = null;
+
       async function loadArtifactData() {
         try {
           var pages = await Promise.all([
@@ -357,6 +360,7 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
           renderArtifactList({
             items: Array.isArray(artifactPage.items) ? artifactPage.items : [],
             total: artifactPage.total,
+            next_cursor: artifactPage.next_cursor,
             reviews: Array.isArray(reviewPage.items) ? reviewPage.items : []
           });
           return artifactPage;
@@ -377,25 +381,48 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
         }
       }
 
+      function renderSourceFactCollections() {
+        if (currentSfCollections === null) return;
+        var latestRun = null;
+        if (currentLatestReviewRun !== null && currentLatestReviewRun !== undefined && firstString(currentLatestReviewRun, ["id"])) {
+          latestRun = currentLatestReviewRun;
+        }
+        renderSourceFact({
+          candidates: currentSfCollections.candidates.items,
+          sources: currentSfCollections.sources.items,
+          facts: currentSfCollections.facts.items,
+          review_runs: currentSfCollections.runs.items,
+          latest_review_run: latestRun,
+          collection_counts: {
+            candidates: collectionCountText(currentSfCollections.candidates),
+            sources: collectionCountText(currentSfCollections.sources),
+            facts: collectionCountText(currentSfCollections.facts),
+            runs: collectionCountText(currentSfCollections.runs)
+          }
+        });
+        collectionMoreButton(currentSfCollections.candidates, "/workspace/dashboard/candidates", renderSourceFactCollections, "candidates-more", "candidates-count");
+        collectionMoreButton(currentSfCollections.sources, "/workspace/dashboard/sources", renderSourceFactCollections, "sources-more", "sources-count");
+        collectionMoreButton(currentSfCollections.facts, "/workspace/dashboard/facts", renderSourceFactCollections, "facts-more", "facts-count");
+        collectionMoreButton(currentSfCollections.runs, "/workspace/dashboard/fact-review/runs", renderSourceFactCollections, "runs-more", "runs-count");
+      }
+
       async function loadSourceFactData() {
         try {
+          var sfCandidates = collectionController();
+          var sfSources = collectionController();
+          var sfFacts = collectionController();
+          var sfRuns = collectionController();
+          currentSfCollections = { candidates: sfCandidates, sources: sfSources, facts: sfFacts, runs: sfRuns };
           var pages = await Promise.all([
-            requestJson("/workspace/dashboard/candidates?limit=50"),
-            requestJson("/workspace/dashboard/sources?limit=50"),
-            requestJson("/workspace/dashboard/facts?limit=100"),
-            requestJson("/workspace/dashboard/fact-review/runs?limit=20")
+            collectionResetAndFetch(sfCandidates, "/workspace/dashboard/candidates", function () { return null; }),
+            collectionResetAndFetch(sfSources, "/workspace/dashboard/sources", function () { return null; }),
+            collectionResetAndFetch(sfFacts, "/workspace/dashboard/facts", function () { return null; }),
+            collectionResetAndFetch(sfRuns, "/workspace/dashboard/fact-review/runs", function () { return null; })
           ]);
-          var runs = Array.isArray(pages[3].items) ? pages[3].items : [];
-          if (runs.length > 0 && firstString(runs[runs.length - 1], ["id"])) {
-            var runDetail = await requestJson("/workspace/dashboard/fact-review/runs/" + encodeURIComponent(firstString(runs[runs.length - 1], ["id"])));
-            runs[runs.length - 1] = runDetail;
+          if (currentLatestReviewRun !== null && currentLatestReviewRun !== undefined && firstString(currentLatestReviewRun, ["id"])) {
+            currentLatestReviewRun = await requestJson("/workspace/dashboard/fact-review/runs/" + encodeURIComponent(firstString(currentLatestReviewRun, ["id"])));
           }
-          renderSourceFact({
-            candidates: Array.isArray(pages[0].items) ? pages[0].items : [],
-            sources: Array.isArray(pages[1].items) ? pages[1].items : [],
-            facts: Array.isArray(pages[2].items) ? pages[2].items : [],
-            review_runs: runs
-          });
+          renderSourceFactCollections();
           void loadCoverageCenterData();
           void loadEvidenceData();
           return pages;
@@ -419,6 +446,7 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
       async function loadDashboardData() {
         try {
           var payload = await requestJson("/workspace/dashboard/data");
+          currentLatestReviewRun = payload.latest_review_run === undefined || payload.latest_review_run === null ? null : payload.latest_review_run;
           renderPrecheckMatrix(payload.prechecks);
           renderQuality(payload);
           renderImageList(payload.images, payload.roster, payload.primary_character_id);

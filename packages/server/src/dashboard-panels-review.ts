@@ -460,7 +460,7 @@ export const DASHBOARD_PANELS_REVIEW_JS = `      function renderQuality(snapshot
         }
         var runTarget = byId("fact-review-run");
         runTarget.textContent = "";
-        var latestRun = runs.length > 0 ? runs[runs.length - 1] : undefined;
+        var latestRun = snapshot.latest_review_run !== undefined && snapshot.latest_review_run !== null ? snapshot.latest_review_run : (runs.length > 0 ? runs[0] : undefined);
         if (!isRecord(latestRun)) {
           runTarget.textContent = "尚未建立事實 Review Run。";
           var startButton = document.createElement("button");
