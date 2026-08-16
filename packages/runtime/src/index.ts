@@ -237,7 +237,7 @@ import { authoringKnowledgeContext as authoringKnowledgeContextQuery, templateCo
 import { dashboardSnapshot as dashboardSnapshotQuery, publishPreview as publishPreviewQuery, buildReadiness as buildReadinessQuery, tavernCompat as tavernCompatQuery, repairPreview as repairPreviewQuery, repairRun as repairRunQuery } from "./build-application.js";
 import { dashboardArtifacts as dashboardArtifactsQuery, dashboardArtifact as dashboardArtifactQuery, dashboardArtifactHistory as dashboardArtifactHistoryQuery, dashboardAudit as dashboardAuditQuery, dashboardBuilds as dashboardBuildsQuery, dashboardCandidates as dashboardCandidatesQuery, dashboardFacts as dashboardFactsQuery, dashboardIssues as dashboardIssuesQuery, dashboardOperation as dashboardOperationQuery, dashboardOperations as dashboardOperationsQuery, dashboardPublishes as dashboardPublishesQuery, dashboardReviewRun as dashboardReviewRunQuery, dashboardReviewRuns as dashboardReviewRunsQuery, dashboardReviews as dashboardReviewsQuery, dashboardSource as dashboardSourceQuery, dashboardSources as dashboardSourcesQuery, dashboardSummary as dashboardSummaryQuery, dashboardCandidate as dashboardCandidateQuery } from "./dashboard-query.js";
 import { applyFactReviewBatch as applyFactReviewBatchQuery, factReviewContext as factReviewContextQuery, reextract as reextractQuery, resolveFactConflict as resolveFactConflictQuery, startFactReviewRun as startFactReviewRunQuery } from "./fact-review-application.js";
-import { buildBlueprintPrecheck, collaborationMode, createBlueprintArtifact, directionForSubject, intakeKeyForConfirmation, interviewCharacterSubjects, interviewContext as interviewContextQuery, isBarePrecheckConfirmation, isBlueprintConfirmation, isBlueprintRevisionRequest, latestBlueprintSnapshot, mergeExpansionIntoBlueprint, mergePatchBlueprint, mergeWorldIntoBlueprint, nonEmptyInterviewValue, nonEmptyString, objectValue, PALETTE_MODULE_ORDER, parsePrecheckConfirmQuestionId, precheckConfirmQuestion, precheckSubjectLabel, sourceAdaptationIntentFromValues, sourceFactsReady, startInterview as startInterviewQuery, worldConfig, isSourceAdaptationProject, relationshipConfig, authoringModeForSubject, canonPolicyFromValues, ZHUJI_MODULE_ORDER } from "./interview-application.js";
+import { buildBlueprintPrecheck, collaborationMode, createBlueprintArtifact, directionForSubject, intakeKeyForConfirmation, interviewCharacterSubjects, interviewContext as interviewContextQuery, interviewAmendmentImpactPreview as interviewAmendmentImpactPreviewQuery, amendInterviewAnswer as amendInterviewAnswerQuery, isBarePrecheckConfirmation, isBlueprintConfirmation, isBlueprintRevisionRequest, latestBlueprintSnapshot, mergeExpansionIntoBlueprint, mergePatchBlueprint, mergeWorldIntoBlueprint, nonEmptyInterviewValue, nonEmptyString, objectValue, PALETTE_MODULE_ORDER, parsePrecheckConfirmQuestionId, precheckConfirmQuestion, precheckSubjectLabel, sourceAdaptationIntentFromValues, sourceFactsReady, startInterview as startInterviewQuery, worldConfig, isSourceAdaptationProject, relationshipConfig, authoringModeForSubject, canonPolicyFromValues, ZHUJI_MODULE_ORDER } from "./interview-application.js";
 import { availableCardModesRuntime, blueprintRosterIds, executionLeaseGuard, latestByKey, now, OPERATION_LEASE_MS, parsedModeModules, parseBuildModeSelection, reconstructPublishOutcome, responseFromOperation, stripLease } from "./operation-runner.js";
 import { defaultAgentForTemplate, nextFactReviewer, pluginIdOf, proposalCapability, resolveNaturalReviewTarget, reviewCriticForArtifactKind } from "./operation-recovery.js";
 import { createAdaptationDecision as createAdaptationDecisionQuery, executionContextFor as executionContextForQuery, resolveExecutionContext as resolveExecutionContextQuery, selectSourceCandidates as selectSourceCandidatesQuery, sourceCandidates as sourceCandidatesQuery } from "./source-application.js";
@@ -547,8 +547,18 @@ export class WorkspaceRuntime {
     values: InterviewState["values"];
     characters?: InterviewState["characters"];
     active_character_id?: string;
+    revision: number;
+    history: import("./interview-application.js").InterviewHistoryEntry[];
   }> {
     return interviewContextQuery({ repository: this.repository });
+  }
+
+  async interviewAmendmentImpactPreview(input: { question_id: string; answer: string }): Promise<import("./interview-application.js").InterviewAmendmentPreviewResult> {
+    return interviewAmendmentImpactPreviewQuery({ repository: this.repository }, input);
+  }
+
+  async amendInterviewAnswer(input: { question_id: string; answer: string }, context: WorkspaceContext): Promise<import("./interview-application.js").InterviewAmendmentResult> {
+    return amendInterviewAnswerQuery({ repository: this.repository }, input, context);
   }
 
   private async startInterview(request: string, context: WorkspaceContext): Promise<RequestResult> {

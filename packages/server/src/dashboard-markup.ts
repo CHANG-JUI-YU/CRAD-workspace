@@ -92,7 +92,15 @@ export const DASHBOARD_MARKUP = `<body>
       <div class="panel-heading">
         <div>
           <h2 id="interview-heading">結構化訪談</h2>
-          <p class="muted">一次回答目前這一題；有選項時可直接點選，也可以用文字回答。</p>
+          <p class="muted">一次回答目前這一題；有選項時可直接點選，也可以用文字回答。輸入中途會自動保留草稿。</p>
+        </div>
+      </div>
+      <div id="external-change-notice" class="external-change-notice" hidden>
+        <div class="external-change-notice-text" aria-live="polite"></div>
+        <div class="form-actions">
+          <button id="draft-discard" class="danger" type="button">捨棄草稿</button>
+          <button id="draft-review" type="button">檢視草稿</button>
+          <button id="draft-refresh" class="primary" type="button">重新整理</button>
         </div>
       </div>
       <div id="interview-message" class="panel-message" aria-live="polite">正在讀取訪談內容…</div>
@@ -111,6 +119,23 @@ export const DASHBOARD_MARKUP = `<body>
       <div class="form-actions">
         <button id="submit-interview" class="primary" type="button">送出回答</button>
       </div>
+      <details id="interview-history-details">
+        <summary>訪談答案歷史（可修訂）</summary>
+        <div id="interview-history" class="interview-history" aria-live="polite"></div>
+        <div id="amend-area" class="amend-area" hidden>
+          <h4 id="amend-question-title">修訂訪談答案</h4>
+          <div id="amend-question-text" class="muted"></div>
+          <label for="amend-answer-input">新的回答</label>
+          <textarea id="amend-answer-input" placeholder="輸入修訂後的回答"></textarea>
+          <div id="amend-impact" class="amend-impact" aria-live="polite"></div>
+          <div id="amend-message" class="panel-message" aria-live="polite"></div>
+          <div class="form-actions">
+            <button id="amend-cancel" type="button">取消</button>
+            <button id="amend-preview" type="button">預覽影響</button>
+            <button id="amend-confirm" class="primary" type="button" disabled>確認修訂</button>
+          </div>
+        </div>
+      </details>
       <details class="raw-json">
         <summary>查看訪談原始 JSON</summary>
         <pre id="interview-json">{}</pre>

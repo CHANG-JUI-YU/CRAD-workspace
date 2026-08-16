@@ -42,6 +42,16 @@ export interface InterviewAnswer {
   answer: string;
   actor: string;
   occurred_at: string;
+  /** Set on the original answer when a later amendment supersedes it. */
+  superseded_by?: { question_id: string; occurred_at: string };
+  /** Set on amendment answers; points to the answer being replaced. */
+  amendment_of?: { question_id: string; occurred_at: string };
+}
+
+export interface InterviewAmendmentInput {
+  question_id: string;
+  answer: string;
+  actor: string;
 }
 
 export interface InterviewState {
@@ -789,3 +799,86 @@ export const workflow_answer_interview = (state: InterviewState, input: Intervie
 
 /** Backward-compatible camelCase alias for callers using the v2 naming convention. */
 export const workflowAnswerInterview = workflow_answer_interview;
+
+export interface ReplayResult {
+  state: InterviewState;
+  /** Question captured for each answered question id during replay. */
+  questions: Record<string, InterviewQuestion>;
+}
+
+/**
+ * Deterministic replay of an interview from its recorded answers. Every step
+ * is validated against the current question logic; any inconsistency yields
+ * undefined so callers can treat the record as legacy and refuse to amend it.
+ */
+export const replayInterviewState = (answers: readonly InterviewAnswer[]): ReplayResult | undefined => {
+  // Amendments are records of replaced answers, not additional flow steps.
+  // Replay flattens them: every amendment's answer replaces the current
+  // answer of its question in-place, so the effective step count matches the
+  // interview flow regardless of how many times a question was amended.
+  const replacements = new Map<string, InterviewAnswer>();
+  for (const item of answers) {
+    if (item.amendment_of !== undefined) replacements.set(item.amendment_of.question_id, item);
+  }
+  const effective = answers
+    .filter((item) => item.amendment_of === undefined)
+    .map((item) => replacements.get(item.question_id) ?? item);
+  let state: InterviewState = beginInterview(createInterviewState());
+  const questions: Record<string, InterviewQuestion> = {};
+  try {
+    for (const item of effective) {
+      if (state.status !== "active" || state.current === undefined) return undefined;
+      if (questions[state.current.id] === undefined) questions[state.current.id] = state.current;
+      state = workflow_answer_interview(state, { answer: item.answer, actor: item.actor });
+    }
+  } catch {
+    return undefined;
+  }
+  return { state, questions };
+};
+
+/**
+ * Amend an already answered interview question. The original answer is never
+ * rewritten: an append-only amendment record supersedes it and the interview
+ * is replayed deterministically so status, current question, values and
+ * per-character state are recomputed from the new answer list.
+ */
+export const amendInterviewAnswer = (state: InterviewState, input: InterviewAmendmentInput): InterviewState => {
+  if (state.answers.length === 0) {
+    throw new InterviewError("INTERVIEW_ANSWER_NOT_FOUND", "訪談中沒有可修訂的答案。", true);
+  }
+  const original = state.answers
+    .filter((item) => item.question_id === input.question_id && item.superseded_by === undefined)
+    .at(-1);
+  if (original === undefined) {
+    throw new InterviewError("INTERVIEW_ANSWER_NOT_FOUND", `找不到問題「${input.question_id}」的現行答案，無法修訂。`, true);
+  }
+  const replayed = replayInterviewState(state.answers);
+  if (replayed === undefined) {
+    throw new InterviewError("INTERVIEW_AMENDMENT_REPLAY_FAILED", "此訪談紀錄無法安全重放，可能是舊版流程資料；為避免改寫歷史，不可修訂。", true);
+  }
+  const question = replayed.questions[input.question_id];
+  if (question === undefined) {
+    throw new InterviewError("INTERVIEW_ANSWER_NOT_FOUND", `問題「${input.question_id}」無法在重放流程中定位，不可修訂。`, true);
+  }
+  const recorded = recordInterviewAnswer(question, input.answer, input.actor);
+  if (recorded.answer === original.answer) return state;
+  const amendment: InterviewAnswer = {
+    question_id: input.question_id,
+    answer: recorded.answer,
+    actor: input.actor,
+    occurred_at: now(),
+    amendment_of: { question_id: original.question_id, occurred_at: original.occurred_at },
+  };
+  const answers = [
+    ...state.answers.map((item) => item === original ? { ...item, superseded_by: { question_id: amendment.question_id, occurred_at: amendment.occurred_at } } : item),
+    amendment,
+  ];
+  const replayedAfter = replayInterviewState(answers);
+  if (replayedAfter === undefined) {
+    throw new InterviewError("INTERVIEW_AMENDMENT_REPLAY_FAILED", "修訂後的答案無法通過訪談流程重放驗證；請確認回答符合該問題的選項或格式。", true);
+  }
+  // The replay recomputes status, values and the current question, but the
+  // append-only record (with superseded_by/amendment_of markers) is kept.
+  return { ...replayedAfter.state, answers };
+};

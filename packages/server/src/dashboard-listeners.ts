@@ -288,6 +288,22 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
       byId("submit-interview").addEventListener("click", function () {
         submitInterviewAnswer(byId("interview-answer-input").value);
       });
+      byId("interview-answer-input").addEventListener("input", function () {
+        cradDraftStore.saveDraft("interview", byId("interview-answer-input").value, state.interviewRevision);
+      });
+      byId("request-input").addEventListener("input", function () {
+        cradDraftStore.saveDraft("request", byId("request-input").value, state.interviewRevision);
+      });
+      byId("amend-answer-input").addEventListener("input", function () {
+        if (state.amendQuestionId === null) return;
+        cradDraftStore.saveDraft("interview_amend", byId("amend-answer-input").value, state.interviewRevision, state.amendQuestionId);
+      });
+      byId("amend-preview").addEventListener("click", previewInterviewAmend);
+      byId("amend-confirm").addEventListener("click", confirmInterviewAmend);
+      byId("amend-cancel").addEventListener("click", cancelInterviewAmend);
+      byId("draft-discard").addEventListener("click", discardAllDrafts);
+      byId("draft-review").addEventListener("click", reviewDrafts);
+      byId("draft-refresh").addEventListener("click", function () { void refresh(); });
       byId("project-select").addEventListener("change", updateControls);
       byId("load-coverage").addEventListener("click", function () { void runTask("載入覆蓋矩陣", loadCoverageCenterData); });
       byId("load-workflow").addEventListener("click", function () { void runTask("載入工作流程", loadWorkflowData); });

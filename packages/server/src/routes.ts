@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { CoreError, internalId, z, type AdaptationDecision, type RequestResult } from "@st-workspace/core";
-import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverageResearchCandidatesInputSchema, coverageResearchClaimInputSchema, coverageResearchExhaustInputSchema, coverageResearchRecoverInputSchema, coverageResearchStartInputSchema, coverageResearchStartPreviewInputSchema, coverageResolutionConfirmInputSchema, coverageResolutionPreviewInputSchema, coverageSupplementInputSchema, decodeAttachments, factReviewBatchInputSchema, coverSelectInputSchema, imageInputSchema, imageRemoveInputSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, publishProvenanceConfirmSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
+import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverageResearchCandidatesInputSchema, coverageResearchClaimInputSchema, coverageResearchExhaustInputSchema, coverageResearchRecoverInputSchema, coverageResearchStartInputSchema, coverageResearchStartPreviewInputSchema, coverageResolutionConfirmInputSchema, coverageResolutionPreviewInputSchema, coverageSupplementInputSchema, decodeAttachments, factReviewBatchInputSchema, coverSelectInputSchema, imageInputSchema, imageRemoveInputSchema, interviewAmendPreviewSchema, interviewAmendSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, publishProvenanceConfirmSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
 import { type AgentAdapter, type WorkspaceProjectManager, type WorkspaceRuntime, type WorkspaceWorker } from "@st-workspace/runtime";
 import { structuredError } from "./errors.js";
 import { body, compact, dashboardPathId, dashboardQuery, json, parseRequest } from "./http-utils.js";
@@ -326,6 +326,18 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
           ? await (await deps.getRuntime()).answerInterview(answer, { actor: deps.actor, attachments: [] })
           : await deps.projectManager.answerInterview(answer, { actor: deps.actor, attachments: [] });
         json(response, 200, result);
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/interview/amend-preview") {
+        const parsed = await body(request);
+        const input = parseRequest(interviewAmendPreviewSchema, parsed, "INTERVIEW_AMEND_PREVIEW_REQUIRED");
+        json(response, 200, await (await deps.getRuntime()).interviewAmendmentImpactPreview(input));
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/interview/amend") {
+        const parsed = await body(request);
+        const input = parseRequest(interviewAmendSchema, parsed, "INTERVIEW_AMEND_REQUIRED");
+        json(response, 200, await (await deps.getRuntime()).amendInterviewAnswer(input, { actor: deps.actor, attachments: [] }));
         return true;
       }
       if (request.method === "POST" && url.pathname === "/workspace/source/select") {

@@ -69,6 +69,18 @@ export const answerSchema = z.object({
 }).strict();
 export type AnswerInput = z.infer<typeof answerSchema>;
 
+export const interviewAmendPreviewSchema = z.object({
+  question_id: z.string().min(1),
+  answer: z.string().trim().min(1),
+}).strict();
+export type InterviewAmendPreviewInput = z.infer<typeof interviewAmendPreviewSchema>;
+
+export const interviewAmendSchema = z.object({
+  question_id: z.string().min(1),
+  answer: z.string().trim().min(1),
+}).strict();
+export type InterviewAmendInput = z.infer<typeof interviewAmendSchema>;
+
 export const projectSchema = z.object({
   project: z.string().min(1),
 }).strict();

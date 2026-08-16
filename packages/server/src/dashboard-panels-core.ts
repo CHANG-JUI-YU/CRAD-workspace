@@ -344,6 +344,9 @@ export const DASHBOARD_PANELS_CORE_JS = `      function byId(value) {
       function renderInterview(payload) {
         var question = currentQuestion(payload);
         state.interviewQuestion = question;
+        if (typeof payload.revision === "number") {
+          state.interviewRevision = payload.revision;
+        }
         var questionNode = byId("interview-question");
         var choices = byId("interview-choices");
         choices.replaceChildren();
@@ -386,8 +389,177 @@ export const DASHBOARD_PANELS_CORE_JS = `      function byId(value) {
               ? "請點選一個選項，或在下方輸入文字。選項會提交 canonical value。"
               : "這一題沒有 choices/options，請在下方輸入文字回答。";
         }
+        renderInterviewHistory(Array.isArray(payload.history) ? payload.history : []);
+        restoreDraftValue("interview-answer-input", "interview");
+        reconcileExternalChanges();
         byId("interview-json").textContent = jsonText(payload);
         updateControls();
+      }
+
+      function historyStatusLabel(status) {
+        if (status === "superseded") return "已取代";
+        if (status === "amendment") return "修訂";
+        return "現行";
+      }
+
+      function historyStatusClass(status) {
+        if (status === "superseded") return "superseded";
+        if (status === "amendment") return "amendment";
+        return "current";
+      }
+
+      function renderInterviewHistory(history) {
+        var target = byId("interview-history");
+        target.replaceChildren();
+        if (history.length === 0) {
+          target.append(makeElement("p", "muted", "尚無訪談答案紀錄。"));
+          return;
+        }
+        history.forEach(function (entry) {
+          var row = makeElement("article", "interview-history-entry " + historyStatusClass(entry.status));
+          var head = makeElement("div", "interview-history-head");
+          var questionText = firstString(entry, ["question_text", "text"]) || entry.question_id || "未知問題";
+          var status = makeElement("span", "history-tag " + historyStatusClass(entry.status), historyStatusLabel(entry.status));
+          var occurred = typeof entry.occurred_at === "string" ? new Date(entry.occurred_at).toLocaleString() : "";
+          head.append(makeElement("strong", "", questionText), status, makeElement("span", "muted history-time", occurred));
+          var answer = makeElement("div", "interview-history-answer", firstString(entry, ["answer"]) || "");
+          var actions = makeElement("div", "form-actions");
+          var amendButton = makeElement("button", "amend-entry", "修訂此題");
+          amendButton.type = "button";
+          amendButton.disabled = entry.status === "superseded" || state.amendInFlight;
+          amendButton.addEventListener("click", function () {
+            openAmendArea(entry);
+          });
+          actions.append(amendButton);
+          row.append(head, answer, actions);
+          target.append(row);
+        });
+      }
+
+      function openAmendArea(entry) {
+        var questionId = entry.question_id || "";
+        if (!questionId) return;
+        state.amendQuestionId = questionId;
+        state.amendPreview = null;
+        byId("amend-question-title").textContent = "修訂訪談答案：" + questionId;
+        byId("amend-question-text").textContent = firstString(entry, ["question_text", "text"]) || "";
+        var textarea = byId("amend-answer-input");
+        var draft = cradDraftStore.loadDraft("interview_amend", questionId);
+        textarea.value = draft !== null ? draft.value : (firstString(entry, ["answer"]) || "");
+        byId("amend-impact").replaceChildren();
+        byId("amend-impact").className = "amend-impact";
+        setPanelMessage("amend-message", "info", "輸入新的回答後，先「預覽影響」，確認無誤再「確認修訂」。");
+        byId("amend-preview").disabled = false;
+        byId("amend-confirm").disabled = true;
+        byId("amend-area").hidden = false;
+      }
+
+      function closeAmendArea() {
+        state.amendQuestionId = null;
+        state.amendPreview = null;
+        byId("amend-area").hidden = true;
+        byId("amend-impact").replaceChildren();
+        byId("amend-answer-input").value = "";
+        byId("amend-confirm").disabled = true;
+      }
+
+      function setPanelMessage(elementId, kind, text) {
+        var target = byId(elementId);
+        if (!target) return;
+        target.className = "panel-message " + kind;
+        target.textContent = text;
+      }
+
+      function impactLine(report) {
+        if (!isRecord(report)) return [];
+        var lines = [];
+        if (report.invalidated === true) {
+          lines.push("下游元件將被標記為過期。");
+        } else {
+          lines.push("未偵測到下游失效。");
+        }
+        if (report.publish_readiness_affected === true) {
+          lines.push("Publish 就緒狀態將受到影響。");
+        }
+        var items = Array.isArray(report.items) ? report.items : [];
+        lines.push("受影響項目：" + items.length + " 個。");
+        return lines;
+      }
+
+      function renderAmendPreview(preview) {
+        var impact = byId("amend-impact");
+        impact.replaceChildren();
+        state.amendPreview = preview;
+        if (!isRecord(preview)) {
+          setPanelMessage("amend-message", "error", "預覽失敗：伺服器未回傳有效的影響評估。");
+          return;
+        }
+        impact.className = "amend-impact";
+        impact.append(makeElement("p", "muted", "修訂後訪談狀態：" + readableStatus(preview.status) + "（flow: " + String(preview.flow || "") + "）"));
+        impactLine(preview.downstream_invalidation).forEach(function (line) {
+          impact.append(makeElement("p", "", line));
+        });
+        var superseded = Array.isArray(preview.superseded_precheck_ids) && preview.superseded_precheck_ids.length > 0;
+        if (superseded) {
+          var precheckNote = makeElement("div", "notice warning");
+          precheckNote.textContent = "Blueprint 預檢將被標記為 superseded：現有 recorded 預檢在修訂後會失效，需要重新產生。";
+          impact.append(precheckNote);
+        }
+        if (preview.noop === true) {
+          setPanelMessage("amend-message", "warning", "新的回答與現行內容相同，不會產生變更。");
+          byId("amend-confirm").disabled = true;
+          return;
+        }
+        setPanelMessage("amend-message", "success", "影響評估完成；確認後將保存修訂並重新計算訪談狀態。");
+        byId("amend-confirm").disabled = false;
+      }
+
+      function reconcileExternalChanges() {
+        var notice = byId("external-change-notice");
+        if (!notice) return;
+        var drafts = cradDraftStore.scanDrafts();
+        var staleDrafts = drafts.filter(function (entry) {
+          return typeof entry.base_revision === "number" && state.interviewRevision > entry.base_revision;
+        });
+        if (staleDrafts.length === 0) {
+          notice.hidden = true;
+          return;
+        }
+        var text = byId("external-change-notice-text");
+        var oldestBase = staleDrafts[0].base_revision;
+        for (var index = 1; index < staleDrafts.length; index += 1) {
+          if (staleDrafts[index].base_revision < oldestBase) oldestBase = staleDrafts[index].base_revision;
+        }
+        text.textContent = "偵測到外部變更：草稿建立在 revision " + oldestBase + "，目前專案已進展到 revision " + state.interviewRevision + "（共 " + staleDrafts.length + " 份草稿受影響）。請重新整理以載入最新狀態，再決定是否沿用草稿。";
+        notice.hidden = false;
+      }
+
+      function restoreDraftValue(elementId, formKey, objectKey) {
+        var textarea = byId(elementId);
+        if (!textarea) return;
+        if (document.activeElement === textarea) return;
+        var draft = cradDraftStore.loadDraft(formKey, objectKey);
+        if (draft !== null && textarea.value !== draft.value) {
+          textarea.value = draft.value;
+        }
+      }
+
+      function reviewDrafts() {
+        var drafts = cradDraftStore.scanDrafts();
+        renderLatest("外部變更草稿", {
+          status: "completed",
+          summary: "目前 " + drafts.length + " 份草稿：",
+          drafts: drafts.map(function (entry) {
+            return {
+              form: entry.form_key,
+              object: entry.object_key || null,
+              base_revision: entry.base_revision,
+              saved_at: entry.saved_at,
+              value: entry.value.length > 200 ? entry.value.slice(0, 200) + "…" : entry.value
+            };
+          })
+        });
+        setNotice("info", "草稿內容已輸出至「最近回應 / 診斷」。");
       }
 
       function setAreaError(targetId, error) {

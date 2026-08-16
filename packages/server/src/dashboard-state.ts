@@ -4,7 +4,11 @@ export const DASHBOARD_STATE_JS = `      var state = {
         agents: [],
         status: null,
         interviewQuestion: null,
-        currentProjectValue: ""
+        currentProjectValue: "",
+        interviewRevision: 0,
+        amendQuestionId: null,
+        amendPreview: null,
+        amendInFlight: false
       };
 
 `;

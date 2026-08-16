@@ -313,6 +313,18 @@ const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
     impact: "Blueprint 尚未建立，現有訪談答案仍保留。",
     next_actions: ["回到角色名單步驟，列出至少兩名角色後繼續訪談。"],
   },
+  INTERVIEW_ANSWER_NOT_FOUND: {
+    category: "project",
+    message_zh: "找不到可修訂的訪談答案。",
+    impact: "修訂未套用。",
+    next_actions: ["確認問題 ID 後重試，或重新整理訪談歷史。"],
+  },
+  INTERVIEW_AMENDMENT_REPLAY_FAILED: {
+    category: "project",
+    message_zh: "訪談紀錄無法安全重放，修訂被拒絕。",
+    impact: "為避免改寫歷史，修訂未套用。",
+    next_actions: ["確認回答符合該問題的格式或選項後重試。"],
+  },
   BLUEPRINT_CHARACTER_NOT_IN_ROSTER: {
     category: "blueprint",
     message_zh: "角色不在目前 Blueprint 的角色名單中。",

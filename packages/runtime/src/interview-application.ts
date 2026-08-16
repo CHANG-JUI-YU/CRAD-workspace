@@ -1,4 +1,5 @@
 import {
+  amendInterviewAnswer as amendInterviewAnswerCore,
   beginInterview,
   canonicalJson,
   computeProjectProjection,
@@ -9,10 +10,12 @@ import {
   internalId,
   normalizeInterviewStateForDisplay,
   parseRelationshipParticipants,
+  replayInterviewState,
   type ArtifactRecord,
   type BlueprintPrecheckCheck,
   type BlueprintPrecheckRecord,
   type FactRecord,
+  type InterviewAnswer,
   type InterviewCharacterSubject,
   type InterviewQuestion,
   type InterviewState,
@@ -23,7 +26,13 @@ import {
   type SourceAdaptationIntent,
   type WorkspaceContext,
 } from "@st-workspace/core";
-import { PALETTE_REQUIRED_MODULES, ZHUJI_REQUIRED_MODULES } from "@st-workspace/domain";
+import {
+  deriveDownstreamInvalidation,
+  emptyDownstreamInvalidationReport,
+  PALETTE_REQUIRED_MODULES,
+  ZHUJI_REQUIRED_MODULES,
+  type DownstreamInvalidationReport,
+} from "@st-workspace/domain";
 import { now } from "./operation-runner.js";
 
 export interface InterviewApplicationDeps {
@@ -575,6 +584,31 @@ function isBarePrecheckConfirmation(answer: string): boolean {
   return /^(確認|是|對|好|可以|沒問題|就用|這樣就好|不用|沒有|暫用)/iu.test(trimmed) || trimmed.length <= 4;
 }
 
+export interface InterviewHistoryEntry {
+  question_id: string;
+  question_text?: string;
+  answer: string;
+  actor: string;
+  occurred_at: string;
+  status: "current" | "superseded" | "amendment";
+  superseded_by?: { question_id: string; occurred_at: string };
+  amendment_of?: { question_id: string; occurred_at: string };
+}
+
+export function interviewHistory(answers: readonly InterviewAnswer[]): InterviewHistoryEntry[] {
+  const replayed = replayInterviewState(answers);
+  return answers.map((item) => ({
+    question_id: item.question_id,
+    ...(replayed === undefined || replayed.questions[item.question_id] === undefined ? {} : { question_text: replayed.questions[item.question_id]!.text }),
+    answer: item.answer,
+    actor: item.actor,
+    occurred_at: item.occurred_at,
+    status: item.amendment_of !== undefined ? "amendment" as const : item.superseded_by !== undefined ? "superseded" as const : "current" as const,
+    ...(item.superseded_by === undefined ? {} : { superseded_by: item.superseded_by }),
+    ...(item.amendment_of === undefined ? {} : { amendment_of: item.amendment_of }),
+  }));
+}
+
 export async function interviewContext(deps: InterviewApplicationDeps): Promise<{
   project_id: string;
   status: InterviewState["status"];
@@ -584,6 +618,8 @@ export async function interviewContext(deps: InterviewApplicationDeps): Promise<
   values: InterviewState["values"];
   characters?: InterviewState["characters"];
   active_character_id?: string;
+  revision: number;
+  history: InterviewHistoryEntry[];
 }> {
   const state = await deps.repository.read();
   const interview = normalizeInterviewStateForDisplay(state.interview);
@@ -596,6 +632,149 @@ export async function interviewContext(deps: InterviewApplicationDeps): Promise<
     values: interview.values,
     ...(interview.characters === undefined ? {} : { characters: interview.characters }),
     ...(interview.active_character_id === undefined ? {} : { active_character_id: interview.active_character_id }),
+    revision: state.revision,
+    history: interviewHistory(interview.answers),
+  };
+}
+
+function recordedPrecheckIds(state: ProjectState): string[] {
+  return [...state.blueprint_prechecks].reverse().filter((item) => item.status === "recorded").map((item) => item.id);
+}
+
+export interface InterviewAmendmentPreviewResult {
+  project_id: string;
+  revision: number;
+  noop: boolean;
+  question_id: string;
+  status: InterviewState["status"];
+  flow: InterviewState["flow"];
+  question?: InterviewState["current"];
+  answers: InterviewState["answers"];
+  values: InterviewState["values"];
+  characters?: InterviewState["characters"];
+  active_character_id?: string;
+  history: InterviewHistoryEntry[];
+  downstream_invalidation: DownstreamInvalidationReport;
+  superseded_precheck_ids: string[];
+}
+
+export async function interviewAmendmentImpactPreview(
+  deps: InterviewApplicationDeps,
+  input: { question_id: string; answer: string },
+): Promise<InterviewAmendmentPreviewResult> {
+  const state = await deps.repository.read();
+  const amended = amendInterviewAnswerCore(state.interview, { question_id: input.question_id, answer: input.answer, actor: "preview" });
+  const noop = amended === state.interview;
+  const precheckIds = noop ? [] : recordedPrecheckIds(state);
+  const downstream_invalidation = noop
+    ? emptyDownstreamInvalidationReport()
+    : deriveDownstreamInvalidation(state, { ...state, interview: amended });
+  return {
+    project_id: state.project_id,
+    revision: state.revision,
+    noop,
+    question_id: input.question_id,
+    status: amended.status,
+    flow: amended.flow,
+    ...(amended.current === undefined ? {} : { question: amended.current }),
+    answers: amended.answers,
+    values: amended.values,
+    ...(amended.characters === undefined ? {} : { characters: amended.characters }),
+    ...(amended.active_character_id === undefined ? {} : { active_character_id: amended.active_character_id }),
+    history: interviewHistory(amended.answers),
+    downstream_invalidation,
+    superseded_precheck_ids: precheckIds,
+  };
+}
+
+export interface InterviewAmendmentResult extends RequestResult {
+  project_id: string;
+  revision: number;
+  noop: boolean;
+  downstream_invalidation: DownstreamInvalidationReport;
+  superseded_precheck_ids: string[];
+  history: InterviewHistoryEntry[];
+}
+
+export async function amendInterviewAnswer(
+  deps: InterviewApplicationDeps,
+  input: { question_id: string; answer: string },
+  context: WorkspaceContext,
+): Promise<InterviewAmendmentResult> {
+  const initial = await deps.repository.read();
+  const amended = amendInterviewAnswerCore(initial.interview, { question_id: input.question_id, answer: input.answer, actor: context.actor });
+  const noop = amended === initial.interview;
+  if (noop) {
+    return {
+      operation_id: "",
+      status: "completed",
+      summary: "答案與現行內容相同，未產生任何變更。",
+      completed: [],
+      blocked: [],
+      project_id: initial.project_id,
+      revision: initial.revision,
+      noop: true,
+      downstream_invalidation: emptyDownstreamInvalidationReport(),
+      superseded_precheck_ids: [],
+      history: interviewHistory(initial.interview.answers),
+    };
+  }
+  const precheckIds = recordedPrecheckIds(initial);
+  const afterState: ProjectState = { ...initial, interview: amended };
+  const downstream_invalidation = deriveDownstreamInvalidation(initial, afterState);
+  const operation = [...initial.operations].reverse().find((item) => item.kind === "interview" && !["cancelled", "failed"].includes(item.status));
+  const amendment = amended.answers.at(-1);
+  const previous = initial.interview.answers.filter((item) => item.question_id === input.question_id && item.superseded_by === undefined).at(-1);
+  const resumed = amended.status === "active" && amended.current !== undefined;
+  const finalized = await deps.repository.commit(initial.revision, (current) => ({
+    ...current,
+    project_status: resumed ? "interviewing" : current.project_status,
+    interview: amended,
+    blueprint_prechecks: current.blueprint_prechecks.map((item) => precheckIds.includes(item.id) ? { ...item, status: "superseded" as const } : item),
+    operations: current.operations.map((item) => item.id === operation?.id
+      ? {
+        ...item,
+        status: resumed ? "needs_input" as const : "completed" as const,
+        ...(amended.current === undefined ? {} : { question: amended.current.text }),
+        result_summary: resumed ? "訪談回答已修訂，請繼續回答目前的問題。" : "訪談回答已修訂，訪談維持完成狀態。",
+        updated_at: now(),
+      }
+      : item),
+    audit: [
+      ...current.audit,
+      {
+        id: internalId("audit"),
+        operation_id: operation?.id ?? "",
+        event: "interview.answer.amended" as const,
+        actor: context.actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: {
+          question_id: input.question_id,
+          previous_answer: previous?.answer,
+          amended_answer: amendment?.answer,
+          amendment_occurred_at: amendment?.occurred_at,
+          resumed,
+          superseded_precheck_ids: precheckIds,
+        },
+      },
+    ],
+  }));
+  return {
+    operation_id: operation?.id ?? "",
+    status: resumed ? "needs_input" : "completed",
+    summary: resumed ? "訪談回答已修訂，請繼續回答目前的問題。" : "訪談回答已修訂，下游元件已重新評估。",
+    completed: [],
+    blocked: [],
+    ...(amended.current === undefined ? {} : { question: amended.current.text, interview_question: amended.current }),
+    project_id: finalized.project_id,
+    ...(typeof finalized.interview.values.project_name === "string" ? { project_name: finalized.interview.values.project_name } : {}),
+    flow: amended.flow,
+    revision: finalized.revision,
+    noop: false,
+    downstream_invalidation,
+    superseded_precheck_ids: precheckIds,
+    history: interviewHistory(amended.answers),
   };
 }
 

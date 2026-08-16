@@ -887,6 +887,79 @@ export const DASHBOARD_CSS = `  <style>
       border-radius: 0.3rem;
       font-size: 0.82rem;
     }
+    .external-change-notice {
+      border: 1px solid #b45309;
+      background: #fffbeb;
+      color: #78350f;
+      border-radius: 0.4rem;
+      padding: 0.6rem 0.8rem;
+      margin-bottom: 0.8rem;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+    }
+    .external-change-notice .form-actions { margin: 0; }
+    .external-change-notice-text { flex: 1 1 24rem; }
+    .interview-history {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-top: 0.6rem;
+    }
+    .interview-history-entry {
+      border: 1px solid #d1d5db;
+      border-radius: 0.4rem;
+      padding: 0.5rem 0.7rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+    .interview-history-entry.current { border-left: 4px solid #15803d; }
+    .interview-history-entry.superseded { border-left: 4px solid #9ca3af; opacity: 0.8; }
+    .interview-history-entry.amendment { border-left: 4px solid #2563eb; }
+    .interview-history-head {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .interview-history-head strong { flex: 1 1 16rem; }
+    .history-time { font-size: 0.8rem; }
+    .history-tag {
+      font-size: 0.75rem;
+      border-radius: 0.25rem;
+      padding: 0.1rem 0.45rem;
+      color: #fff;
+      background: #9ca3af;
+    }
+    .history-tag.current { background: #15803d; }
+    .history-tag.superseded { background: #6b7280; }
+    .history-tag.amendment { background: #2563eb; }
+    .interview-history-answer {
+      white-space: pre-wrap;
+      font-size: 0.9rem;
+    }
+    .amend-area {
+      border: 1px dashed #2563eb;
+      border-radius: 0.4rem;
+      padding: 0.7rem;
+      margin-top: 0.6rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .amend-impact {
+      border-radius: 0.4rem;
+      background: #eff6ff;
+      padding: 0.5rem 0.7rem;
+      font-size: 0.88rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    .amend-impact p { margin: 0; }
     @media (prefers-reduced-motion: reduce) {
       * {
         animation-duration: 0.01ms !important;

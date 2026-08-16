@@ -434,11 +434,18 @@ const interviewCharacterSubjectSchema = z.object({
   ordinal: z.number().int().positive(),
 }).strict();
 
+const interviewAnswerRefSchema = z.object({
+  question_id: z.string().min(1),
+  occurred_at: z.string().datetime({ offset: true }),
+}).strict();
+
 const interviewAnswerSchema = z.object({
   question_id: z.string().min(1),
   answer: z.string().min(1),
   actor: z.string().min(1),
   occurred_at: z.string().datetime({ offset: true }),
+  superseded_by: interviewAnswerRefSchema.optional(),
+  amendment_of: interviewAnswerRefSchema.optional(),
 }).strict();
 
 export const interviewStateSchema = z.object({
