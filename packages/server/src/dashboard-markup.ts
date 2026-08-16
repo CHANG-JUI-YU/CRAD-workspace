@@ -311,6 +311,7 @@ export const DASHBOARD_MARKUP = `<body>
         <div>
           <h2 id="operation-heading">Operation 管理</h2>
           <p class="muted">列出 operation 與 lease/attempt 資訊；可回答待輸入問題、取消卡住的 operation 或重新嘗試失敗的操作。</p>
+          <div id="operation-last-updated" class="muted"></div>
         </div>
         <label class="field-label" for="operation-filter">狀態篩選
           <select id="operation-filter">

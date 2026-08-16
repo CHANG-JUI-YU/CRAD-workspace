@@ -920,3 +920,23 @@ export const coverageSupplementLifecycleProjectionSchema = z.object({
   historical_attempts: z.array(coverageSupplementLifecycleAttemptSchema),
 }).strict();
 
+
+
+export const urlIngestionSchema = z.object({
+  id: z.string().min(1),
+  operation_id: z.string().min(1),
+  url: z.string().min(1),
+  status: z.enum(["url_received", "fetching", "fetch_failed", "content_validated", "ingested"]),
+  final_url: z.string().optional(),
+  canonical_url: z.string().optional(),
+  title: z.string().optional(),
+  media_type: z.string().optional(),
+  content_size: z.number().int().nonnegative().optional(),
+  error_code: z.string().optional(),
+  error_message: z.string().optional(),
+  retry_of: z.string().optional(),
+  successor_of: z.string().optional(),
+  source_id: z.string().optional(),
+  created_at: z.string().datetime({ offset: true }),
+  updated_at: z.string().datetime({ offset: true }),
+}).strict();

@@ -31,7 +31,7 @@ export async function fetchAndValidateUrlContent(
   text: string;
   canonical_url: string;
   final_url: string;
-  title: string;
+  title?: string;
   media_type: string;
   content_size: number;
   projection: UrlIngestionProjection;
@@ -60,21 +60,21 @@ export async function fetchAndValidateUrlContent(
   }
   const finalUrl = fetched.final_url ?? url;
   const mediaType = fetched.media_type ?? "text/html";
-  const title = (fetched as { title?: string }).title ?? `Source from ${url}`;
+  const title = (fetched as { title?: string }).title ?? undefined;
   const contentSize = fetched.content.byteLength;
 
   return {
     text: decoded.trim(),
     canonical_url: url,
     final_url: finalUrl,
-    title,
+    ...(title === undefined ? {} : { title }),
     media_type: mediaType,
     content_size: contentSize,
     projection: {
       url,
       status: "content_validated",
       final_url: finalUrl,
-      title,
+      ...(title === undefined ? {} : { title }),
       media_type: mediaType,
       content_size: contentSize,
     },

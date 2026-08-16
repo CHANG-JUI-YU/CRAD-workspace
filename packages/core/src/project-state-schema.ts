@@ -12,6 +12,7 @@ import {
   coverageSnapshotSchema,
   coverageUserDecisionSchema,
   researchBatchSchema,
+  urlIngestionSchema,
   researchTaskSchema,
 } from "./coverage.js";
 
@@ -487,4 +488,5 @@ export const projectStateSchema = z.object({
   coverage_research_lineages: z.array(coverageResearchLineageLinkSchema).default([]),
   coverage_resolutions: z.array(coverageResolutionSchema).default([]),
   coverage_authoring_bindings: z.array(authoringCoverageBindingSchema).default([]),
+  url_ingestions: z.array(urlIngestionSchema).default([]),
 }).strict();

@@ -277,7 +277,7 @@ async function commitCommand(
     ],
   };
 
-  await deps.repository.commit(state.revision, (current) => {
+  await deps.repository.commit(outcome.state.revision, (current) => {
     const existingIndex = current.operations.findIndex((op) => op.id === operation.id);
     const updatedOperations = existingIndex >= 0
       ? current.operations.map((op, idx) => (idx === existingIndex ? completedOp : op))
@@ -328,7 +328,7 @@ async function recordFailedOperation(
     updated_at: now(),
   };
   try {
-    await deps.repository.commit(state.revision, (current) => {
+  await deps.repository.commit(state.revision, (current) => {
       const existingIndex = current.operations.findIndex((op) => op.id === operation.id);
       const updatedOps = existingIndex >= 0
         ? current.operations.map((op, idx) => (idx === existingIndex ? failedOp : op))
@@ -1119,7 +1119,36 @@ export async function executeCoverageResearchRecover(
     if (!targetUrl) {
       throw new CoreError("OPERATION_COMMAND_INVALID", "手動提供 URL 必須包含有效的 url。", true);
     }
-    const urlResult = await fetchAndValidateUrlContent(deps.fetcher, targetUrl);
+    const ingestId = internalId("ingest");
+    const ingestNow = now();
+    const fetchingState = await deps.repository.commit(mutated.revision, (current) => ({
+      ...current,
+      url_ingestions: [
+        ...current.url_ingestions,
+        { id: ingestId, operation_id: operation.id, url: targetUrl, status: "fetching", created_at: ingestNow, updated_at: ingestNow },
+      ],
+    }));
+    mutated = fetchingState;
+    let urlResult: Awaited<ReturnType<typeof fetchAndValidateUrlContent>>;
+    try {
+      urlResult = await fetchAndValidateUrlContent(deps.fetcher, targetUrl);
+    } catch (error) {
+      const errorCode = error instanceof CoreError ? error.code : "URL_FETCH_FAILED";
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      await deps.repository.commit(fetchingState.revision, (current) => ({
+        ...current,
+        url_ingestions: current.url_ingestions.map((r) =>
+          r.id === ingestId ? { ...r, status: "fetch_failed", error_code: errorCode, error_message: errorMessage, updated_at: now() } : r,
+        ),
+      }));
+      throw new CoreError(errorCode, errorMessage, true, {
+        url_ingestion_id: ingestId,
+        status: "fetch_failed",
+        error_code: errorCode,
+        error_message: errorMessage,
+        next_actions: ["retry", "change_url"],
+      });
+    }
 
     const { candidate, source, state: s1 } = createUserSupplementSource(
       mutated,
@@ -1138,6 +1167,21 @@ export async function executeCoverageResearchRecover(
     const s1Updated: ProjectState = {
       ...s1,
       sources: s1.sources.map((s) => (s.id === source.id ? sourceWithUrl : s)),
+      url_ingestions: s1.url_ingestions.map((r) =>
+        r.id === ingestId
+          ? {
+              ...r,
+              status: "ingested",
+              final_url: urlResult.final_url,
+              canonical_url: urlResult.canonical_url,
+              ...(urlResult.title === undefined ? {} : { title: urlResult.title }),
+              media_type: urlResult.media_type,
+              content_size: urlResult.content_size,
+              source_id: sourceWithUrl.id,
+              updated_at: now(),
+            }
+          : r,
+      ),
     };
 
     const chunks = chunkSource(sourceWithUrl, KNOWLEDGE_EXTRACTOR_REVISION);

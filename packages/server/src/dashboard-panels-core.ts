@@ -651,6 +651,11 @@ function renderLatestError(label, error, prefix) {
         document.body.setAttribute("aria-busy", value ? "true" : "false");
       }
 
+      function setActionBusy(controlId, busy) {
+        var control = byId(controlId);
+        if (control) control.disabled = busy;
+      }
+
       function updateControls() {
         if (state.busy) return;
         byId("project-select").disabled = state.projects.length === 0;

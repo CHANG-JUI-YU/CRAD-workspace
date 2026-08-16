@@ -476,6 +476,26 @@ export interface ProjectState {
   coverage_research_lineages: CoverageResearchLineageLink[];
   coverage_resolutions: CoverageResolution[];
   coverage_authoring_bindings: AuthoringCoverageBinding[];
+  url_ingestions: UrlIngestionRecord[];
+}
+
+export interface UrlIngestionRecord {
+  id: string;
+  operation_id: string;
+  url: string;
+  status: "url_received" | "fetching" | "fetch_failed" | "content_validated" | "ingested";
+  final_url?: string;
+  canonical_url?: string;
+  title?: string;
+  media_type?: string;
+  content_size?: number;
+  error_code?: string;
+  error_message?: string;
+  retry_of?: string;
+  successor_of?: string;
+  source_id?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export function createProjectState(projectId: string): ProjectState {
@@ -512,6 +532,7 @@ export function createProjectState(projectId: string): ProjectState {
     coverage_research_lineages: [],
     coverage_resolutions: [],
     coverage_authoring_bindings: [],
+    url_ingestions: [],
   };
 }
 
@@ -584,6 +605,7 @@ export function migrateProjectStateV1ToV2(state: Record<string, unknown>): Recor
     coverage_research_lineages: Array.isArray(state.coverage_research_lineages) ? state.coverage_research_lineages : [],
     coverage_resolutions: Array.isArray(state.coverage_resolutions) ? state.coverage_resolutions : [],
     coverage_authoring_bindings: Array.isArray(state.coverage_authoring_bindings) ? state.coverage_authoring_bindings : [],
+    url_ingestions: Array.isArray(state.url_ingestions) ? state.url_ingestions : [],
   };
 }
 

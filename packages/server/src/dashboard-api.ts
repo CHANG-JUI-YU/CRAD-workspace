@@ -169,9 +169,14 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
         setBusy(false);
       }
 
-      async function runTask(label, task) {
+      async function runTask(label, task, busyKey) {
         if (state.busy) return undefined;
-        setBusy(true);
+        var scopedBusy = busyKey !== undefined && busyKey !== null;
+        if (scopedBusy) {
+          setActionBusy(busyKey, true);
+        } else {
+          setBusy(true);
+        }
         setNotice("info", label + "執行中…");
         try {
           var payload = await task();
@@ -183,7 +188,11 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
           setNotice("error", label + "失敗；請查看最近回應/診斷區。");
           return undefined;
         } finally {
-          setBusy(false);
+          if (scopedBusy) {
+            setActionBusy(busyKey, false);
+          } else {
+            setBusy(false);
+          }
         }
       }
 
@@ -200,6 +209,52 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
         setNotice("error", message + "下一步：補齊內容後再送出。");
       }
 
+      var operationMonitorTimer = null;
+      var operationMonitorGeneration = 0;
+      var operationMonitorRunning = false;
+      var operationMonitorActive = false;
+
+      function operationMonitorSchedule() {
+        if (operationMonitorTimer) clearInterval(operationMonitorTimer);
+        operationMonitorTimer = setInterval(operationMonitorTick, operationMonitorRunning ? 3000 : 12000);
+      }
+
+      function operationMonitorTick() {
+        if (document.hidden || (typeof navigator !== "undefined" && navigator.onLine === false)) return;
+        var generation = ++operationMonitorGeneration;
+        requestJson("/workspace/dashboard/operations?limit=50").then(function (page) {
+          if (generation !== operationMonitorGeneration) return;
+          var items = page && Array.isArray(page.items) ? page.items : [];
+          var runningCount = 0;
+          for (var i = 0; i < items.length; i++) {
+            var status = items[i] && items[i].status;
+            if (status === "running" || status === "resolving" || status === "created") runningCount += 1;
+          }
+          var wasRunning = operationMonitorRunning;
+          operationMonitorRunning = runningCount > 0;
+          if (operationMonitorRunning !== wasRunning) operationMonitorSchedule();
+          renderOperationList(items);
+          var updated = byId("operation-last-updated");
+          if (updated) updated.textContent = "最後更新：" + new Date().toLocaleTimeString();
+        }).catch(function () {});
+      }
+
+      function startOperationMonitoring() {
+        if (operationMonitorActive) return;
+        operationMonitorActive = true;
+        document.addEventListener("visibilitychange", function () {
+          if (!document.hidden) operationMonitorTick();
+        });
+        if (typeof window !== "undefined") {
+          window.addEventListener("online", function () {
+            operationMonitorTick();
+          });
+        }
+        operationMonitorSchedule();
+        operationMonitorTick();
+      }
+
       extractInitialToken();
+      startOperationMonitoring();
 
 `;
