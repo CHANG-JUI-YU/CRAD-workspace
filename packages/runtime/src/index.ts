@@ -3184,9 +3184,23 @@ export class WorkspaceRuntime {
     const state = await this.repository.read();
     const image = state.images.find((item) => item.id === imageId);
     if (image === undefined) return false;
+    const activeSelection = state.cover_selections.find((item) => item.supersedes === undefined);
+    const supersedeSelection = activeSelection !== undefined && activeSelection.image_id === imageId;
     await this.repository.commit(state.revision, (current) => ({
       ...current,
       images: current.images.filter((item) => item.id !== imageId),
+      ...(supersedeSelection
+        ? {
+            cover_selections: [...current.cover_selections, {
+              id: internalId("cover"),
+              image_id: imageId,
+              placeholder: false,
+              created_by: actor,
+              created_at: now(),
+              supersedes: activeSelection!.id,
+            }],
+          }
+        : {}),
       audit: [...current.audit, {
         id: internalId("audit"),
         operation_id: "console",
@@ -3198,6 +3212,40 @@ export class WorkspaceRuntime {
       }],
     }));
     return true;
+  }
+
+  async setProjectCover(actor: string = "worker", input: { image_id?: string; placeholder?: boolean } = {}): Promise<{ cover_selection_id: string }> {
+    const state = await this.repository.read();
+    const wantsPlaceholder = input.placeholder === true || input.image_id === undefined;
+    let imageId: string | undefined = wantsPlaceholder ? undefined : input.image_id;
+    if (!wantsPlaceholder && imageId !== undefined) {
+      const image = state.images.find((item) => item.id === imageId);
+      if (image === undefined) throw new CoreError("IMAGE_NOT_FOUND", `Image ${imageId} does not exist.`, true);
+    }
+    const activeSelection = state.cover_selections.find((item) => item.supersedes === undefined);
+    const selectionId = internalId("cover");
+    const selection = {
+      id: selectionId,
+      ...(imageId === undefined ? {} : { image_id: imageId }),
+      placeholder: imageId === undefined,
+      created_by: actor,
+      created_at: now(),
+      ...(activeSelection === undefined ? {} : { supersedes: activeSelection.id }),
+    };
+    await this.repository.commit(state.revision, (current) => ({
+      ...current,
+      cover_selections: [...current.cover_selections, selection],
+      audit: [...current.audit, {
+        id: internalId("audit"),
+        operation_id: "console",
+        event: "cover.selection.updated",
+        actor,
+        occurred_at: now(),
+        project_revision: current.revision + 1,
+        details: { selection_id: selectionId, ...(imageId === undefined ? { placeholder: true } : { image_id: imageId }) },
+      }],
+    }));
+    return { cover_selection_id: selectionId };
   }
 
   private async resumePendingIfAnswered(pending: OperationRecord, trimmed: string, context: WorkspaceContext, kind: string): Promise<RequestResult | undefined> {

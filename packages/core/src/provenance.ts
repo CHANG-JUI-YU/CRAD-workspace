@@ -13,6 +13,8 @@ export interface ProvenanceImageCrop {
   offset_y: number;
 }
 
+export type CoverSelectionReason = "explicit" | "primary" | "global" | "placeholder";
+
 export interface ProvenanceImageIdentity {
   mode: "uploaded" | "placeholder";
   image_id?: string;
@@ -24,6 +26,7 @@ export interface ProvenanceImageIdentity {
   aspect_ratio?: string;
   crop?: ProvenanceImageCrop;
   transformation_revision?: string;
+  selection_reason?: CoverSelectionReason;
 }
 
 export interface ProvenanceCoverageRef {
@@ -104,6 +107,7 @@ export const provenanceImageIdentitySchema = z.object({
   aspect_ratio: z.string().min(1).optional(),
   crop: provenanceImageCropSchema.optional(),
   transformation_revision: z.string().min(1).optional(),
+  selection_reason: z.enum(["explicit", "primary", "global", "placeholder"]).optional(),
 }).strict();
 
 export const provenanceCompositionSummarySchema = z.object({
@@ -206,32 +210,7 @@ export function imageTransformationRevision(crop: ProvenanceImageCrop | undefine
   return contentHash(canonicalJson({ crop: crop ?? null, aspect_ratio: aspectRatio ?? null }));
 }
 
-export function resolveCoverImageIdentity(state: ProjectState, primaryCharacterId: string | undefined): { identity: ProvenanceImageIdentity; selected: ImageRecord | undefined } {
-  if (state.images.length === 0) {
-    return { identity: { mode: "placeholder" }, selected: undefined };
-  }
-  let selected: ImageRecord | undefined;
-  if (primaryCharacterId !== undefined) {
-    for (let index = state.images.length - 1; index >= 0; index -= 1) {
-      const candidate = state.images[index];
-      if (candidate !== undefined && candidate.character_id === primaryCharacterId) {
-        selected = candidate;
-        break;
-      }
-    }
-  }
-  if (selected === undefined) {
-    for (let index = state.images.length - 1; index >= 0; index -= 1) {
-      const candidate = state.images[index];
-      if (candidate !== undefined && candidate.character_id === undefined) {
-        selected = candidate;
-        break;
-      }
-    }
-  }
-  if (selected === undefined) {
-    return { identity: { mode: "placeholder" }, selected: undefined };
-  }
+function coverIdentityFor(selected: ImageRecord, reason: CoverSelectionReason): { identity: ProvenanceImageIdentity; selected: ImageRecord } {
   const crop: ProvenanceImageCrop | undefined = selected.crop === undefined ? undefined : { width: selected.crop.width, height: selected.crop.height, offset_x: selected.crop.offset_x, offset_y: selected.crop.offset_y };
   const transformationRevision = imageTransformationRevision(crop, selected.aspect_ratio);
   const identity: ProvenanceImageIdentity = {
@@ -245,8 +224,58 @@ export function resolveCoverImageIdentity(state: ProjectState, primaryCharacterI
     ...(selected.aspect_ratio === undefined ? {} : { aspect_ratio: selected.aspect_ratio }),
     ...(crop === undefined ? {} : { crop }),
     ...(transformationRevision === undefined ? {} : { transformation_revision: transformationRevision }),
+    selection_reason: reason,
   };
   return { identity, selected };
+}
+
+export function resolveCoverImageIdentity(state: ProjectState, primaryCharacterId: string | undefined): { identity: ProvenanceImageIdentity; selected: ImageRecord | undefined } {
+  let activeSelection: { image_id?: string; placeholder: boolean } | undefined;
+  for (let index = state.cover_selections.length - 1; index >= 0; index -= 1) {
+    const candidate = state.cover_selections[index];
+    if (candidate !== undefined) {
+      activeSelection = candidate;
+      break;
+    }
+  }
+  if (activeSelection !== undefined) {
+    if (activeSelection.placeholder) {
+      return { identity: { mode: "placeholder", selection_reason: "explicit" }, selected: undefined };
+    }
+    if (activeSelection.image_id !== undefined) {
+      const explicit = state.images.find((image) => image.id === activeSelection.image_id);
+      if (explicit !== undefined) {
+        return coverIdentityFor(explicit, "explicit");
+      }
+    }
+  }
+  if (state.images.length === 0) {
+    return { identity: { mode: "placeholder", selection_reason: activeSelection === undefined ? "placeholder" : "placeholder" }, selected: undefined };
+  }
+  let selected: ImageRecord | undefined;
+  if (primaryCharacterId !== undefined) {
+    for (let index = state.images.length - 1; index >= 0; index -= 1) {
+      const candidate = state.images[index];
+      if (candidate !== undefined && candidate.character_id === primaryCharacterId) {
+        selected = candidate;
+        break;
+      }
+    }
+  }
+  if (selected !== undefined) {
+    return coverIdentityFor(selected, "primary");
+  }
+  for (let index = state.images.length - 1; index >= 0; index -= 1) {
+    const candidate = state.images[index];
+    if (candidate !== undefined && candidate.character_id === undefined) {
+      selected = candidate;
+      break;
+    }
+  }
+  if (selected !== undefined) {
+    return coverIdentityFor(selected, "global");
+  }
+  return { identity: { mode: "placeholder", selection_reason: "placeholder" }, selected: undefined };
 }
 
 export type CoverImageFreshnessStatus = "fresh" | "stale" | "unknown";

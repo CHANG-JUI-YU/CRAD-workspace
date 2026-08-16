@@ -2,6 +2,7 @@ import {
   CoreError,
   computeProjectProjection,
   deriveCoverImageFreshness,
+resolveCoverImageIdentity,
   qualityLevelForProfile,
   z,
   type ArtifactKind,
@@ -9,6 +10,7 @@ import {
   type ArtifactStatus,
   type AuditEvent,
   type CoverImageFreshnessResult,
+type ProvenanceImageIdentity,
   type FactClassification,
   type FactRecord,
   type IssueSeverity,
@@ -148,6 +150,7 @@ export interface DashboardSummary {
   images_stale: boolean;
   images_stale_reason?: string;
   images_freshness: CoverImageFreshnessResult;
+  active_cover: { identity: ProvenanceImageIdentity; reason?: string; fallback_order: string[] };
   quality: {
     level: string;
     blocking_severity: string;
@@ -826,6 +829,7 @@ export function buildDashboardSummary(state: ProjectState, repair: RepairInspect
   const latestPublish = state.publishes.at(-1);
   const latestBuild = state.builds.at(-1);
   const latestRun = latestReviewRun(state);
+  const coverResolution = resolveCoverImageIdentity(state, manifest?.primary_character_id);
   const recordedImageIdentity = latestBuild?.provenance_summary?.image_identity ?? latestPublish?.provenance_summary?.image_identity;
   const imageFreshness = latestPublish === undefined
     ? { status: "unknown" as const, reason: "尚未發布。" }
@@ -921,6 +925,11 @@ export function buildDashboardSummary(state: ProjectState, repair: RepairInspect
     ...(latestPublish === undefined ? {} : { latest_publish: mapPublish(latestPublish) }),
     ...(latestBuild === undefined ? {} : { latest_build: mapBuild(latestBuild) }),
     ...(latestRun === undefined ? {} : { latest_review_run: latestRun }),
+    active_cover: {
+      identity: coverResolution.identity,
+      ...(coverResolution.identity.selection_reason === undefined ? {} : { reason: coverResolution.identity.selection_reason }),
+      fallback_order: ["primary", "global", "placeholder"],
+    },
     kpis: deriveSummaryKPIs(state),
     repair: {
       plan_hash: repair.plan_hash,

@@ -929,7 +929,14 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
             imgPreview.append(thumb);
           }
           var imgText = document.createElement("div");
-          imgText.textContent = "圖片 ID: " + imageIdentity.image_id + " · Blob: " + (imageIdentity.blob_hash ? imageIdentity.blob_hash.slice(0, 12) : "無") + (imageIdentity.aspect_ratio ? " · 比例: " + imageIdentity.aspect_ratio : "");
+          var imgReason = "";
+          if (imageIdentity.selection_reason === "explicit") imgReason = " · 選擇原因：使用者明確選擇";
+          else if (imageIdentity.selection_reason === "primary") imgReason = " · 選擇原因：主要角色候選";
+          else if (imageIdentity.selection_reason === "global") imgReason = " · 選擇原因：全域候選";
+          else if (imageIdentity.selection_reason === "placeholder") imgReason = " · 選擇原因：預設佔位圖";
+          var imgCrop = "";
+          if (imageIdentity.crop && typeof imageIdentity.crop.width === "number") imgCrop = " · 裁切: " + imageIdentity.crop.width + "x" + imageIdentity.crop.height + "@" + imageIdentity.crop.offset_x + "," + imageIdentity.crop.offset_y;
+          imgText.textContent = "圖片 ID: " + imageIdentity.image_id + " · Blob: " + (imageIdentity.blob_hash ? imageIdentity.blob_hash.slice(0, 12) : "無") + (imageIdentity.aspect_ratio ? " · 比例: " + imageIdentity.aspect_ratio : "") + imgCrop + (imageIdentity.transformation_revision ? " · 變換: " + imageIdentity.transformation_revision.slice(0, 12) : "") + imgReason;
           imgPreview.append(imgText);
           imageBody.append(imgPreview);
         } else {
@@ -1090,10 +1097,10 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         if (confirmButton) {
           confirmButton.disabled = currentProvenanceConfirmation.fingerprint === "";
           confirmButton.textContent = Array.isArray(composition.overrides) && composition.overrides.length > 0
-            ? "確認覆寫並發布（" + composition.overrides.length + " 筆 active override）"
-            : "確認並發布";
+            ? "確認並以此確切內容發布（" + composition.overrides.length + " 筆 active override）"
+            : "確認並以此確切內容發布";
         }
-        byId("provenance-confirm-message").textContent = "已準備完成；確認後將以此份不可變快照（Fingerprint: " + fingerprint.slice(0, 8) + "）執行發布。";
+        byId("provenance-confirm-message").textContent = "我批准畫面中顯示的這份確切組成與輸出；確認後將以同一份不可變快照（Fingerprint: " + fingerprint.slice(0, 8) + "）執行發布。";
         updatePublishStepper("provenance_reviewed", "current", { overrides_count: (composition.overrides ? composition.overrides.length : 0) });
       }
 

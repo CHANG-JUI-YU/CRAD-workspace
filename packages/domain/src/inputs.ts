@@ -314,3 +314,8 @@ export const coverageResearchRecoverInputSchema = z.object({
   }
 });
 export type CoverageResearchRecoverInput = z.infer<typeof coverageResearchRecoverInputSchema>;
+
+export const coverSelectInputSchema = z.object({
+  image_id: z.string().min(1).optional(),
+  placeholder: z.boolean().optional(),
+}).strict();

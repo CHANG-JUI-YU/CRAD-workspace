@@ -1,5 +1,16 @@
-export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
+export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId, button) {
+        var confirming = false;
         return function () {
+          if (!confirming) {
+            confirming = true;
+            button.textContent = "再次點擊確認移除";
+            button.setAttribute("aria-label", "再次點擊以確認移除圖片 " + imageId + "。此操作可能使未完成的發布確認失效。");
+            window.setTimeout(function () {
+              confirming = false;
+              button.textContent = "移除";
+            }, 4000);
+            return;
+          }
           postImageRemove(imageId);
         };
       }
@@ -104,19 +115,49 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
         image.src = url;
       }
 
-      function renderImageList(images, roster, primaryCharacterId) {
+      function coverReasonText(reason) {
+        if (reason === "explicit") return "使用者明確選擇";
+        if (reason === "primary") return "主要角色候選";
+        if (reason === "global") return "全域候選";
+        if (reason === "placeholder") return "預設佔位圖";
+        return "自動選擇";
+      }
+
+      function renderImageList(images, roster, primaryCharacterId, activeCover) {
         var target = byId("image-list");
         target.textContent = "";
         var list = Array.isArray(images) ? images : [];
+        var cover = isRecord(activeCover) && isRecord(activeCover.identity) ? activeCover.identity : undefined;
+        var coverImageId = cover && cover.mode === "uploaded" && typeof cover.image_id === "string" ? cover.image_id : undefined;
         target.textContent = list.length === 0 ? "沒有角色圖像。" : "角色圖像 " + list.length + " 筆";
         renderImageUploadOptions(roster, primaryCharacterId);
+        if (cover !== undefined) {
+          var coverRow = document.createElement("div");
+          coverRow.className = "fact-row";
+          var coverText = document.createElement("span");
+          if (cover.mode === "uploaded" && coverImageId !== undefined) {
+            coverText.textContent = "目前發布使用：" + coverImageId + "（" + coverReasonText(cover.selection_reason) + "）";
+          } else {
+            coverText.textContent = "目前發布使用：預設佔位圖（" + coverReasonText(cover.selection_reason) + "）";
+          }
+          coverRow.append(coverText);
+          target.append(coverRow);
+        }
         for (var i = 0; i < list.length; i += 1) {
           var image = list[i];
           if (!isRecord(image)) continue;
           var row = document.createElement("div");
           row.className = "fact-row";
+          var imageId = firstString(image, ["id"]) || "";
+          var isActive = imageId !== "" && imageId === coverImageId;
+          if (isActive) {
+            var badge = document.createElement("span");
+            badge.className = "status-badge ready";
+            badge.textContent = "目前發布使用";
+            row.append(badge);
+          }
           var preview = document.createElement("img");
-          setProtectedImageSource(preview, "/workspace/images/" + (firstString(image, ["id"]) || ""));
+          setProtectedImageSource(preview, "/workspace/images/" + imageId);
           preview.setAttribute("alt", "角色圖預覽");
           preview.className = "image-thumb";
           var text = document.createElement("span");
@@ -140,11 +181,27 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
           if (characterId === undefined || (typeof image.source !== "string" || image.source === "") || (typeof image.license !== "string" || image.license === "")) {
             row.className = "fact-row row-warn";
           }
+          row.append(preview, text);
+          if (!isActive) {
+            var selectButton = document.createElement("button");
+            selectButton.className = "inline-button";
+            selectButton.textContent = "設為目前封面";
+            selectButton.setAttribute("aria-label", "將 " + imageId + " 設為目前封面");
+            selectButton.addEventListener("click", function () {
+              void runTask("設定封面", async function () {
+                var payload = await postJson("/workspace/cover/select", { image_id: imageId });
+                await Promise.allSettled([loadDashboardData()]);
+                return payload;
+              });
+            });
+            row.append(selectButton);
+          }
           var removeButton = document.createElement("button");
           removeButton.className = "inline-button";
           removeButton.textContent = "移除";
-          removeButton.addEventListener("click", removeImage(firstString(image, ["id"]) || ""));
-          row.append(preview, text, removeButton);
+          removeButton.setAttribute("aria-label", "移除圖片 " + imageId + "。再次點擊以確認。");
+          removeButton.addEventListener("click", removeImage(imageId, removeButton));
+          row.append(removeButton);
           target.append(row);
         }
       }
@@ -449,7 +506,7 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId) {
           currentLatestReviewRun = payload.latest_review_run === undefined || payload.latest_review_run === null ? null : payload.latest_review_run;
           renderPrecheckMatrix(payload.prechecks);
           renderQuality(payload);
-          renderImageList(payload.images, payload.roster, payload.primary_character_id);
+          renderImageList(payload.images, payload.roster, payload.primary_character_id, payload.active_cover);
           renderKpis(payload.kpis);
           var staleBanner = byId("image-stale-banner");
           if (payload.images_stale === true) {

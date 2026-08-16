@@ -453,6 +453,15 @@ export const interviewStateSchema = z.object({
   confirmed_no_additional_settings: z.boolean().optional(),
 }).strict();
 
+export const coverSelectionSchema = z.object({
+  id: z.string().min(1),
+  image_id: z.string().min(1).optional(),
+  placeholder: z.boolean(),
+  created_by: z.string().min(1).optional(),
+  created_at: z.string().datetime({ offset: true }),
+  supersedes: z.string().min(1).optional(),
+}).strict();
+
 export const projectStateSchema = z.object({
   schema_version: z.literal(2),
   project_id: z.string().min(1),
@@ -489,4 +498,5 @@ export const projectStateSchema = z.object({
   coverage_resolutions: z.array(coverageResolutionSchema).default([]),
   coverage_authoring_bindings: z.array(authoringCoverageBindingSchema).default([]),
   url_ingestions: z.array(urlIngestionSchema).default([]),
+  cover_selections: z.array(coverSelectionSchema).default([]),
 }).strict();

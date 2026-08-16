@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { CoreError, internalId, z, type AdaptationDecision, type RequestResult } from "@st-workspace/core";
-import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverageResearchCandidatesInputSchema, coverageResearchClaimInputSchema, coverageResearchExhaustInputSchema, coverageResearchRecoverInputSchema, coverageResearchStartInputSchema, coverageResearchStartPreviewInputSchema, coverageResolutionConfirmInputSchema, coverageResolutionPreviewInputSchema, coverageSupplementInputSchema, decodeAttachments, factReviewBatchInputSchema, imageInputSchema, imageRemoveInputSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, publishProvenanceConfirmSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
+import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverageResearchCandidatesInputSchema, coverageResearchClaimInputSchema, coverageResearchExhaustInputSchema, coverageResearchRecoverInputSchema, coverageResearchStartInputSchema, coverageResearchStartPreviewInputSchema, coverageResolutionConfirmInputSchema, coverageResolutionPreviewInputSchema, coverageSupplementInputSchema, decodeAttachments, factReviewBatchInputSchema, coverSelectInputSchema, imageInputSchema, imageRemoveInputSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, publishProvenanceConfirmSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
 import { type AgentAdapter, type WorkspaceProjectManager, type WorkspaceRuntime, type WorkspaceWorker } from "@st-workspace/runtime";
 import { structuredError } from "./errors.js";
 import { body, compact, dashboardPathId, dashboardQuery, json, parseRequest } from "./http-utils.js";
@@ -347,6 +347,15 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         const { image_id } = parseRequest(imageRemoveInputSchema, parsed, "IMAGE_ID_REQUIRED");
         const removed = await (await deps.getRuntime()).removeProjectImage(image_id, deps.actor);
         json(response, 200, { status: removed ? "removed" : "not_found", image_id });
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/cover/select") {
+        const parsed = await body(request);
+        const { image_id, placeholder } = parseRequest(coverSelectInputSchema, parsed, "COVER_SELECT_REQUIRED");
+        const options: { image_id?: string; placeholder?: boolean } = {};
+        if (image_id !== undefined) options.image_id = image_id;
+        if (placeholder !== undefined) options.placeholder = placeholder;
+        json(response, 200, await (await deps.getRuntime()).setProjectCover(deps.actor, options));
         return true;
       }
       if (request.method === "POST" && url.pathname === "/workspace/issue") {

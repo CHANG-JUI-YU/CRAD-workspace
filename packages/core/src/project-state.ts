@@ -477,6 +477,16 @@ export interface ProjectState {
   coverage_resolutions: CoverageResolution[];
   coverage_authoring_bindings: AuthoringCoverageBinding[];
   url_ingestions: UrlIngestionRecord[];
+  cover_selections: CoverSelectionRecord[];
+}
+
+export interface CoverSelectionRecord {
+  id: string;
+  image_id?: string;
+  placeholder: boolean;
+  created_by?: string;
+  created_at: string;
+  supersedes?: string;
 }
 
 export interface UrlIngestionRecord {
@@ -533,6 +543,7 @@ export function createProjectState(projectId: string): ProjectState {
     coverage_resolutions: [],
     coverage_authoring_bindings: [],
     url_ingestions: [],
+    cover_selections: [],
   };
 }
 
@@ -606,6 +617,7 @@ export function migrateProjectStateV1ToV2(state: Record<string, unknown>): Recor
     coverage_resolutions: Array.isArray(state.coverage_resolutions) ? state.coverage_resolutions : [],
     coverage_authoring_bindings: Array.isArray(state.coverage_authoring_bindings) ? state.coverage_authoring_bindings : [],
     url_ingestions: Array.isArray(state.url_ingestions) ? state.url_ingestions : [],
+    cover_selections: Array.isArray(state.cover_selections) ? state.cover_selections : [],
   };
 }
 

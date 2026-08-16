@@ -1,6 +1,6 @@
 import { canonicalCardJson, characterCardV3Schema, type CharacterCardV3 } from "@st-workspace/adapters-ccv3";
 import { isBuiltInPlaceholderImage, readCardFromPng, readPngImageInfo } from "@st-workspace/adapters-png";
-import { computeProjectProjection, contentHash, deriveCoverImageFreshness, publishedCardExportPath, publishedCardPngExportPath, type ProjectRepository, type RepairInspection, type RepairReport } from "@st-workspace/core";
+import { computeProjectProjection, contentHash, deriveCoverImageFreshness, resolveCoverImageIdentity, publishedCardExportPath, publishedCardPngExportPath, type ProjectRepository, type RepairInspection, type RepairReport } from "@st-workspace/core";
 import { buildRequiredArtifactManifest, resolveBuildModeSelection, reviewRunProjectionRevision, validateWorkflow, type WorkflowGateResult } from "@st-workspace/domain";
 import { availableCardModesRuntime, latestByKey } from "./operation-runner.js";
 import type { DashboardBlueprint, DashboardBuildReadiness, DashboardSnapshot, TavernCheckResult, TavernCompatibilityReport } from "./runtime-views.js";
@@ -35,6 +35,7 @@ export async function dashboardSnapshot(deps: BuildApplicationDeps): Promise<Das
   const imageFreshness = latestPublish === undefined
     ? { status: "unknown" as const, reason: "尚未發布。" }
     : deriveCoverImageFreshness(state, recordedImageIdentity, imageManifest?.primary_character_id);
+  const coverResolution = resolveCoverImageIdentity(state, imageManifest?.primary_character_id);
   const dashboardBase = {
     project: {
       project_id: state.project_id,
@@ -57,6 +58,11 @@ export async function dashboardSnapshot(deps: BuildApplicationDeps): Promise<Das
     images_stale: imageFreshness.status === "stale",
     ...(imageFreshness.reason === undefined ? {} : { images_stale_reason: imageFreshness.reason }),
     images_freshness: imageFreshness,
+    active_cover: {
+      identity: coverResolution.identity,
+      ...(coverResolution.identity.selection_reason === undefined ? {} : { reason: coverResolution.identity.selection_reason }),
+      fallback_order: ["primary", "global", "placeholder"],
+    },
     prechecks: state.blueprint_prechecks.map((precheck) => ({
       id: precheck.id,
       status: precheck.status,
