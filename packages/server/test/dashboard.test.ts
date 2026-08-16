@@ -162,7 +162,7 @@ describe("local Dashboard", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ operation_id: "missing-operation" }),
       });
-      expect(missing.status).toBe(400);
+      expect(missing.status).toBe(404);
       expect((await missing.json()).code).toBe("OPERATION_NOT_FOUND");
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));

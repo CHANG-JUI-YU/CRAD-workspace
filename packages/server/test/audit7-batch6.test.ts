@@ -221,7 +221,7 @@ describe("Audit 7 Batch 6 - Server Routes & HTTP Idempotency (#77, #92, #100)", 
     }
   });
 
-  it("POST /workspace/publish/provenance/confirm returns 400 on idempotency conflict", async () => {
+  it("POST /workspace/publish/provenance/confirm returns 409 on idempotency conflict", async () => {
     const server = await startServer("server-batch6-test-2");
     try {
       const previewRes = await fetch(`${server.url}/workspace/publish/provenance/preview`);
@@ -247,7 +247,7 @@ describe("Audit 7 Batch 6 - Server Routes & HTTP Idempotency (#77, #92, #100)", 
         }),
       });
 
-      expect(conflictRes.status).toBe(400);
+      expect(conflictRes.status).toBe(409);
       const conflictBody = await conflictRes.json() as { code: string };
       expect(conflictBody.code).toBe("IDEMPOTENCY_CONFLICT");
     } finally {

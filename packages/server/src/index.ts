@@ -3,9 +3,9 @@ import { HttpSourceFetcher } from "@st-workspace/adapters";
 import { CoreError, FileAttachmentStore, FileProjectRepository } from "@st-workspace/core";
 import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
 import { dashboard } from "./dashboard.js";
-import { structuredError } from "./errors.js";
 export { toolDefinitions } from "./mcp-tools.js";
-import { json } from "./http-utils.js";
+import { json, restError } from "./http-utils.js";
+import { JSONRPC_INTERNAL_ERROR, jsonRpcError } from "./jsonrpc.js";
 import { handleMcpRequest, handleRestRequest, type WorkspaceRouteDeps } from "./routes.js";
 import { computeRuntimeRevision } from "./runtime-revision.js";
 
@@ -44,7 +44,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         const headerToken = request.headers.authorization === `Bearer ${options.authToken}`;
         const queryToken = request.method === "GET" && url.searchParams.get("token") === options.authToken;
         if (!headerToken && !queryToken) {
-          json(response, 401, structuredError(new CoreError("UNAUTHORIZED", "Missing or invalid bearer token", true)));
+          restError(response, new CoreError("UNAUTHORIZED", "Missing or invalid bearer token", true));
           return;
         }
       }
@@ -65,14 +65,13 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       if (options.runtime !== undefined) deps.runtime = options.runtime;
       if (await handleRestRequest(request, response, url, deps)) return;
       if (await handleMcpRequest(request, response, url, deps)) return;
-      json(response, 404, { error: "NOT_FOUND" });
+      restError(response, new CoreError("NOT_FOUND", "Not found", false));
     } catch (error) {
-      const payload = structuredError(error);
       if (new URL(request.url ?? "/", "http://localhost").pathname === "/mcp") {
-        json(response, 200, { jsonrpc: "2.0", id: null, error: { code: payload.recoverable ? -32602 : -32603, message: payload.code === "INTERNAL_ERROR" ? payload.error : `${payload.code}: ${payload.message_zh}` } });
+        json(response, 200, jsonRpcError(null, JSONRPC_INTERNAL_ERROR, "Internal error"));
         return;
       }
-      json(response, payload.recoverable ? 400 : 500, payload);
+      restError(response, error);
     }
   });
   server.once("close", () => worker.stop());

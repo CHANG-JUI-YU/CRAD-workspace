@@ -3,8 +3,9 @@ import { CoreError, internalId, z, type AdaptationDecision, type RequestResult }
 import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverageResearchCandidatesInputSchema, coverageResearchClaimInputSchema, coverageResearchExhaustInputSchema, coverageResearchRecoverInputSchema, coverageResearchStartInputSchema, coverageResearchStartPreviewInputSchema, coverageResolutionConfirmInputSchema, coverageResolutionPreviewInputSchema, coverageSupplementInputSchema, decodeAttachments, factReviewBatchInputSchema, coverSelectInputSchema, imageInputSchema, imageRemoveInputSchema, interviewAmendPreviewSchema, interviewAmendSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, publishProvenanceConfirmSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
 import { type AgentAdapter, type WorkspaceProjectManager, type WorkspaceRuntime, type WorkspaceWorker } from "@st-workspace/runtime";
 import { structuredError } from "./errors.js";
-import { body, compact, dashboardPathId, dashboardQuery, json, parseRequest } from "./http-utils.js";
+import { body, compact, dashboardPathId, dashboardQuery, json, parseRequest, restError } from "./http-utils.js";
 import { mcpProtocolVersion, toolDefinitions } from "./mcp-tools.js";
+import { JSONRPC_INTERNAL_ERROR, JSONRPC_INVALID_PARAMS, JSONRPC_INVALID_REQUEST, JSONRPC_METHOD_NOT_FOUND, JSONRPC_PARSE_ERROR, jsonRpcError, parseJsonRpcMessage, type JsonRpcErrorResponse, type JsonRpcId, type JsonRpcSuccessResponse } from "./jsonrpc.js";
 import { WORKSPACE_SERVICE } from "./runtime-revision.js";
 
 export interface WorkspaceRouteDeps {
@@ -60,7 +61,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       if (artifactDetailMatch !== null) {
         const artifact = await (await deps.getRuntime()).dashboardArtifact(dashboardPathId(artifactDetailMatch[1] ?? ""), url.searchParams.get("revision") ?? undefined);
         if (artifact === undefined) {
-          json(response, 404, { code: "DASHBOARD_ARTIFACT_NOT_FOUND", message: "Artifact not found" });
+          restError(response, new CoreError("DASHBOARD_ARTIFACT_NOT_FOUND", "Artifact not found", true));
         } else {
           json(response, 200, artifact);
         }
@@ -74,7 +75,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       const artifactCoverageMatch = request.method === "GET" ? /^\/workspace\/dashboard\/artifacts\/([^/]+)\/coverage$/u.exec(url.pathname) : null;
       if (artifactCoverageMatch !== null) {
         const lineage = await (await deps.getRuntime()).dashboardArtifactLineage(dashboardPathId(artifactCoverageMatch[1] ?? ""));
-        if (lineage === undefined) json(response, 404, { code: "DASHBOARD_ARTIFACT_COVERAGE_NOT_FOUND", message: "Artifact coverage lineage not found" });
+        if (lineage === undefined) restError(response, new CoreError("DASHBOARD_ARTIFACT_COVERAGE_NOT_FOUND", "Artifact coverage lineage not found", true));
         else json(response, 200, lineage);
         return true;
       }
@@ -93,14 +94,14 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       const sourceDetailMatch = request.method === "GET" ? /^\/workspace\/dashboard\/sources\/([^/]+)$/u.exec(url.pathname) : null;
       if (sourceDetailMatch !== null) {
         const source = await (await deps.getRuntime()).dashboardSource(dashboardPathId(sourceDetailMatch[1] ?? ""));
-        if (source === undefined) json(response, 404, { code: "DASHBOARD_SOURCE_NOT_FOUND", message: "Source not found" });
+        if (source === undefined) restError(response, new CoreError("DASHBOARD_SOURCE_NOT_FOUND", "Source not found", true));
         else json(response, 200, source);
         return true;
       }
       const candidateDetailMatch = request.method === "GET" ? /^\/workspace\/dashboard\/candidates\/([^/]+)$/u.exec(url.pathname) : null;
       if (candidateDetailMatch !== null) {
         const candidate = await (await deps.getRuntime()).dashboardCandidate(dashboardPathId(candidateDetailMatch[1] ?? ""));
-        if (candidate === undefined) json(response, 404, { code: "DASHBOARD_CANDIDATE_NOT_FOUND", message: "Candidate not found" });
+        if (candidate === undefined) restError(response, new CoreError("DASHBOARD_CANDIDATE_NOT_FOUND", "Candidate not found", true));
         else json(response, 200, candidate);
         return true;
       }
@@ -111,7 +112,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       const operationDetailMatch = request.method === "GET" ? /^\/workspace\/dashboard\/operations\/([^/]+)$/u.exec(url.pathname) : null;
       if (operationDetailMatch !== null) {
         const operation = await (await deps.getRuntime()).dashboardOperation(dashboardPathId(operationDetailMatch[1] ?? ""));
-        if (operation === undefined) json(response, 404, { code: "DASHBOARD_OPERATION_NOT_FOUND", message: "Operation not found" });
+        if (operation === undefined) restError(response, new CoreError("DASHBOARD_OPERATION_NOT_FOUND", "Operation not found", true));
         else json(response, 200, operation);
         return true;
       }
@@ -134,7 +135,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       const reviewRunDetailMatch = request.method === "GET" ? /^\/workspace\/dashboard\/fact-review\/runs\/([^/]+)$/u.exec(url.pathname) : null;
       if (reviewRunDetailMatch !== null) {
         const run = await (await deps.getRuntime()).dashboardReviewRun(dashboardPathId(reviewRunDetailMatch[1] ?? ""));
-        if (run === undefined) json(response, 404, { code: "DASHBOARD_REVIEW_RUN_NOT_FOUND", message: "Fact review run not found" });
+        if (run === undefined) restError(response, new CoreError("DASHBOARD_REVIEW_RUN_NOT_FOUND", "Fact review run not found", true));
         else json(response, 200, run);
         return true;
       }
@@ -149,7 +150,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       if (request.method === "GET" && url.pathname === "/workspace/publish/preview") {
         const rawMode = url.searchParams.get("mode");
         if (rawMode !== null && rawMode !== "" && rawMode !== "zhuji" && rawMode !== "palette" && rawMode !== "both") {
-          json(response, 400, structuredError(new CoreError("BUILD_MODE_INVALID", `Invalid build mode: ${rawMode}`, true)));
+          restError(response, new CoreError("BUILD_MODE_INVALID", `Invalid build mode: ${rawMode}`, true));
           return true;
         }
         const mode = rawMode === null || rawMode === "" ? undefined : rawMode as "zhuji" | "palette" | "both";
@@ -159,7 +160,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       if (request.method === "GET" && url.pathname === "/workspace/publish/provenance/preview") {
         const rawMode = url.searchParams.get("mode");
         if (rawMode !== null && rawMode !== "" && rawMode !== "zhuji" && rawMode !== "palette" && rawMode !== "both") {
-          json(response, 400, structuredError(new CoreError("BUILD_MODE_INVALID", `Invalid build mode: ${rawMode}`, true)));
+          restError(response, new CoreError("BUILD_MODE_INVALID", `Invalid build mode: ${rawMode}`, true));
           return true;
         }
         const mode = rawMode === null || rawMode === "" ? undefined : rawMode as "zhuji" | "palette" | "both";
@@ -173,7 +174,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       if (request.method === "GET" && url.pathname === "/workspace/publish/completion") {
         const publishId = url.searchParams.get("publish_id");
         if (publishId === null || publishId === "") {
-          json(response, 400, structuredError(new CoreError("PUBLISH_ID_REQUIRED", "publish_id 參數為必填。", true)));
+          restError(response, new CoreError("PUBLISH_ID_REQUIRED", "publish_id 參數為必填。", true));
           return true;
         }
         json(response, 200, await (await deps.getRuntime()).publishCompletion(publishId));
@@ -183,11 +184,11 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         const publishId = url.searchParams.get("publish_id");
         const rawKind = url.searchParams.get("kind");
         if (publishId === null || publishId === "") {
-          json(response, 400, structuredError(new CoreError("PUBLISH_ID_REQUIRED", "publish_id 參數為必填。", true)));
+          restError(response, new CoreError("PUBLISH_ID_REQUIRED", "publish_id 參數為必填。", true));
           return true;
         }
         if (rawKind !== "json" && rawKind !== "png") {
-          json(response, 400, structuredError(new CoreError("PUBLISH_DOWNLOAD_KIND_INVALID", `Invalid download kind: ${rawKind ?? "null"}`, true)));
+          restError(response, new CoreError("PUBLISH_DOWNLOAD_KIND_INVALID", `Invalid download kind: ${rawKind ?? "null"}`, true));
           return true;
         }
         try {
@@ -198,7 +199,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
             content: Buffer.from(result.content.buffer, result.content.byteOffset, result.content.byteLength).toString("base64"),
           });
         } catch (error) {
-          json(response, error instanceof CoreError && error.recoverable ? 400 : 500, structuredError(error));
+          restError(response, error);
         }
         return true;
       }
@@ -218,7 +219,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       if (imageMatch !== null) {
         const image = await (await deps.getRuntime()).getProjectImage(imageMatch[1] ?? "");
         if (image === undefined) {
-          json(response, 404, { error: "IMAGE_NOT_FOUND" });
+          restError(response, new CoreError("IMAGE_NOT_FOUND", "Image not found", true));
           return true;
         }
         response.setHeader("content-type", image.media_type);
@@ -241,7 +242,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       if (request.method === "GET" && url.pathname === "/workspace/template/context") {
         const kind = url.searchParams.get("kind");
         if (kind === null || !templateKindSchema.safeParse({ kind }).success) {
-          json(response, 400, structuredError(new CoreError("TEMPLATE_KIND_REQUIRED", "TEMPLATE_KIND_REQUIRED", true)));
+          restError(response, new CoreError("TEMPLATE_KIND_REQUIRED", "TEMPLATE_KIND_REQUIRED", true));
           return true;
         }
         json(response, 200, await (await deps.getRuntime()).templateContext(kind as Parameters<WorkspaceRuntime["templateContext"]>[0]));
@@ -283,7 +284,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       }
       if (request.method === "POST" && url.pathname === "/workspace/project/new") {
         if (deps.projectManager === undefined) {
-          json(response, 400, structuredError(new CoreError("PROJECT_MANAGER_REQUIRED", "PROJECT_MANAGER_REQUIRED", true)));
+          restError(response, new CoreError("PROJECT_MANAGER_REQUIRED", "PROJECT_MANAGER_REQUIRED", true));
           return true;
         }
         const runtime = await deps.projectManager.startNewProject();
@@ -356,7 +357,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         const parsed = await body(request);
         const { project } = parseRequest(projectSchema, parsed, "PROJECT_REQUIRED");
         if (deps.projectManager === undefined) {
-          json(response, 400, structuredError(new CoreError("PROJECT_MANAGER_REQUIRED", "PROJECT_MANAGER_REQUIRED", true)));
+          restError(response, new CoreError("PROJECT_MANAGER_REQUIRED", "PROJECT_MANAGER_REQUIRED", true));
           return true;
         }
         json(response, 200, await deps.projectManager.select(project));
@@ -582,7 +583,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
           json(response, 200, await (await deps.getRuntime()).cancelOperation(operation_id, deps.actor));
         } catch (error) {
           if (error instanceof CoreError) {
-            json(response, 400, structuredError(error));
+            restError(response, error);
             return true;
           }
           throw error;
@@ -599,179 +600,147 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
 
 export async function handleMcpRequest(request: IncomingMessage, response: ServerResponse, url: URL, deps: WorkspaceRouteDeps): Promise<boolean> {
       if (request.method === "POST" && url.pathname === "/mcp") {
-        const parsed = await body(request) as { id?: unknown; method?: unknown; params?: unknown };
-        const id = parsed.id ?? null;
-        if (parsed.method === "initialize") {
-          json(response, 200, { jsonrpc: "2.0", id, result: { protocolVersion: mcpProtocolVersion(parsed.params), capabilities: { tools: { listChanged: false } }, serverInfo: { name: "st-workspace-v3", version: "0.1.0" } } });
+        let raw: unknown;
+        try {
+          raw = await body(request);
+        } catch {
+          json(response, 200, jsonRpcError(null, JSONRPC_PARSE_ERROR, "Parse error"));
           return true;
         }
-        if (parsed.method === "tools/list") {
-          json(response, 200, { jsonrpc: "2.0", id, result: { tools: toolDefinitions } });
+        const isBatch = Array.isArray(raw);
+        if (isBatch && (raw as unknown[]).length === 0) {
+          json(response, 200, jsonRpcError(null, JSONRPC_INVALID_REQUEST, "Invalid Request"));
           return true;
         }
-        if (parsed.method === "tools/call") {
-          const params = parsed.params as { name?: unknown; arguments?: unknown } | undefined;
-          if (params?.name === "workspace_agents") {
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(visibleAgents(await deps.getAgentAdapter())) }] } });
-            return true;
+        const messages = isBatch ? (raw as unknown[]) : [raw];
+        const responses: Array<JsonRpcSuccessResponse | JsonRpcErrorResponse> = [];
+        for (const rawMessage of messages) {
+          const parsed = parseJsonRpcMessage(rawMessage);
+          if (parsed.kind !== "request") {
+            responses.push(jsonRpcError(null, parsed.code, parsed.message));
+            continue;
           }
-          if (params?.name === "workspace_zhuji_context") {
-            const input = params.arguments === undefined || typeof params.arguments !== "object" ? undefined : parseRequest(characterIdSchema, params.arguments, "CHARACTER_ID_REQUIRED");
-            const context = await (await deps.getRuntime()).zhujiContext(input?.character_id);
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(context) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_zhuji_submit") {
-            const result = await (await deps.getRuntime()).submitZhujiProposal(params.arguments, { actor: deps.actor, attachments: [] });
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_template_context") {
-            let kind: string | undefined;
-            try {
-              kind = parseRequest(templateKindSchema, params.arguments, "TEMPLATE_KIND_REQUIRED").kind;
-            } catch {
-              json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "kind is required" } });
-              return true;
-            }
-            const context = await (await deps.getRuntime()).templateContext(kind as Parameters<WorkspaceRuntime["templateContext"]>[0]);
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(context) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_template_submit") {
-            const result = await (await deps.getRuntime()).submitTemplateProposal(params.arguments, { actor: deps.actor, attachments: [] });
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_issue_update") {
-            let input: z.infer<typeof issueUpdateInputSchema>;
-            try {
-              input = parseRequest(issueUpdateInputSchema, params.arguments, "ISSUE_UPDATE_REQUIRED");
-            } catch {
-              json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "issue_id, action and reason are required" } });
-              return true;
-            }
-            const { agent, ...issue } = input;
-            const result = await (await deps.getRuntime()).updateIssue(compact(issue) as IssueUpdateInput, { actor: deps.actor, attachments: [] }, agent === undefined ? {} : { agent });
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_authoring_context") {
-            const context = await (await deps.getRuntime()).authoringKnowledgeContext();
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(context) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_source_candidates") {
-            const candidates = await (await deps.getRuntime()).sourceCandidates();
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify({ candidates }) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_source_select") {
-            let decisions: z.infer<typeof sourceSelectionInputSchema>["decisions"];
-            try {
-              decisions = parseRequest(sourceSelectionInputSchema, params.arguments, "SOURCE_SELECTION_REQUIRED").decisions;
-            } catch {
-              json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "decisions are required" } });
-              return true;
-            }
-            const result = await (await deps.getRuntime()).selectSourceCandidates(decisions, { actor: deps.actor, attachments: [] });
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_adaptation_decision") {
-            let decision: z.infer<typeof adaptationDecisionInputSchema>;
-            try {
-              decision = parseRequest(adaptationDecisionInputSchema, params.arguments, "ADAPTATION_DECISION_REQUIRED");
-            } catch {
-              json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "topic, choice and rationale are required" } });
-              return true;
-            }
-            const result = await (await deps.getRuntime()).createAdaptationDecision(compact(decision) as Omit<AdaptationDecision, "id" | "created_at" | "created_by">, { actor: deps.actor, attachments: [] });
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_status") {
-            const statusValue = deps.projectManager === undefined
-              ? await deps.runtime!.status()
-              : deps.projectManager.sessionSelected()
-                ? await deps.projectManager.status()
-                : { ok: true, selected: false, projects: await deps.projectManager.listProjects() };
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(statusValue) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_interview_context") {
-            const context = deps.projectManager !== undefined && !deps.projectManager.sessionSelected()
-              ? { status: "idle", answers: [], selected: false }
-              : await (await deps.getRuntime()).interviewContext();
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(context) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_interview_answer") {
-            let answer: string;
-            try {
-              answer = parseRequest(answerSchema, params.arguments, "ANSWER_REQUIRED").answer;
-            } catch {
-              json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "answer is required" } });
-              return true;
-            }
-            const result = deps.projectManager === undefined
-              ? await (await deps.getRuntime()).answerInterview(answer, { actor: deps.actor, attachments: [] })
-              : await deps.projectManager.answerInterview(answer, { actor: deps.actor, attachments: [] });
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_projects") {
-            if (deps.projectManager === undefined) {
-              json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify({ projects: [] }) }] } });
-            } else {
-              const manager = deps.projectManager;
-              const projects = await manager.listProjects();
-              if (!manager.sessionSelected()) {
-                json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify({ projects }) }] } });
-                return true;
-              }
-              const current = await manager.repository.read();
-              const visible = current.project_status === "uninitialized" && current.interview.status === "idle" && current.operations.length === 0
-                ? projects.filter((project) => project.project_id !== current.project_id)
-                : projects;
-              json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify({ projects: visible }) }] } });
-            }
-            return true;
-          }
-          if (params?.name === "workspace_project_select") {
-            let project: string | undefined;
-            try {
-              project = parseRequest(projectSchema, params.arguments, "PROJECT_REQUIRED").project;
-            } catch {
-              project = undefined;
-            }
-            if (project === undefined || deps.projectManager === undefined) {
-              json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: project === undefined ? "project is required" : "project manager is required" } });
-              return true;
-            }
-            const selected = await deps.projectManager.select(project);
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(selected) }] } });
-            return true;
-          }
-          if (params?.name === "workspace_request") {
-            let input: z.infer<typeof requestSchema>;
-            try {
-              input = parseRequest(requestSchema, params.arguments, "REQUEST_REQUIRED");
-            } catch {
-              json(response, 200, { jsonrpc: "2.0", id, error: { code: -32602, message: "request is required" } });
-              return true;
-            }
-            const result: RequestResult = deps.projectManager === undefined
-              ? await (await deps.getAgentAdapter()).request({ request: input.request, context: { actor: deps.actor, attachments: decodeAttachments(input.attachments) }, ...(input.agent === undefined ? {} : { agent: input.agent }) })
-              : await deps.projectManager.request(input.request, { actor: deps.actor, attachments: decodeAttachments(input.attachments) }, input.agent === undefined ? {} : { agent: input.agent });
-            json(response, 200, { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
-            return true;
-          }
-          json(response, 200, { jsonrpc: "2.0", id, error: { code: -32601, message: "tool not found" } });
-          return true;
+          if (parsed.notification) continue;
+          responses.push(await dispatchMcpMethod(parsed.method, parsed.params, parsed.id, deps));
         }
-        json(response, 200, { jsonrpc: "2.0", id, error: { code: -32601, message: "method not found" } });
+        if (responses.length === 0) {
+          response.statusCode = 204;
+          response.end();
+        } else if (isBatch) {
+          json(response, 200, responses);
+        } else {
+          json(response, 200, responses[0]);
+        }
         return true;
       }
   return false;
+}
+
+async function dispatchMcpMethod(method: string, params: unknown, id: JsonRpcId, deps: WorkspaceRouteDeps): Promise<JsonRpcSuccessResponse | JsonRpcErrorResponse> {
+  try {
+    if (method === "initialize") {
+      return { jsonrpc: "2.0", id, result: { protocolVersion: mcpProtocolVersion(params), capabilities: { tools: { listChanged: false } }, serverInfo: { name: "st-workspace-v3", version: "0.1.0" } } };
+    }
+    if (method === "tools/list") {
+      return { jsonrpc: "2.0", id, result: { tools: toolDefinitions } };
+    }
+    if (method === "tools/call") {
+      if (params === undefined || typeof params !== "object" || params === null || Array.isArray(params)) {
+        return jsonRpcError(id, JSONRPC_INVALID_PARAMS, "Invalid params");
+      }
+      const name = (params as { name?: unknown }).name;
+      if (typeof name !== "string" || name === "") {
+        return jsonRpcError(id, JSONRPC_INVALID_PARAMS, "Invalid params");
+      }
+      if (!toolDefinitions.some((tool) => tool.name === name)) {
+        return jsonRpcError(id, JSONRPC_METHOD_NOT_FOUND, "tool not found");
+      }
+      const result = await callWorkspaceTool(name, (params as { arguments?: unknown }).arguments, deps);
+      return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } };
+    }
+    return jsonRpcError(id, JSONRPC_METHOD_NOT_FOUND, "method not found");
+  } catch (error) {
+    const code = error instanceof CoreError ? error.code : undefined;
+    if (error instanceof CoreError && error.recoverable) {
+      return jsonRpcError(id, JSONRPC_INVALID_PARAMS, "Invalid params", code === undefined ? undefined : { code });
+    }
+    return jsonRpcError(id, JSONRPC_INTERNAL_ERROR, "Internal error", code === undefined ? undefined : { code });
+  }
+}
+
+async function callWorkspaceTool(name: string, args: unknown, deps: WorkspaceRouteDeps): Promise<unknown> {
+  const parsedArguments = args === undefined || typeof args !== "object" || args === null || Array.isArray(args) ? undefined : (args as Record<string, unknown>);
+  switch (name) {
+    case "workspace_agents":
+      return visibleAgents(await deps.getAgentAdapter());
+    case "workspace_zhuji_context": {
+      const input = parsedArguments === undefined ? undefined : parseRequest(characterIdSchema, parsedArguments, "CHARACTER_ID_REQUIRED");
+      return (await deps.getRuntime()).zhujiContext(input?.character_id);
+    }
+    case "workspace_zhuji_submit":
+      return (await deps.getRuntime()).submitZhujiProposal(parsedArguments, { actor: deps.actor, attachments: [] });
+    case "workspace_template_context": {
+      const input = parseRequest(templateKindSchema, parsedArguments, "TEMPLATE_KIND_REQUIRED");
+      return (await deps.getRuntime()).templateContext(input.kind);
+    }
+    case "workspace_template_submit":
+      return (await deps.getRuntime()).submitTemplateProposal(parsedArguments, { actor: deps.actor, attachments: [] });
+    case "workspace_issue_update": {
+      const input = parseRequest(issueUpdateInputSchema, parsedArguments, "ISSUE_UPDATE_REQUIRED");
+      const { agent, ...issue } = input;
+      return (await deps.getRuntime()).updateIssue(compact(issue) as IssueUpdateInput, { actor: deps.actor, attachments: [] }, agent === undefined ? {} : { agent });
+    }
+    case "workspace_authoring_context":
+      return (await deps.getRuntime()).authoringKnowledgeContext();
+    case "workspace_source_candidates":
+      return { candidates: await (await deps.getRuntime()).sourceCandidates() };
+    case "workspace_source_select": {
+      const input = parseRequest(sourceSelectionInputSchema, parsedArguments, "SOURCE_SELECTION_REQUIRED");
+      return (await deps.getRuntime()).selectSourceCandidates(input.decisions, { actor: deps.actor, attachments: [] });
+    }
+    case "workspace_adaptation_decision": {
+      const input = parseRequest(adaptationDecisionInputSchema, parsedArguments, "ADAPTATION_DECISION_REQUIRED");
+      return (await deps.getRuntime()).createAdaptationDecision(compact(input) as Omit<AdaptationDecision, "id" | "created_at" | "created_by">, { actor: deps.actor, attachments: [] });
+    }
+    case "workspace_status":
+      return deps.projectManager === undefined
+        ? await deps.runtime!.status()
+        : deps.projectManager.sessionSelected()
+          ? await deps.projectManager.status()
+          : { ok: true, selected: false, projects: await deps.projectManager.listProjects() };
+    case "workspace_interview_context":
+      return deps.projectManager !== undefined && !deps.projectManager.sessionSelected()
+        ? { status: "idle", answers: [], selected: false }
+        : await (await deps.getRuntime()).interviewContext();
+    case "workspace_interview_answer": {
+      const input = parseRequest(answerSchema, parsedArguments, "ANSWER_REQUIRED");
+      return deps.projectManager === undefined
+        ? await (await deps.getRuntime()).answerInterview(input.answer, { actor: deps.actor, attachments: [] })
+        : await deps.projectManager.answerInterview(input.answer, { actor: deps.actor, attachments: [] });
+    }
+    case "workspace_projects": {
+      if (deps.projectManager === undefined) return { projects: [] };
+      const manager = deps.projectManager;
+      const projects = await manager.listProjects();
+      if (!manager.sessionSelected()) return { projects };
+      const current = await manager.repository.read();
+      const visible = current.project_status === "uninitialized" && current.interview.status === "idle" && current.operations.length === 0
+        ? projects.filter((project) => project.project_id !== current.project_id)
+        : projects;
+      return { projects: visible };
+    }
+    case "workspace_project_select": {
+      if (deps.projectManager === undefined) throw new CoreError("PROJECT_MANAGER_REQUIRED", "Project manager is required", true);
+      const input = parseRequest(projectSchema, parsedArguments, "PROJECT_REQUIRED");
+      return deps.projectManager.select(input.project);
+    }
+    case "workspace_request": {
+      const input = parseRequest(requestSchema, parsedArguments, "REQUEST_REQUIRED");
+      return deps.projectManager === undefined
+        ? await (await deps.getAgentAdapter()).request({ request: input.request, context: { actor: deps.actor, attachments: decodeAttachments(input.attachments) }, ...(input.agent === undefined ? {} : { agent: input.agent }) })
+        : await deps.projectManager.request(input.request, { actor: deps.actor, attachments: decodeAttachments(input.attachments) }, input.agent === undefined ? {} : { agent: input.agent });
+    }
+    default:
+      return undefined;
+  }
 }

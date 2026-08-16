@@ -7,6 +7,7 @@ export interface ErrorPayload {
   next_actions: string[];
   error: string;
   details?: Record<string, unknown>;
+  uncatalogued_code?: string;
 }
 
 interface ErrorCatalogEntry {
@@ -325,6 +326,12 @@ const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
     impact: "為避免改寫歷史，修訂未套用。",
     next_actions: ["確認回答符合該問題的格式或選項後重試。"],
   },
+  INTERVIEW_CHOICE_INVALID: {
+    category: "project",
+    message_zh: "訪談回答不在目前的選項範圍內。",
+    impact: "此回答未套用，訪談狀態不變。",
+    next_actions: ["依目前問題提供的選項重新回答。"],
+  },
   BLUEPRINT_CHARACTER_NOT_IN_ROSTER: {
     category: "blueprint",
     message_zh: "角色不在目前 Blueprint 的角色名單中。",
@@ -421,6 +428,18 @@ const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
     impact: "此操作未執行。",
     next_actions: ["使用具有 researcher 權限的代理執行。"],
   },
+  COVERAGE_RESEARCH_TARGET_INELIGIBLE: {
+    category: "coverage",
+    message_zh: "目標內容不符合研究資格。",
+    impact: "此操作未執行。",
+    next_actions: ["確認目標為可研究的來源或候選內容後重新送出。"],
+  },
+  COVERAGE_RESOLUTION_DUPLICATE: {
+    category: "coverage",
+    message_zh: "此決議已經存在。",
+    impact: "此操作未執行。",
+    next_actions: ["確認目前的決議狀態，避免重複送出。"],
+  },
   COVERAGE_RESEARCH_APPROVAL_REQUIRED: {
     category: "coverage",
     message_zh: "來源尚未經使用者或 Director 批准。",
@@ -438,6 +457,366 @@ const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
     message_zh: "Coverage 使用者決定無效。",
     impact: "此操作未執行。",
     next_actions: ["以合法的 action 與 requirement 重新提交決定。"],
+  },
+  INTERNAL_ERROR: {
+    category: "internal",
+    message_zh: "伺服器發生未預期的內部錯誤。",
+    impact: "操作未完成。",
+    next_actions: ["查看 server log，修復後重新整理再試。"],
+  },
+  ADAPTATION_DECISION_FACT_INVALID: {
+    category: "review",
+    message_zh: "改編決定參照的事實無效。",
+    impact: "此操作未執行。",
+    next_actions: ["以合法的事實參照重新提交改編決定。"],
+  },
+  ATTACHMENT_REQUIRED: {
+    category: "storage",
+    message_zh: "此操作需要至少一個附件。",
+    impact: "此請求未執行。",
+    next_actions: ["附上檔案後重新送出。"],
+  },
+  BLUEPRINT_CHARACTER_REQUIRED: {
+    category: "blueprint",
+    message_zh: "Blueprint 缺少角色定義。",
+    impact: "此操作未執行。",
+    next_actions: ["確認 Blueprint 包含角色後重試。"],
+  },
+  BLUEPRINT_REQUIRED: {
+    category: "blueprint",
+    message_zh: "缺少 Blueprint 內容。",
+    impact: "此操作未執行。",
+    next_actions: ["確認 Blueprint 已建立後重試。"],
+  },
+  BUILD_MODE_INVALID: {
+    category: "build",
+    message_zh: "指定的建置模式無效。",
+    impact: "此請求未執行。",
+    next_actions: ["以支援的模式重新送出。"],
+  },
+  CARD_IMAGE_DECODE_FAILED: {
+    category: "image",
+    message_zh: "卡片圖片無法解碼。",
+    impact: "此操作未執行。",
+    next_actions: ["確認圖片格式正確後重新送出。"],
+  },
+  CARD_IMAGE_REQUIRED: {
+    category: "image",
+    message_zh: "建置卡片需要圖片。",
+    impact: "此操作未執行。",
+    next_actions: ["補上卡片圖片後重試。"],
+  },
+  CHARACTER_SETTINGS_REQUIRED: {
+    category: "blueprint",
+    message_zh: "角色設定內容缺失。",
+    impact: "此操作未執行。",
+    next_actions: ["確認角色設定完整後重試。"],
+  },
+  COVERAGE_RESEARCH_TASK_ALREADY_RECOVERED: {
+    category: "coverage",
+    message_zh: "此研究任務已完成恢復。",
+    impact: "此操作未執行。",
+    next_actions: ["重新整理後確認目前任務狀態。"],
+  },
+  DASHBOARD_CURSOR_INVALID: {
+    category: "input",
+    message_zh: "分頁游標格式無效。",
+    impact: "此請求未執行。",
+    next_actions: ["移除或修正游標參數後重新送出。"],
+  },
+  DASHBOARD_CURSOR_STALE: {
+    category: "input",
+    message_zh: "分頁游標已過期。",
+    impact: "此請求未執行。",
+    next_actions: ["回到第一頁重新取得最新游標。"],
+  },
+  DASHBOARD_FILTER_INVALID: {
+    category: "input",
+    message_zh: "Dashboard 篩選參數無效。",
+    impact: "此請求未執行。",
+    next_actions: ["修正篩選參數後重新送出。"],
+  },
+  DASHBOARD_PATH_INVALID: {
+    category: "input",
+    message_zh: "Dashboard 資源識別碼無效。",
+    impact: "此請求未執行。",
+    next_actions: ["確認資源識別碼後重新送出。"],
+  },
+  DASHBOARD_QUERY_INVALID: {
+    category: "input",
+    message_zh: "Dashboard 查詢參數無效。",
+    impact: "此請求未執行。",
+    next_actions: ["修正查詢參數後重新送出。"],
+  },
+  FACT_REFERENCE_INVALID: {
+    category: "review",
+    message_zh: "事實參照無效。",
+    impact: "此操作未執行。",
+    next_actions: ["以合法的事實參照重新送出。"],
+  },
+  IDEMPOTENCY_CONFLICT: {
+    category: "storage",
+    message_zh: "重複提交與既有操作衝突。",
+    impact: "此請求未執行。",
+    next_actions: ["沿用既有操作的結果，或等待其完成後再重試。"],
+  },
+  INTERVIEW_ANSWER_EMPTY: {
+    category: "project",
+    message_zh: "訪談答案不可為空白。",
+    impact: "此請求未執行。",
+    next_actions: ["輸入答案後重新送出。"],
+  },
+  INTERVIEW_PRECHECK_INVALID: {
+    category: "project",
+    message_zh: "訪談預檢內容無效。",
+    impact: "此操作未執行。",
+    next_actions: ["確認預檢內容後重試。"],
+  },
+  INTERVIEW_PRECHECK_STALE: {
+    category: "project",
+    message_zh: "訪談預檢已過期。",
+    impact: "此操作未執行。",
+    next_actions: ["重新產生預檢後再送出。"],
+  },
+  INTERVIEW_REQUIRED: {
+    category: "project",
+    message_zh: "此操作需要先完成訪談。",
+    impact: "此請求未執行。",
+    next_actions: ["完成訪談後重試。"],
+  },
+  LEGACY_CARD_NOT_FOUND: {
+    category: "import",
+    message_zh: "找不到指定的舊版角色卡。",
+    impact: "此操作未執行。",
+    next_actions: ["確認角色卡檔案存在後重試。"],
+  },
+  LEGACY_CARD_UNREADABLE: {
+    category: "import",
+    message_zh: "舊版角色卡無法讀取。",
+    impact: "此操作未執行。",
+    next_actions: ["確認角色卡格式正確後重試。"],
+  },
+  MODE_SELECTION_REQUIRED: {
+    category: "build",
+    message_zh: "此專案需要選擇建置模式。",
+    impact: "此請求未執行。",
+    next_actions: ["先選擇模式（zhuji/palette/both）再送出。"],
+  },
+  OPERATION_COMMAND_INVALID: {
+    category: "operation",
+    message_zh: "操作指令無效。",
+    impact: "此請求未執行。",
+    next_actions: ["確認指令內容後重新送出。"],
+  },
+  OPERATION_NOT_RECOVERABLE: {
+    category: "operation",
+    message_zh: "此操作無法恢復。",
+    impact: "此請求未執行。",
+    next_actions: ["確認操作狀態後重試。"],
+  },
+  OPERATION_NOT_RESUMABLE: {
+    category: "operation",
+    message_zh: "此操作無法繼續。",
+    impact: "此請求未執行。",
+    next_actions: ["確認操作狀態後重試。"],
+  },
+  PROJECT_NOT_FOUND: {
+    category: "project",
+    message_zh: "找不到指定的專案。",
+    impact: "此請求未執行。",
+    next_actions: ["確認專案識別碼後重新送出。"],
+  },
+  PROJECT_SELECTION_AMBIGUOUS: {
+    category: "project",
+    message_zh: "專案選擇不明確。",
+    impact: "此請求未執行。",
+    next_actions: ["以唯一的專案識別碼重新送出。"],
+  },
+  PROJECT_SELECTION_INVALID: {
+    category: "project",
+    message_zh: "專案選擇無效。",
+    impact: "此請求未執行。",
+    next_actions: ["確認專案識別碼後重新送出。"],
+  },
+  PROVENANCE_CONFIRMATION_STALE: {
+    category: "build",
+    message_zh: "發布確認已過期。",
+    impact: "此請求未執行。",
+    next_actions: ["重新預覽並確認發布。"],
+  },
+  PUBLISH_DOWNLOAD_HASH_MISMATCH: {
+    category: "build",
+    message_zh: "下載內容與記錄不符。",
+    impact: "此請求未執行。",
+    next_actions: ["重新建置並下載。"],
+  },
+  PUBLISH_DOWNLOAD_KIND_INVALID: {
+    category: "build",
+    message_zh: "下載類型無效。",
+    impact: "此請求未執行。",
+    next_actions: ["以支援的下載類型重新送出。"],
+  },
+  PUBLISH_DOWNLOAD_LEGACY: {
+    category: "build",
+    message_zh: "此發布使用舊版格式，無法下載。",
+    impact: "此請求未執行。",
+    next_actions: ["重新發布後再下載。"],
+  },
+  PUBLISH_DOWNLOAD_MISSING: {
+    category: "build",
+    message_zh: "發布的產物已不存在。",
+    impact: "此請求未執行。",
+    next_actions: ["重新發布後再下載。"],
+  },
+  PUBLISH_DOWNLOAD_PATH_INVALID: {
+    category: "build",
+    message_zh: "下載路徑無效。",
+    impact: "此請求未執行。",
+    next_actions: ["確認下載路徑後重新送出。"],
+  },
+  PUBLISH_ID_REQUIRED: {
+    category: "build",
+    message_zh: "需要發布識別碼。",
+    impact: "此請求未執行。",
+    next_actions: ["帶上發布識別碼後重新送出。"],
+  },
+  PUBLISH_NOT_FOUND: {
+    category: "build",
+    message_zh: "找不到指定的發布記錄。",
+    impact: "此請求未執行。",
+    next_actions: ["確認發布識別碼後重新送出。"],
+  },
+  REQUEST_EMPTY: {
+    category: "input",
+    message_zh: "請求內容為空白。",
+    impact: "此請求未執行。",
+    next_actions: ["輸入請求內容後重新送出。"],
+  },
+  SOURCE_SELECTION_EMPTY: {
+    category: "source",
+    message_zh: "來源選擇為空白。",
+    impact: "此請求未執行。",
+    next_actions: ["選擇至少一個來源後重新送出。"],
+  },
+  URL_CONTENT_EMPTY: {
+    category: "source",
+    message_zh: "取得的網址內容為空白。",
+    impact: "此操作未執行。",
+    next_actions: ["確認網址可正常存取後重試。"],
+  },
+  URL_CONTENT_INVALID: {
+    category: "source",
+    message_zh: "取得的網址內容無效。",
+    impact: "此操作未執行。",
+    next_actions: ["確認網址內容後重試。"],
+  },
+  URL_FETCH_FAILED: {
+    category: "source",
+    message_zh: "無法取得網址內容。",
+    impact: "此操作未執行。",
+    next_actions: ["確認網路與網址後重試。"],
+  },
+  URL_FETCHER_UNAVAILABLE: {
+    category: "source",
+    message_zh: "網址取得服務不可用。",
+    impact: "此操作未執行。",
+    next_actions: ["確認服務設定後重試。"],
+  },
+  ZHUJI_SCHEMA_INVALID: {
+    category: "template",
+    message_zh: "主機模板內容不符合 schema。",
+    impact: "此操作未執行。",
+    next_actions: ["修正內容後重新送出。"],
+  },
+  CHARACTER_ID_REQUIRED: {
+    category: "blueprint",
+    message_zh: "需要角色識別碼。",
+    impact: "此請求未執行。",
+    next_actions: ["帶上角色識別碼後重新送出。"],
+  },
+  COVER_SELECT_REQUIRED: {
+    category: "image",
+    message_zh: "需要選擇封面圖片。",
+    impact: "此請求未執行。",
+    next_actions: ["選擇封面圖片後重新送出。"],
+  },
+  IMAGE_INPUT_REQUIRED: {
+    category: "image",
+    message_zh: "需要圖片輸入。",
+    impact: "此請求未執行。",
+    next_actions: ["附上圖片後重新送出。"],
+  },
+  INTERVIEW_AMEND_PREVIEW_REQUIRED: {
+    category: "project",
+    message_zh: "需要修訂預覽內容。",
+    impact: "此請求未執行。",
+    next_actions: ["帶上修訂預覽內容後重新送出。"],
+  },
+  INTERVIEW_AMEND_REQUIRED: {
+    category: "project",
+    message_zh: "需要修訂內容。",
+    impact: "此請求未執行。",
+    next_actions: ["帶上修訂內容後重新送出。"],
+  },
+  PROVENANCE_CONFIRMATION_REQUIRED: {
+    category: "build",
+    message_zh: "需要發布確認。",
+    impact: "此請求未執行。",
+    next_actions: ["帶上發布確認後重新送出。"],
+  },
+  SOURCE_IDS_REQUIRED: {
+    category: "source",
+    message_zh: "需要來源識別碼。",
+    impact: "此請求未執行。",
+    next_actions: ["帶上來源識別碼後重新送出。"],
+  },
+  DASHBOARD_ARTIFACT_NOT_FOUND: {
+    category: "input",
+    message_zh: "找不到指定的成品記錄。",
+    impact: "此請求未執行。",
+    next_actions: ["確認成品識別碼後重新送出。"],
+  },
+  DASHBOARD_ARTIFACT_COVERAGE_NOT_FOUND: {
+    category: "input",
+    message_zh: "找不到指定成品的 Coverage 資料。",
+    impact: "此請求未執行。",
+    next_actions: ["確認成品與 Coverage 狀態後重新送出。"],
+  },
+  DASHBOARD_SOURCE_NOT_FOUND: {
+    category: "input",
+    message_zh: "找不到指定的來源記錄。",
+    impact: "此請求未執行。",
+    next_actions: ["確認來源識別碼後重新送出。"],
+  },
+  DASHBOARD_CANDIDATE_NOT_FOUND: {
+    category: "input",
+    message_zh: "找不到指定的候選來源。",
+    impact: "此請求未執行。",
+    next_actions: ["確認候選識別碼後重新送出。"],
+  },
+  DASHBOARD_OPERATION_NOT_FOUND: {
+    category: "input",
+    message_zh: "找不到指定的操作記錄。",
+    impact: "此請求未執行。",
+    next_actions: ["確認操作識別碼後重新送出。"],
+  },
+  DASHBOARD_REVIEW_RUN_NOT_FOUND: {
+    category: "input",
+    message_zh: "找不到指定的事實審查記錄。",
+    impact: "此請求未執行。",
+    next_actions: ["確認審查識別碼後重新送出。"],
+  },
+  TRANSACTION_RECOVERY_REQUIRED: {
+    category: "storage",
+    message_zh: "交易無法安全回滾，需要復原程序介入。",
+    impact: "此操作未完成，可能留下未完成的交易記錄。",
+    next_actions: ["查看 server log 中的交易識別碼，確認目前專案狀態後重試。"],
+  },
+  TRANSACTION_RECOVERY_UNCERTAIN: {
+    category: "storage",
+    message_zh: "交易復原結果不確定，無法確認檔案狀態。",
+    impact: "此操作未完成，檔案狀態可能未完全還原。",
+    next_actions: ["查看 server log 中的交易識別碼與路徑，確認檔案後重試。"],
   },
 };
 
@@ -463,6 +842,7 @@ const CATEGORY_BY_PREFIX: Array<{ pattern: RegExp; category: string }> = [
   { pattern: /^REPAIR_/u, category: "repair" },
   { pattern: /^AUTHORING_/u, category: "blueprint" },
   { pattern: /^REVISION_/u, category: "storage" },
+  { pattern: /^TRANSACTION_/u, category: "storage" },
   { pattern: /^ATTACHMENT_/u, category: "storage" },
   { pattern: /^EXECUTION_/u, category: "operation" },
   { pattern: /^COVERAGE_/u, category: "coverage" },
@@ -499,14 +879,15 @@ export function structuredError(error: unknown): ErrorPayload {
       };
     }
     return {
-      code,
-      category: categoryFor(code),
+      code: "INTERNAL_ERROR",
+      category: "internal",
       recoverable,
-      message_zh: message,
-      impact: "操作未完成，未產生任何變更。",
+      message_zh: "伺服器發生未預期的內部錯誤。",
+      impact: "操作未完成。",
       next_actions: FALLBACK_NEXT_ACTIONS,
       error: message,
       ...(details === undefined ? {} : { details }),
+      uncatalogued_code: code,
     };
   }
   const message = error instanceof Error ? error.message : String(error);
@@ -519,4 +900,14 @@ export function structuredError(error: unknown): ErrorPayload {
     next_actions: ["查看 server log，修復後重新整理再試。"],
     error: message,
   };
+}
+
+export function httpStatusFor(payload: ErrorPayload): number {
+  if (payload.code === "UNAUTHORIZED" || payload.code === "EXTERNAL_HOST_AUTH_REQUIRED") return 401;
+  if (payload.code === "AGENT_CAPABILITY_DENIED" || payload.code === "AGENT_READ_ONLY") return 403;
+  if (payload.code === "REQUEST_TOO_LARGE") return 413;
+  if (payload.code === "REVISION_CONFLICT" || payload.code === "IDEMPOTENCY_CONFLICT") return 409;
+  if (payload.code === "NOT_FOUND" || payload.code.endsWith("_NOT_FOUND")) return 404;
+  if (payload.code === "INTERNAL_ERROR" || !payload.recoverable) return 500;
+  return 400;
 }

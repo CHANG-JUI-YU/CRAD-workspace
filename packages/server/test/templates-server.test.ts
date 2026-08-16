@@ -30,12 +30,12 @@ describe("template HTTP and MCP boundary", () => {
       const mcpSubmit = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "workspace_template_submit", arguments: proposal } }) });
       expect(JSON.stringify(await mcpSubmit.json())).toContain("completed");
       const invalidMcpContext = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "workspace_template_context", arguments: { kind: "unknown" } } }) });
-      expect(JSON.stringify(await invalidMcpContext.json())).toContain("kind is required");
+      expect(JSON.stringify(await invalidMcpContext.json())).toContain("TEMPLATE_KIND_REQUIRED");
       const invalidContext = await fetch(`${base}/workspace/template/context`);
       expect(invalidContext.status).toBe(400);
       const unknownAgent = await fetch(`${base}/workspace/request`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: "status", agent: "missing-agent" }) });
       expect(unknownAgent.status).toBe(400);
-      expect(await unknownAgent.json()).toMatchObject({ error: expect.stringContaining("Unknown agent") });
+      expect(await unknownAgent.json()).toMatchObject({ code: "AGENT_UNKNOWN" });
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
@@ -55,11 +55,11 @@ describe("template HTTP and MCP boundary", () => {
     if (address === null || typeof address === "string") throw new Error("server did not bind");
     try {
       const unauthorized = await fetch(`http://127.0.0.1:${address.port}/workspace/issue`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ issue_id: issue.id, action: "override", severity: "info", reason: "Creator cannot decide quality policy.", agent: "palette-creator" }) });
-      expect(unauthorized.status).toBe(400);
-      expect(await unauthorized.json()).toMatchObject({ error: expect.stringContaining("not allowed") });
+      expect(unauthorized.status).toBe(403);
+      expect(await unauthorized.json()).toMatchObject({ code: "AGENT_CAPABILITY_DENIED" });
       const unknownAgent = await fetch(`http://127.0.0.1:${address.port}/workspace/issue`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ issue_id: issue.id, action: "override", severity: "info", reason: "Unknown agent must fail.", agent: "missing-agent" }) });
       expect(unknownAgent.status).toBe(400);
-      expect(await unknownAgent.json()).toMatchObject({ error: expect.stringContaining("Unknown agent") });
+      expect(await unknownAgent.json()).toMatchObject({ code: "AGENT_UNKNOWN" });
       const response = await fetch(`http://127.0.0.1:${address.port}/workspace/issue`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ issue_id: issue.id, action: "ignore", reason: "Accepted for this release." }) });
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ status: "completed", completed: [issue.id] });

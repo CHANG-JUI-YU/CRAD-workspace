@@ -52,7 +52,7 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
           var code = firstString(payload, ["code", "error_code"])
             || (typeof errorValue === "string" ? errorValue : "")
             || (isRecord(errorValue) ? firstString(errorValue, ["code", "error_code"]) : "");
-          var message = firstString(payload, ["message", "detail"])
+          var message = firstString(payload, ["message_zh", "message", "detail"])
             || (typeof errorValue === "string" ? errorValue : "")
             || (isRecord(errorValue) ? firstString(errorValue, ["message", "detail"]) : "")
             || response.statusText

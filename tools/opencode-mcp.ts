@@ -83,12 +83,13 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const isNotification = !Object.prototype.hasOwnProperty.call(message, "id") || typeof message.method === "string" && message.method.startsWith("notifications/");
+      const isNotification = !Object.prototype.hasOwnProperty.call(message, "id");
       try {
         const response = await fetch(endpoint, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(message),
+          signal: AbortSignal.timeout(30000),
         });
         if (isNotification) continue;
         const text = await response.text();
@@ -99,7 +100,8 @@ async function main(): Promise<void> {
         }
       } catch (error) {
         if (!isNotification) {
-          send({ jsonrpc: "2.0", id: message.id ?? null, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } });
+          const timedOut = error instanceof Error && error.name === "TimeoutError";
+          send({ jsonrpc: "2.0", id: message.id ?? null, error: { code: -32603, message: timedOut ? "Request timed out" : "Workspace MCP request failed" } });
         }
       }
     }

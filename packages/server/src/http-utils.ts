@@ -2,11 +2,27 @@ import { TextDecoder } from "node:util";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { CoreError, z } from "@st-workspace/core";
 import { parseDashboardQuery } from "@st-workspace/runtime";
+import { httpStatusFor, structuredError } from "./errors.js";
 
 export function json(response: ServerResponse, status: number, value: unknown): void {
   response.statusCode = status;
   response.setHeader("content-type", "application/json; charset=utf-8");
   response.end(JSON.stringify(value));
+}
+
+export function restError(response: ServerResponse, error: unknown): void {
+  const payload = structuredError(error);
+  console.error(`[rest-error] code=${payload.code}${payload.uncatalogued_code !== undefined ? ` uncatalogued=${payload.uncatalogued_code}` : ""} message=${payload.error}`);
+  json(response, httpStatusFor(payload), {
+    code: payload.code,
+    category: payload.category,
+    recoverable: payload.recoverable,
+    message_zh: payload.message_zh,
+    impact: payload.impact,
+    next_actions: payload.next_actions,
+    ...(payload.details === undefined ? {} : { details: payload.details }),
+    ...(payload.uncatalogued_code === undefined ? {} : { uncatalogued_code: payload.uncatalogued_code }),
+  });
 }
 
 export class RequestBodyError extends Error {

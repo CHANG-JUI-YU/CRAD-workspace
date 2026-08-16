@@ -86,18 +86,20 @@ describe("runtime-facing server contract", () => {
       const invalidZhuji = await fetch(`${base}/workspace/zhuji`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "zhuji" }) });
       expect(invalidZhuji.status).toBe(400);
       const invalidCall = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "workspace_request", arguments: {} } }) });
-      expect(JSON.stringify(await invalidCall.json())).toContain("request is required");
+      const invalidCallBody = JSON.stringify(await invalidCall.json());
+      expect(invalidCallBody).toContain("-32602");
+      expect(invalidCallBody).toContain("REQUEST_REQUIRED");
       const unknownTool = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "not-a-tool", arguments: {} } }) });
       expect(JSON.stringify(await unknownTool.json())).toContain("tool not found");
       const unknownMethod = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "nope" }) });
       expect(JSON.stringify(await unknownMethod.json())).toContain("method not found");
       const badJson = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "not-json" });
       expect(badJson.status).toBe(200);
-      expect(JSON.stringify(await badJson.json())).toContain("-32602");
+      expect(JSON.stringify(await badJson.json())).toContain("-32700");
       const invalidUtf8 = Buffer.from([0x7b, 0x22, 0x61, 0x6e, 0x73, 0x77, 0x65, 0x72, 0x22, 0x3a, 0x22, 0xc3, 0x28, 0x22, 0x7d]);
       const invalidEncoding = await fetch(`${base}/workspace/interview/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: invalidUtf8 });
       expect(invalidEncoding.status).toBe(400);
-      expect(await invalidEncoding.json()).toMatchObject({ error: "Request body is not valid UTF-8" });
+      expect(await invalidEncoding.json()).toMatchObject({ code: "REQUEST_INVALID_UTF8" });
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
@@ -161,8 +163,8 @@ describe("runtime-facing server contract", () => {
       const rpc = async (id: number, name: string, args?: unknown) => fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, ...(args === undefined ? {} : { arguments: args }) } }) });
       expect(JSON.stringify(await (await rpc(20, "workspace_projects")).json())).toContain("project-001");
       expect(JSON.stringify(await (await rpc(21, "workspace_interview_context")).json())).toContain("project-001");
-      expect(JSON.stringify(await (await rpc(22, "workspace_interview_answer")).json())).toContain("answer is required");
-      expect(JSON.stringify(await (await rpc(23, "workspace_project_select")).json())).toContain("project is required");
+      expect(JSON.stringify(await (await rpc(22, "workspace_interview_answer")).json())).toContain("ANSWER_REQUIRED");
+      expect(JSON.stringify(await (await rpc(23, "workspace_project_select")).json())).toContain("PROJECT_REQUIRED");
       expect(JSON.stringify(await (await rpc(24, "workspace_project_select", { project: "project-001" })).json())).toContain("project-001");
       expect(JSON.stringify(await (await rpc(25, "workspace_status")).json())).toContain("project-001");
     } finally {
@@ -199,10 +201,10 @@ describe("runtime-facing server contract", () => {
     try {
       const malformed = await fetch(`${base}/workspace/request`, { method: "POST", headers: { "content-type": "application/json" }, body: "{not-json" });
       expect(malformed.status).toBe(400);
-      expect(await malformed.json()).toMatchObject({ error: "Request body is not valid JSON", code: "REQUEST_INVALID_JSON" });
+      expect(await malformed.json()).toMatchObject({ code: "REQUEST_INVALID_JSON" });
       const oversized = await fetch(`${base}/workspace/request`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request: "x".repeat(11 * 1024 * 1024) }) });
-      expect(oversized.status).toBe(400);
-      expect(await oversized.json()).toMatchObject({ error: "Request body exceeds the 10 MiB limit", code: "REQUEST_TOO_LARGE" });
+      expect(oversized.status).toBe(413);
+      expect(await oversized.json()).toMatchObject({ code: "REQUEST_TOO_LARGE" });
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }

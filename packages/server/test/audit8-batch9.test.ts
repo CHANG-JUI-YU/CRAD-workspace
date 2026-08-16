@@ -138,7 +138,7 @@ describe("#119 interview amendment endpoints (server)", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ question_id: "no-such-question", answer: "x" }),
     });
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(404);
     const body = (await response.json()) as { code: string; recoverable: boolean };
     expect(body.code).toBe("INTERVIEW_ANSWER_NOT_FOUND");
     expect(body.recoverable).toBe(true);
