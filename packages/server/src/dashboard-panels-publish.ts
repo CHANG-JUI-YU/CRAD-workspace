@@ -811,9 +811,17 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
             navBtn.className = "action-link";
             navBtn.style.marginLeft = "0.5rem";
             navBtn.textContent = "前往面板";
-            navBtn.addEventListener("click", (function (tPanel) {
-              return function () { switchPanel(tPanel); };
-            })(item.target_panel));
+            navBtn.addEventListener("click", (function (tItem) {
+              return function () {
+                if (isRecord(tItem.target) && typeof tItem.target.panel === "string") {
+                  navigateDiagnosticTarget(tItem.target);
+                } else if (typeof tItem.target_panel === "string") {
+                  navigateDiagnosticTarget({ panel: tItem.target_panel, id: typeof tItem.target_id === "string" ? tItem.target_id : undefined });
+                } else {
+                  switchPanel(tItem.target_panel);
+                }
+              };
+            })(item));
             row.append(navBtn);
           }
           target.append(row);

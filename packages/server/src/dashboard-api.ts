@@ -63,6 +63,10 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
           apiError.status = response.status;
           apiError.statusText = response.statusText;
           apiError.payload = payload;
+          if (isRecord(payload.details)) { apiError.details = payload.details; }
+          if (typeof payload.impact === "string") { apiError.impact = payload.impact; }
+          if (Array.isArray(payload.next_actions)) { apiError.next_actions = payload.next_actions; }
+          if (typeof payload.operation_id === "string") { apiError.operation_id = payload.operation_id; }
           throw apiError;
         }
         return payload;

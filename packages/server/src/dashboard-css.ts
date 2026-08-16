@@ -162,6 +162,93 @@ export const DASHBOARD_CSS = `  <style>
     .workflow-stage button {
       margin-top: 0.45rem;
     }
+    .recovery-cards {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.recovery-card {
+  border: 1px solid #e0b4b4;
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  background: #fff8f8;
+}
+.recovery-title {
+  font-weight: 600;
+  color: #8e3030;
+  margin-bottom: 0.35rem;
+}
+.recovery-cause, .recovery-impact, .recovery-correlation {
+  margin: 0.2rem 0;
+  font-size: 0.9rem;
+}
+.recovery-affected {
+  margin: 0.25rem 0 0.25rem 1rem;
+  font-size: 0.85rem;
+}
+.recovery-technical {
+  margin-top: 0.35rem;
+}
+.recovery-technical pre {
+  max-height: 12rem;
+  overflow: auto;
+  background: #f6f6f6;
+  border-radius: 6px;
+  padding: 0.4rem;
+  font-size: 0.75rem;
+}
+.recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+.recovery-action {
+  padding: 0.28rem 0.6rem;
+  border: 1px solid #c9d6e0;
+  border-radius: 6px;
+  background: #f7fafc;
+  cursor: pointer;
+}
+.recovery-dismiss {
+  background: transparent;
+  border: none;
+  color: #8e3030;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.section-nav {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      padding: 0.5rem 0.75rem;
+      margin-bottom: 0.75rem;
+      background: #ffffff;
+      border-bottom: 1px solid #dde5ec;
+    }
+    .section-nav-button {
+      padding: 0.3rem 0.7rem;
+      border: 1px solid #c7d3dd;
+      border-radius: 6px;
+      background: #f7fafc;
+      color: #33475b;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .section-nav-button:hover {
+      background: #eef3f7;
+    }
+    .section-nav-button.active {
+      background: #2f6f9f;
+      border-color: #2f6f9f;
+      color: #ffffff;
+      font-weight: 600;
+    }
     .coverage-center-heading {
       margin-top: 1rem;
       font-size: 0.9rem;

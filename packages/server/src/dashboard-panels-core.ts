@@ -482,12 +482,157 @@ export const DASHBOARD_PANELS_CORE_JS = `      function byId(value) {
         byId("latest-details").open = false;
       }
 
-      function renderLatestError(label, error, prefix) {
+      function recoveryErrorInfo(error) {
+        var payload = isRecord(error && error.payload) ? error.payload : {};
+        var details = isRecord(error && error.details) ? error.details : (isRecord(payload.details) ? payload.details : null);
+        var info = {
+          code: payload.code || (error && error.code) || "未知",
+          messageZh: payload.message_zh || "",
+          message: (error && error.message) || "",
+          impact: (typeof error.impact === "string" && error.impact !== "" ? error.impact : "") || payload.impact || "",
+          nextActions: Array.isArray(error.next_actions) ? error.next_actions : (Array.isArray(payload.next_actions) ? payload.next_actions : []),
+          operationId: (typeof error.operation_id === "string" && error.operation_id !== "" ? error.operation_id : "") || payload.operation_id || "",
+          changedInputs: details && Array.isArray(details.changed_inputs) ? details.changed_inputs : [],
+          affected: details && details.affected,
+          status: (error && error.status) || payload.status || "",
+        };
+        return info;
+      }
+
+      function recoveryCardDismissed(context) {
+        if (context === undefined || context.projectId === undefined || context.code === undefined) return false;
+        try {
+          var key = "recovery-dismissed:v1:" + context.projectId;
+          var raw = window.sessionStorage.getItem(key);
+          var list = raw === null ? [] : JSON.parse(raw);
+          return Array.isArray(list) && list.indexOf(context.code) !== -1;
+        } catch (ignored) {
+          return false;
+        }
+      }
+
+      function recoveryCardDismiss(context) {
+        if (context === undefined || context.projectId === undefined || context.code === undefined) return;
+        try {
+          var key = "recovery-dismissed:v1:" + context.projectId;
+          var raw = window.sessionStorage.getItem(key);
+          var list = raw === null ? [] : JSON.parse(raw);
+          if (!Array.isArray(list)) list = [];
+          if (list.indexOf(context.code) === -1) list.push(context.code);
+          window.sessionStorage.setItem(key, JSON.stringify(list));
+        } catch (ignored) {
+        }
+      }
+
+      function renderRecoveryCards(container, error, context) {
+        if (container === null || container === undefined) return;
+        while (container.firstChild !== null) container.removeChild(container.firstChild);
+        var info = recoveryErrorInfo(error);
+        var cardContext = { projectId: context && context.projectId, code: info.code };
+        if (recoveryCardDismissed(cardContext)) return;
+        var card = document.createElement("div");
+        card.className = "recovery-card";
+        card.setAttribute("role", "status");
+        var title = document.createElement("div");
+        title.className = "recovery-title";
+        title.textContent = "復原建議：無法完成此操作";
+        card.appendChild(title);
+        var cause = document.createElement("div");
+        cause.className = "recovery-cause";
+        cause.textContent = (info.messageZh !== "" ? info.messageZh + "；" : "") + (info.message !== "" ? info.message : "伺服器未提供說明。");
+        card.appendChild(cause);
+        if (info.impact !== "") {
+          var impact = document.createElement("div");
+          impact.className = "recovery-impact";
+          impact.textContent = "影響：" + info.impact;
+          card.appendChild(impact);
+        }
+        var affected = document.createElement("ul");
+        affected.className = "recovery-affected";
+        if (info.changedInputs.length > 0) {
+          var affectedTitle = document.createElement("li");
+          affectedTitle.textContent = "已變更的輸入：";
+          affected.appendChild(affectedTitle);
+          info.changedInputs.forEach(function (item) {
+            if (!isRecord(item)) return;
+            var li = document.createElement("li");
+            li.textContent = (item.label || item.category || "項目") + "：" + (item.before_summary || "（無）") + " -> " + (item.after_summary || "（無）");
+            affected.appendChild(li);
+          });
+        } else if (info.affected !== undefined && info.affected !== null) {
+          var li2 = document.createElement("li");
+          li2.textContent = "受影響對象：" + String(info.affected);
+          affected.appendChild(li2);
+        }
+        if (affected.childNodes.length > 0) card.appendChild(affected);
+        if (info.operationId !== "") {
+          var correlation = document.createElement("div");
+          correlation.className = "recovery-correlation";
+          correlation.textContent = "關聯操作：" + info.operationId;
+          card.appendChild(correlation);
+        }
+        var detailsEl = document.createElement("details");
+        detailsEl.className = "recovery-technical";
+        var detailsSummary = document.createElement("summary");
+        detailsSummary.textContent = "技術細節";
+        detailsEl.appendChild(detailsSummary);
+        var detailsBody = document.createElement("div");
+        detailsBody.textContent = jsonText(errorSnapshot(error));
+        detailsEl.appendChild(detailsBody);
+        card.appendChild(detailsEl);
+        var actions = document.createElement("div");
+        actions.className = "recovery-actions";
+        var actionDefs = [];
+        if (info.code === "NETWORK_ERROR" || info.status === 0) {
+          actionDefs.push({ label: "重試", kind: "retry" });
+        } else if (info.status === 401 || info.status === 403) {
+          actionDefs.push({ label: "重新整理", kind: "refresh" });
+        } else if (info.status === 409) {
+          actionDefs.push({ label: "重新整理（重新取得最新狀態）", kind: "refresh" });
+        } else {
+          actionDefs.push({ label: "重試", kind: "retry" });
+        }
+        actionDefs.push({ label: "重新整理區塊", kind: "refresh" });
+        actionDefs.forEach(function (def) {
+          var button = document.createElement("button");
+          button.type = "button";
+          button.className = "recovery-action";
+          button.textContent = def.label;
+          button.addEventListener("click", function () {
+            if (def.kind === "retry" && context && typeof context.onRetry === "function") {
+              context.onRetry();
+            } else if (typeof refresh === "function") {
+              void refresh();
+            }
+          });
+          actions.appendChild(button);
+        });
+        var dismiss = document.createElement("button");
+        dismiss.type = "button";
+        dismiss.className = "recovery-action recovery-dismiss";
+        dismiss.textContent = "關閉此建議";
+        dismiss.setAttribute("aria-label", "關閉此復原建議");
+        dismiss.addEventListener("click", function () {
+          recoveryCardDismiss(cardContext);
+          if (card.parentNode !== null) card.parentNode.removeChild(card);
+        });
+        actions.appendChild(dismiss);
+        card.appendChild(actions);
+        container.appendChild(card);
+      }
+
+      function currentProjectId() {
+  var sel = byId("project-select");
+  return sel ? sel.value : "";
+}
+
+function renderLatestError(label, error, prefix) {
         var target = byId("latest-summary");
         target.className = "notice error";
         target.textContent = (prefix ? prefix + "；" : label + "；") + errorText(error);
         byId("latest-json").textContent = jsonText(errorSnapshot(error));
         byId("latest-details").open = true;
+        renderRecoveryCards(byId("latest-recovery"), error, { projectId: currentProjectId(), onRetry: refresh });
       }
 
       function setNotice(kind, text) {

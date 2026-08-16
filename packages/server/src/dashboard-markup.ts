@@ -24,6 +24,7 @@ export const DASHBOARD_MARKUP = `<body>
       <div id="home-projects" class="panel-message" aria-live="polite">正在讀取專案清單…</div>
     </section>
 
+    <nav id="section-nav" class="section-nav" aria-label="工作區段導覽"></nav>
     <section id="project-panel" class="panel panel-wide" aria-labelledby="project-heading">
       <div class="panel-heading">
         <div>
@@ -190,6 +191,8 @@ export const DASHBOARD_MARKUP = `<body>
         <summary>查看目前 Blueprint 原始 JSON</summary>
         <pre id="blueprint-json">{}</pre>
       </details>
+</details>
+      <div id="latest-recovery" class="recovery-cards" aria-live="polite"></div>
     </section>
 
     <section class="panel" aria-labelledby="quality-heading">
