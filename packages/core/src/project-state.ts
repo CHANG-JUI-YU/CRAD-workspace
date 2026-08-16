@@ -478,6 +478,20 @@ export interface ProjectState {
   coverage_authoring_bindings: AuthoringCoverageBinding[];
   url_ingestions: UrlIngestionRecord[];
   cover_selections: CoverSelectionRecord[];
+  publish_intents: PublishIntentRecord[];
+}
+
+export interface PublishIntentRecord {
+  id: string;
+  fingerprint: string;
+  mode_selection?: string;
+  output_plan?: PublishedOutputPlan;
+  operation_id?: string;
+  publish_id?: string;
+  status: "pending" | "completed" | "failed" | "needs_input";
+  republished?: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface CoverSelectionRecord {
@@ -544,6 +558,7 @@ export function createProjectState(projectId: string): ProjectState {
     coverage_authoring_bindings: [],
     url_ingestions: [],
     cover_selections: [],
+  publish_intents: [],
   };
 }
 
@@ -618,6 +633,7 @@ export function migrateProjectStateV1ToV2(state: Record<string, unknown>): Recor
     coverage_authoring_bindings: Array.isArray(state.coverage_authoring_bindings) ? state.coverage_authoring_bindings : [],
     url_ingestions: Array.isArray(state.url_ingestions) ? state.url_ingestions : [],
     cover_selections: Array.isArray(state.cover_selections) ? state.cover_selections : [],
+  publish_intents: Array.isArray(state.publish_intents) ? state.publish_intents : [],
   };
 }
 

@@ -38,7 +38,7 @@ import {
   workflow_answer_interview,
   z,
   type BlueprintPrecheckDimension,
-  type OperationRecord,
+  type OperationRecord, type PublishIntentRecord,
   type OperationAttachmentRef,
   type ArtifactRecord,
   type AdaptationDecision,
@@ -132,7 +132,7 @@ import {
 } from "@st-workspace/domain";
 import type { CardModeSelection } from "@st-workspace/compiler";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
-import type { DashboardProvenanceView, PublishProvenanceConfirmInput, PublishProvenancePreviewResult } from "./runtime-views.js";
+import type { DashboardProvenanceView, PublishCompletionView, PublishDownloadResult, PublishExecutionKind, PublishProvenanceConfirmInput, PublishProvenancePreviewResult } from "./runtime-views.js";
 import { coverageResearchCandidates as coverageResearchCandidatesQuery, coverageResearchClaim as coverageResearchClaimQuery, coverageResearchExhaust as coverageResearchExhaustQuery, coverageResearchRecover as coverageResearchRecoverQuery, coverageResearchStart as coverageResearchStartQuery, coverageResearchStartPreview as coverageResearchStartPreviewQuery, coverageResolutionConfirm as coverageResolutionConfirmQuery, coverageResolutionPreview as coverageResolutionPreviewQuery, coverageSupplement as coverageSupplementQuery, dashboardCoverage as dashboardCoverageQuery, dashboardCoverageCenter as dashboardCoverageCenterQuery, executeCoverageResearchCandidates, executeCoverageResearchClaim, executeCoverageResearchExhaust, executeCoverageResearchRecover, executeCoverageResearchStart, executeCoverageResolutionConfirm, executeCoverageSupplement, type CoverageApplicationDeps, type CoverageCommandOutcome } from "./coverage-application.js";
 import {
   artifactQueryFromDashboardQuery,
@@ -2797,7 +2797,47 @@ export class WorkspaceRuntime {
       throw error;
     }
 
+    if (input.republish !== true) {
+      const intentMatches = (intent: PublishIntentRecord): boolean =>
+        intent.fingerprint === input.fingerprint &&
+        (effectiveMode === undefined ? intent.mode_selection === undefined : intent.mode_selection === effectiveMode) &&
+        (preview.output_plan === undefined
+          ? intent.output_plan === undefined
+          : intent.output_plan !== undefined && canonicalJson(intent.output_plan) === canonicalJson(preview.output_plan));
+      const completedIntent = [...before.publish_intents].reverse().find((intent) => intentMatches(intent) && intent.status === "completed" && intent.publish_id !== undefined);
+      if (completedIntent !== undefined) {
+        return {
+          operation_id: completedIntent.operation_id,
+          intent_id: completedIntent.id,
+          publish_id: completedIntent.publish_id,
+          status: "completed",
+          summary: "此發布已於先前完成；重複請求已回傳既有結果（idempotent replay），未建立新輸出。",
+          completed: [],
+          blocked: [],
+          execution_kind: "replayed",
+          downstream_invalidation: emptyDownstreamInvalidationReport(),
+        } as RequestResult & { downstream_invalidation: DownstreamInvalidationReport; execution_kind: PublishExecutionKind; intent_id: string; publish_id: string };
+      }
+      const pendingIntent = [...before.publish_intents].reverse().find((intent) => intentMatches(intent) && intent.status === "pending" && intent.operation_id !== undefined);
+      if (pendingIntent !== undefined) {
+        const pendingOp = before.operations.find((item) => item.id === pendingIntent.operation_id);
+        if (pendingOp !== undefined && pendingOp.status !== "completed" && pendingOp.status !== "failed" && pendingOp.status !== "cancelled") {
+          return {
+            operation_id: pendingOp.id,
+            intent_id: pendingIntent.id,
+            status: pendingOp.status,
+            summary: "此發布正在進行中；已恢復既有操作。",
+            completed: [],
+            blocked: [pendingOp.id],
+            execution_kind: "resumed",
+            downstream_invalidation: emptyDownstreamInvalidationReport(),
+          } as RequestResult & { downstream_invalidation: DownstreamInvalidationReport; execution_kind: PublishExecutionKind; intent_id: string };
+        }
+      }
+    }
+
     const operationId = input.operation_id ?? internalId("operation");
+    const intentId = internalId("intent");
     const syncLease: ExecutionLeaseContext = { owner: internalId("sync"), token: internalId("lease"), generation: 1 };
     const operation: OperationRecord = {
       id: operationId,
@@ -2816,7 +2856,7 @@ export class WorkspaceRuntime {
           ...(effectiveMode === undefined ? {} : { mode_selection: effectiveMode }),
         },
       },
-      ...(input.idempotency_key === undefined ? {} : { idempotency_key: input.idempotency_key }),
+      ...(input.idempotency_key === undefined ? { idempotency_key: intentId } : { idempotency_key: input.idempotency_key }),
       lease_owner: syncLease.owner,
       lease_token: syncLease.token,
       lease_expires_at: new Date(Date.now() + OPERATION_LEASE_MS).toISOString(),
@@ -2849,6 +2889,17 @@ export class WorkspaceRuntime {
         created = await this.repository.commit(currentState.revision, (current) => ({
           ...current,
           operations: [...current.operations, operation],
+          publish_intents: [...current.publish_intents, {
+            id: intentId,
+            fingerprint: input.fingerprint,
+            ...(effectiveMode === undefined ? {} : { mode_selection: effectiveMode }),
+            ...(preview.output_plan === undefined ? {} : { output_plan: preview.output_plan }),
+            operation_id: operation.id,
+            status: "pending",
+            ...(input.republish === true ? { republished: true } : {}),
+            created_at: now(),
+            updated_at: now(),
+          }],
           audit: [...current.audit, {
             id: internalId("audit"),
             operation_id: operation.id,
@@ -2903,7 +2954,20 @@ export class WorkspaceRuntime {
         ...(finalOperation?.question === undefined ? {} : { question: finalOperation.question }),
         idempotent_replay: false,
       };
-      return this.attachDownstreamInvalidation(base, before);
+      if (publishRecord !== undefined) {
+        await this.repository.commit(latest.revision, (current) => ({
+          ...current,
+          publish_intents: current.publish_intents.map((intent) =>
+            intent.id === intentId ? { ...intent, status: "completed", publish_id: publishRecord.id, updated_at: now() } : intent,
+          ),
+        }));
+      }
+      const intentBase = {
+        ...base,
+        execution_kind: (input.republish === true ? "republished" : "new") as PublishExecutionKind,
+        intent_id: intentId,
+      };
+      return this.attachDownstreamInvalidation(intentBase, before);
     } finally {
       await this.releaseOperationLease(operation.id, syncLease.owner, syncLease.token);
     }
@@ -2928,6 +2992,75 @@ export class WorkspaceRuntime {
 
   async buildReadiness(): Promise<DashboardBuildReadiness> {
     return buildReadinessQuery({ repository: this.repository });
+  }
+
+  async publishCompletion(publishId: string): Promise<PublishCompletionView | undefined> {
+    const state = await this.repository.read();
+    const publish = state.publishes.find((record) => record.id === publishId);
+    if (publish === undefined) return undefined;
+    const intent = state.publish_intents.find((record) => record.publish_id === publishId);
+    const outputPlan = publish.output_plan;
+    const entries: Array<{ kind: "json" | "png"; ref: { hash: string; size: number } | undefined; path: string | undefined }> = [
+      { kind: "json", ref: publish.content_ref, path: outputPlan?.json_path ?? publish.export_json_path },
+      { kind: "png", ref: publish.png_ref, path: outputPlan?.png_path ?? publish.export_png_path },
+    ];
+    const files: PublishCompletionView["files"] = [];
+    for (const entry of entries) {
+      let status: "verified" | "missing" | "hash_mismatch" = "missing";
+      let size = 0;
+      let contentHashValue = "";
+      if (entry.ref !== undefined) {
+        size = entry.ref.size;
+        contentHashValue = entry.ref.hash;
+        const blob = await this.repository.readBlob(entry.ref.hash);
+        if (blob !== undefined) {
+          status = blob.length === entry.ref.size && contentHash(blob) === entry.ref.hash ? "verified" : "hash_mismatch";
+        }
+      }
+      files.push({
+        kind: entry.kind,
+        ...(entry.path === undefined ? {} : { path: entry.path }),
+        ...(entry.path === undefined ? {} : { name: entry.path.split("/").pop() ?? "card" }),
+        size,
+        content_hash: contentHashValue,
+        status,
+      });
+    }
+    return {
+      publish_id: publish.id,
+      operation_id: publish.operation_id,
+      published_at: publish.created_at,
+      mode: outputPlan?.mode ?? "default",
+      ...(publish.provenance_summary?.image_identity === undefined ? {} : { cover: publish.provenance_summary.image_identity }),
+      files,
+      result_kind: intent === undefined ? "legacy" : intent.republished === true ? "republished" : "new",
+    };
+  }
+
+  async publishDownload(publishId: string, kind: "json" | "png"): Promise<PublishDownloadResult> {
+    const state = await this.repository.read();
+    const publish = state.publishes.find((record) => record.id === publishId);
+    if (publish === undefined) throw new CoreError("PUBLISH_NOT_FOUND", `Publish record ${publishId} was not found.`, true);
+    const ref = kind === "json" ? publish.content_ref : publish.png_ref;
+    const path = kind === "json" ? publish.output_plan?.json_path ?? publish.export_json_path : publish.output_plan?.png_path ?? publish.export_png_path;
+    if (ref === undefined || path === undefined) {
+      throw new CoreError("PUBLISH_DOWNLOAD_LEGACY", "此發布為舊版記錄，缺少可下載的檔案參照。", true);
+    }
+    if (!path.startsWith("exports/") || path.includes("../") || path.includes("..\\") || path.includes("\\") || path.startsWith("/") || /^[A-Za-z]:/u.test(path)) {
+      throw new CoreError("PUBLISH_DOWNLOAD_PATH_INVALID", "發布輸出路徑無效；已拒絕下載。", true);
+    }
+    const blob = await this.repository.readBlob(ref.hash);
+    if (blob === undefined) {
+      throw new CoreError("PUBLISH_DOWNLOAD_MISSING", `發布輸出檔案（${path}）目前不存在。`, true);
+    }
+    if (blob.length !== ref.size || contentHash(blob) !== ref.hash) {
+      throw new CoreError("PUBLISH_DOWNLOAD_HASH_MISMATCH", `發布輸出檔案（${path}）內容與發布記錄不符；已拒絕下載。`, true);
+    }
+    return {
+      media_type: kind === "json" ? "application/json" : "image/png",
+      filename: path.split("/").pop() ?? "card",
+      content: blob,
+    };
   }
 
   async tavernCompat(): Promise<TavernCompatibilityReport> {

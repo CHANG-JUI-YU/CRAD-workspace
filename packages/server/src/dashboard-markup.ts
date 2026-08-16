@@ -173,6 +173,7 @@ export const DASHBOARD_MARKUP = `<body>
       <div id="readiness-list" class="readiness-list"></div>
       <div id="provenance-stale-diff" class="provenance-stale-diff" style="display:none;"></div>
       <div id="provenance-summary" class="provenance-summary"></div>
+    <div id="publish-completion" class="publish-completion" aria-live="polite"></div>
       <div id="provenance-confirm-message" class="panel-message" aria-live="polite">尚未準備 provenance 確認。</div>
       <div id="provenance-history" class="provenance-history"></div>
     </section>

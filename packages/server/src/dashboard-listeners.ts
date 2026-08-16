@@ -117,13 +117,10 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
 
         var body = {
           fingerprint: confirmation.fingerprint,
-          idempotency_key: confirmation.idempotency_key
+          republish: confirmation.republish === true
         };
         if (confirmation.mode_selection !== undefined && confirmation.mode_selection !== "") {
           body.mode_selection = confirmation.mode_selection;
-        }
-        if (confirmation.prepared_snapshot !== undefined) {
-          body.prepared_snapshot = confirmation.prepared_snapshot;
         }
 
         confirmation.in_flight = true;
@@ -140,7 +137,14 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
             if (payload && payload.status === "completed") {
               confirmation.completed = true;
               var parts = [];
-              if (payload.idempotent_replay === true) {
+              var executionKind = payload.execution_kind;
+              if (executionKind === "replayed") {
+                parts.push("此發布先前已完成，已回傳既有結果（idempotent replay），未建立新輸出。");
+              } else if (executionKind === "resumed") {
+                parts.push("此發布正在進行中；已恢復既有操作。");
+              } else if (executionKind === "republished") {
+                parts.push("已再次發布；新的 Publish Record 已建立。");
+              } else if (payload.idempotent_replay === true) {
                 parts.push("此發布先前已完成，本次為安全重試，未建立重複發布。");
               } else {
                 parts.push("發布完成；Publish Record 已保存同一份確認的 provenance refs。");
@@ -150,7 +154,10 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
               if (payload.published_at) parts.push("發布時間: " + payload.published_at);
               messageEl.textContent = parts.join(" · ");
               updatePublishStepper("published", "pass");
-              if (confirmButton) confirmButton.textContent = payload.idempotent_replay === true ? "已完成（可安全重試）" : "發布完成";
+              if (confirmButton) confirmButton.textContent = executionKind === "replayed" ? "已完成（可安全重試）" : "發布完成";
+              if (payload.publish_id) {
+                loadPublishCompletion(payload.publish_id);
+              }
             } else if (payload && (payload.status === "running" || payload.status === "resolving" || payload.status === "created")) {
               messageEl.textContent = "發布操作正在背景進行中（狀態：" + payload.status + "）…";
               if (primaryCta) primaryCta.textContent = "處理中...";
@@ -195,6 +202,15 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
       byId("check-readiness").addEventListener("click", function () { void triggerCheckReadiness(); });
       byId("prepare-provenance").addEventListener("click", function () { void triggerPrepareProvenance(); });
       byId("confirm-publish").addEventListener("click", function () { void triggerConfirmPublish(); });
+      var republishButtonEl = byId("republish-publish");
+      if (republishButtonEl) {
+        republishButtonEl.addEventListener("click", function () {
+          if (currentProvenanceConfirmation !== null && currentProvenanceConfirmation.fingerprint !== "") {
+            currentProvenanceConfirmation.republish = true;
+            void triggerConfirmPublish();
+          }
+        });
+      }
 
       var primaryCtaEl = byId("publish-primary-cta");
       if (primaryCtaEl) {

@@ -262,11 +262,11 @@ describe("Audit 7 Batch 6 - Server Routes & HTTP Idempotency (#77, #92, #100)", 
       expect(htmlRes.status).toBe(200);
       const html = await htmlRes.text();
 
-      // Verify dashboard contains idempotency key generator and storage
-      expect(html).toContain("getOrCreateProvenanceIdempotencyKey");
-      expect(html).toContain("crad_publish_idempotency_");
+      // #120: durable server-side publish intent（sessionStorage 自產 key 已移除）
+      expect(html).not.toContain("getOrCreateProvenanceIdempotencyKey");
+      expect(html).toContain("再次發布");
       expect(html).toContain("in_flight");
-      expect(html).toContain("此發布先前已完成，本次為安全重試，未建立重複發布。");
+      expect(html).toContain("此發布先前已完成，已回傳既有結果（idempotent replay），未建立新輸出。");
       expect(html).toContain("readiness-mode");
     } finally {
       await server.close();

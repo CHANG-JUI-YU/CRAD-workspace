@@ -170,6 +170,38 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         json(response, 200, await (await deps.getRuntime()).dashboardProvenance());
         return true;
       }
+      if (request.method === "GET" && url.pathname === "/workspace/publish/completion") {
+        const publishId = url.searchParams.get("publish_id");
+        if (publishId === null || publishId === "") {
+          json(response, 400, structuredError(new CoreError("PUBLISH_ID_REQUIRED", "publish_id 參數為必填。", true)));
+          return true;
+        }
+        json(response, 200, await (await deps.getRuntime()).publishCompletion(publishId));
+        return true;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/publish/download") {
+        const publishId = url.searchParams.get("publish_id");
+        const rawKind = url.searchParams.get("kind");
+        if (publishId === null || publishId === "") {
+          json(response, 400, structuredError(new CoreError("PUBLISH_ID_REQUIRED", "publish_id 參數為必填。", true)));
+          return true;
+        }
+        if (rawKind !== "json" && rawKind !== "png") {
+          json(response, 400, structuredError(new CoreError("PUBLISH_DOWNLOAD_KIND_INVALID", `Invalid download kind: ${rawKind ?? "null"}`, true)));
+          return true;
+        }
+        try {
+          const result = await (await deps.getRuntime()).publishDownload(publishId, rawKind);
+          json(response, 200, {
+            media_type: result.media_type,
+            filename: result.filename,
+            content: Buffer.from(result.content.buffer, result.content.byteOffset, result.content.byteLength).toString("base64"),
+          });
+        } catch (error) {
+          json(response, error instanceof CoreError && error.recoverable ? 400 : 500, structuredError(error));
+        }
+        return true;
+      }
       if (request.method === "GET" && url.pathname === "/workspace/tavern/compat") {
         json(response, 200, await (await deps.getRuntime()).tavernCompat());
         return true;

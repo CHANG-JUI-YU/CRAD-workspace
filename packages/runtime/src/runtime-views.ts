@@ -1,4 +1,4 @@
-import type { AttachmentStore, CoverImageFreshnessResult, PreparedPublishSnapshot, ProvenanceCompositionSummary, ProvenanceOverrideRef, PublishedOutputPlan, RepairInspection } from "@st-workspace/core";
+import type { AttachmentStore, CoverImageFreshnessResult, PreparedPublishSnapshot, ProvenanceCompositionSummary, ProvenanceImageIdentity, ProvenanceOverrideRef, PublishedOutputPlan, RepairInspection } from "@st-workspace/core";
 import type { CardModeSelection } from "@st-workspace/compiler";
 import type { SourceFetcher } from "@st-workspace/domain";
 
@@ -209,11 +209,14 @@ export interface PublishProvenancePreviewResult {
   };
 }
 
+export type PublishExecutionKind = "new" | "replayed" | "resumed" | "republished";
+
 export interface PublishProvenanceConfirmInput {
   fingerprint: string;
   mode_selection?: CardModeSelection | undefined;
   idempotency_key?: string | undefined;
   operation_id?: string | undefined;
+  republish?: boolean | undefined;
   prepared_snapshot?: PreparedPublishSnapshot | Record<string, unknown> | undefined;
 }
 
@@ -225,6 +228,31 @@ export interface DashboardProvenanceView {
   legacy_build_snapshot_hash: boolean;
   compiled_content_hash?: string;
   build_snapshot_hash?: string;
+}
+
+export interface PublishCompletionFileView {
+  kind: "json" | "png";
+  path?: string;
+  name?: string;
+  size: number;
+  content_hash: string;
+  status: "verified" | "missing" | "hash_mismatch";
+}
+
+export interface PublishCompletionView {
+  publish_id: string;
+  operation_id: string;
+  published_at: string;
+  mode: string;
+  cover?: ProvenanceImageIdentity;
+  files: PublishCompletionFileView[];
+  result_kind: "new" | "republished" | "legacy";
+}
+
+export interface PublishDownloadResult {
+  media_type: string;
+  filename: string;
+  content: Uint8Array;
 }
 
 export interface WorkspaceRuntimeOptions {

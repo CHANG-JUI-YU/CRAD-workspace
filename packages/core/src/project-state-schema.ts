@@ -462,6 +462,19 @@ export const coverSelectionSchema = z.object({
   supersedes: z.string().min(1).optional(),
 }).strict();
 
+export const publishIntentSchema = z.object({
+  id: z.string().min(1),
+  fingerprint: z.string().min(1),
+  mode_selection: z.string().min(1).optional(),
+  output_plan: publishedOutputPlanSchema.optional(),
+  operation_id: z.string().min(1).optional(),
+  publish_id: z.string().min(1).optional(),
+  status: z.enum(["pending", "completed", "failed", "needs_input"]),
+  republished: z.boolean().optional(),
+  created_at: z.string().datetime({ offset: true }),
+  updated_at: z.string().datetime({ offset: true }),
+}).strict();
+
 export const projectStateSchema = z.object({
   schema_version: z.literal(2),
   project_id: z.string().min(1),
@@ -499,4 +512,5 @@ export const projectStateSchema = z.object({
   coverage_authoring_bindings: z.array(authoringCoverageBindingSchema).default([]),
   url_ingestions: z.array(urlIngestionSchema).default([]),
   cover_selections: z.array(coverSelectionSchema).default([]),
+  publish_intents: z.array(publishIntentSchema).default([]),
 }).strict();

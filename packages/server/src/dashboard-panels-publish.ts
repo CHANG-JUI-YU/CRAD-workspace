@@ -300,28 +300,6 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
 
       var lastDiagnosticHighlight = null;
 
-      function generateIdempotencyKey() {
-        if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-          return crypto.randomUUID();
-        }
-        var s4 = function () { return Math.floor((1 + Math.random()) * 0x10000).toString(16).substring(1); };
-        return s4() + s4() + "-" + s4() + "-4" + s4().substr(0, 3) + "-" + s4() + "-" + s4() + s4() + s4();
-      }
-
-      function getOrCreateProvenanceIdempotencyKey(projectId, fingerprint, mode) {
-        var storageKey = "crad_publish_idempotency_" + (projectId || "default") + "_" + fingerprint + "_" + (mode || "default");
-        try {
-          if (typeof sessionStorage !== "undefined") {
-            var existing = sessionStorage.getItem(storageKey);
-            if (existing && existing.length > 0) return existing;
-            var newKey = generateIdempotencyKey();
-            sessionStorage.setItem(storageKey, newKey);
-            return newKey;
-          }
-        } catch (e) {}
-        return generateIdempotencyKey();
-      }
-
       function clearDiagnosticHighlight() {
         if (lastDiagnosticHighlight !== null && lastDiagnosticHighlight !== undefined) {
           lastDiagnosticHighlight.classList.remove("diagnostic-highlight");
@@ -851,13 +829,12 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         var fingerprint = firstString(preview, ["fingerprint"]);
         var modeSelection = firstString(preview, ["mode_selection"]) || undefined;
         var projectId = (state && state.status && state.status.project_id) || "";
-        var idempotencyKey = getOrCreateProvenanceIdempotencyKey(projectId, fingerprint, modeSelection);
         var preparedSnapshot = preview.prepared_snapshot;
 
         currentProvenanceConfirmation = {
           fingerprint: fingerprint,
           mode_selection: modeSelection,
-          idempotency_key: idempotencyKey,
+          republish: false,
           prepared_snapshot: preparedSnapshot,
           in_flight: false,
           completed: false,
@@ -1100,6 +1077,10 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
             ? "確認並以此確切內容發布（" + composition.overrides.length + " 筆 active override）"
             : "確認並以此確切內容發布";
         }
+        var republishButton = byId("republish-publish");
+        if (republishButton) {
+          republishButton.disabled = currentProvenanceConfirmation.fingerprint === "";
+        }
         byId("provenance-confirm-message").textContent = "我批准畫面中顯示的這份確切組成與輸出；確認後將以同一份不可變快照（Fingerprint: " + fingerprint.slice(0, 8) + "）執行發布。";
         updatePublishStepper("provenance_reviewed", "current", { overrides_count: (composition.overrides ? composition.overrides.length : 0) });
       }
@@ -1132,6 +1113,132 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
           return view;
         }).catch(function (error) {
           setAreaError("provenance-history", error);
+          return undefined;
+        });
+      }
+
+      function publishCompletionFileRow(file) {
+        if (!isRecord(file)) return null;
+        var row = document.createElement("div");
+        row.className = "publish-completion-file";
+        var name = firstString(file, ["name"]) || "unknown";
+        var nameEl = document.createElement("span");
+        nameEl.textContent = name;
+        row.appendChild(nameEl);
+        var statusText = "verified" === file.status ? "已驗證" : ("missing" === file.status ? "檔案遺失" : "內容雜湊不符");
+        var badge = document.createElement("span");
+        badge.className = "status-badge " + ("verified" === file.status ? "ready" : "cancelled");
+        badge.textContent = statusText;
+        row.appendChild(badge);
+        if (typeof file.size === "number") {
+          var sizeEl = document.createElement("span");
+          sizeEl.className = "muted";
+          sizeEl.textContent = "大小: " + file.size + " bytes";
+          row.appendChild(sizeEl);
+        }
+        if (typeof file.content_hash === "string") {
+          var hashEl = document.createElement("span");
+          hashEl.className = "muted";
+          hashEl.textContent = "Hash: " + file.content_hash.slice(0, 12) + "…";
+          row.appendChild(hashEl);
+        }
+        return row;
+      }
+
+      function publishFileDownload(publishId, kind) {
+        return function () {
+          return requestJson("/workspace/publish/download?publish_id=" + encodeURIComponent(publishId) + "&kind=" + encodeURIComponent(kind)).then(function (result) {
+            if (!isRecord(result) || typeof result.content !== "string" || result.content.length === 0) {
+              throw new Error("下載回應缺少檔案內容。");
+            }
+            var binary = atob(result.content);
+            var bytes = new Uint8Array(binary.length);
+            for (var i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+            var blob = new Blob([bytes], { type: firstString(result, ["media_type"]) || "application/octet-stream" });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement("a");
+            a.href = url;
+            a.download = firstString(result, ["filename"]) || ("card." + kind);
+            a.click();
+            URL.revokeObjectURL(url);
+            return result;
+          }).catch(function (error) {
+            setAreaError("publish-completion", error);
+            return undefined;
+          });
+        };
+      }
+
+      function renderPublishCompletion(view) {
+        var target = byId("publish-completion");
+        if (!target) return;
+        target.textContent = "";
+        if (!isRecord(view)) {
+          target.textContent = "目前沒有可顯示的發布完成資訊。";
+          return;
+        }
+        var card = document.createElement("div");
+        card.className = "publish-completion-card";
+        var title = document.createElement("div");
+        title.className = "publish-completion-title";
+        title.textContent = "發布完成（Publish Completion）";
+        card.appendChild(title);
+        var meta = document.createElement("div");
+        meta.className = "muted";
+        var kindText = "legacy" === view.result_kind ? "舊版發布（無法驗證）" : ("republished" === view.result_kind ? "再次發布" : "新發布");
+        meta.textContent = "Publish: " + firstString(view, ["publish_id"]) + " · 操作: " + firstString(view, ["operation_id"]) + " · " + kindText + " · 模式: " + (firstString(view, ["mode"]) || "default");
+        card.appendChild(meta);
+        if (typeof view.published_at === "string") {
+          var timeEl = document.createElement("div");
+          timeEl.className = "muted";
+          timeEl.textContent = "發布時間: " + view.published_at;
+          card.appendChild(timeEl);
+        }
+        var files = Array.isArray(view.files) ? view.files : [];
+        if (files.length > 0) {
+          var filesTitle = document.createElement("div");
+          filesTitle.className = "publish-completion-files-title";
+          filesTitle.textContent = "輸出檔案";
+          card.appendChild(filesTitle);
+          for (var i = 0; i < files.length; i += 1) {
+            var file = files[i];
+            var row = publishCompletionFileRow(file);
+            if (row === null) continue;
+            card.appendChild(row);
+            if (isRecord(file) && file.status === "verified" && typeof file.kind === "string") {
+              var downloadButton = document.createElement("button");
+              downloadButton.type = "button";
+              downloadButton.className = "inline-button";
+              downloadButton.textContent = "下載 " + file.kind.toUpperCase();
+              downloadButton.setAttribute("aria-label", "下載 " + (firstString(file, ["name"]) || file.kind) + " 檔案");
+              downloadButton.addEventListener("click", publishFileDownload(firstString(view, ["publish_id"]), file.kind));
+              card.appendChild(downloadButton);
+            }
+          }
+        }
+        var help = document.createElement("div");
+        help.className = "muted";
+        help.textContent = "匯入說明：TavernAI／SillyTavern 通常可直接匯入 PNG 角色卡（拖曳或匯入按鈕）；JSON 卡適合進階使用或程式化匯入。";
+        card.appendChild(help);
+        var compatButton = document.createElement("button");
+        compatButton.type = "button";
+        compatButton.className = "inline-button";
+        compatButton.textContent = "重新執行相容性檢查";
+        compatButton.addEventListener("click", function () {
+          var checkButton = byId("check-build");
+          if (checkButton && typeof checkButton.click === "function") checkButton.click();
+        });
+        card.appendChild(compatButton);
+        target.appendChild(card);
+      }
+
+      function loadPublishCompletion(publishId) {
+        if (!publishId) return undefined;
+        return requestJson("/workspace/publish/completion?publish_id=" + encodeURIComponent(publishId)).then(function (view) {
+          renderPublishCompletion(view);
+          return view;
+        }).catch(function (error) {
+          setAreaError("publish-completion", error);
           return undefined;
         });
       }
