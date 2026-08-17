@@ -8,6 +8,7 @@ export const DASHBOARD_STATE_JS = `      var state = {
         status: null,
         interviewQuestion: null,
         currentProjectValue: "",
+        projectGeneration: 0,
         interviewRevision: 0,
         amendQuestionId: null,
         amendPreview: null,

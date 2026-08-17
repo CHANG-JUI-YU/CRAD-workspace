@@ -272,6 +272,9 @@ export const DASHBOARD_CSS = `  <style>
 }
 
 .section-nav {
+      grid-column: 1 / -1;
+      width: 100%;
+      box-sizing: border-box;
       position: sticky;
       top: 0;
       z-index: 40;

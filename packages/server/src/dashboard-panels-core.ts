@@ -974,4 +974,58 @@ function renderLatestError(label, error, prefix) {
         syncAllControls();
       }
 
+      function resetProjectScopedState() {
+        state.status = null;
+        state.interviewQuestion = null;
+        state.interviewRevision = 0;
+        state.amendQuestionId = null;
+        state.amendPreview = null;
+        state.amendInFlight = false;
+
+        if (typeof currentProvenanceConfirmation !== "undefined") {
+          currentProvenanceConfirmation = null;
+        }
+        if (typeof publishStepperState !== "undefined" && publishStepperState) {
+          publishStepperState.stage = "readiness";
+          publishStepperState.status = "waiting";
+          publishStepperState.readinessOk = false;
+          publishStepperState.previewData = null;
+          publishStepperState.staleDiff = null;
+        }
+        if (typeof updatePublishStepper === "function") {
+          updatePublishStepper("readiness", "waiting");
+        }
+        if (typeof currentCoverageCenter !== "undefined") {
+          currentCoverageCenter = null;
+        }
+        if (typeof cachedOperations !== "undefined") {
+          cachedOperations = [];
+        }
+        if (typeof operationDraftAnswers !== "undefined") {
+          operationDraftAnswers = {};
+        }
+        if (typeof currentLatestReviewRun !== "undefined") {
+          currentLatestReviewRun = null;
+        }
+        if (typeof currentOverrides !== "undefined") {
+          currentOverrides = {};
+        }
+
+        var elementsToClear = [
+          "precheck-matrix", "provenance-summary", "provenance-stale-diff",
+          "provenance-confirm-message", "readiness-message", "coverage-center",
+          "coverage-center-message", "operation-list", "image-list",
+          "workflow-tasks", "latest-summary", "latest-json", "latest-recovery"
+        ];
+        for (var i = 0; i < elementsToClear.length; i += 1) {
+          var el = typeof byId === "function" ? byId(elementsToClear[i]) : null;
+          if (el) el.textContent = "";
+        }
+        var interviewAnswer = typeof byId === "function" ? byId("interview-answer-input") : null;
+        if (interviewAnswer) interviewAnswer.value = "";
+        var requestInp = typeof byId === "function" ? byId("request-input") : null;
+        if (requestInp) requestInp.value = "";
+        var choicesContainer = typeof byId === "function" ? byId("interview-choices") : null;
+        if (choicesContainer) choicesContainer.textContent = "";
+      }
 `;

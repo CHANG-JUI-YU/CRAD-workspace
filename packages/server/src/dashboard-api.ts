@@ -103,45 +103,61 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
       }
 
       async function loadProjects() {
+        var gen = state.projectGeneration;
         try {
           var payload = await requestJson("/workspace/projects");
+          if (gen !== state.projectGeneration) return payload;
           renderProjects(payload);
           return payload;
         } catch (error) {
-          setAreaError("projects-message", error);
+          if (gen === state.projectGeneration) {
+            setAreaError("projects-message", error);
+          }
           throw error;
         }
       }
 
       async function loadStatus() {
+        var gen = state.projectGeneration;
         try {
           var payload = await requestJson("/workspace/status");
+          if (gen !== state.projectGeneration) return payload;
           renderStatus(payload);
           return payload;
         } catch (error) {
-          setAreaError("status-summary", error);
+          if (gen === state.projectGeneration) {
+            setAreaError("status-summary", error);
+          }
           throw error;
         }
       }
 
       async function loadAgents() {
+        var gen = state.projectGeneration;
         try {
           var payload = await requestJson("/workspace/agents");
+          if (gen !== state.projectGeneration) return payload;
           renderAgents(payload);
           return payload;
         } catch (error) {
-          setAreaError("agents-message", error);
+          if (gen === state.projectGeneration) {
+            setAreaError("agents-message", error);
+          }
           throw error;
         }
       }
 
       async function loadInterview() {
+        var gen = state.projectGeneration;
         try {
           var payload = await requestJson("/workspace/interview/context");
+          if (gen !== state.projectGeneration) return payload;
           renderInterview(payload);
           return payload;
         } catch (error) {
-          setAreaError("interview-message", error);
+          if (gen === state.projectGeneration) {
+            setAreaError("interview-message", error);
+          }
           throw error;
         }
       }
@@ -167,6 +183,9 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
           renderLatest("重新整理", { status: "completed", summary: "專案、狀態、Agent 與訪談資料已更新。" });
           setNotice("success", "資料已更新。");
           if (typeof updateLastUpdated === "function") updateLastUpdated();
+        }
+        if (typeof applySectionVisibility === "function" && typeof activeSection !== "undefined") {
+          applySectionVisibility(activeSection);
         }
         setBusy(false);
       }
@@ -202,8 +221,49 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
         }
       }
 
+      async function transitionProjectContext(newProject) {
+        var generation = ++state.projectGeneration;
+        state.currentProjectValue = newProject || "";
+        if (typeof resetProjectScopedState === "function") {
+          resetProjectScopedState();
+        }
+        if (typeof syncAllControls === "function") syncAllControls();
+        if (typeof applySectionVisibility === "function" && typeof activeSection !== "undefined") {
+          applySectionVisibility(activeSection);
+        }
+
+        var outcomes = await Promise.allSettled([
+          loadStatus(),
+          loadProjects(),
+          loadAgents(),
+          loadInterview(),
+          typeof loadDashboardData === "function" ? loadDashboardData() : Promise.resolve(),
+          typeof loadWorkflowData === "function" ? loadWorkflowData() : Promise.resolve(),
+          typeof loadCoverageCenterData === "function" ? loadCoverageCenterData() : Promise.resolve()
+        ]);
+        if (generation !== state.projectGeneration) {
+          return outcomes;
+        }
+        if (typeof syncAllControls === "function") syncAllControls();
+        if (typeof applySectionVisibility === "function" && typeof activeSection !== "undefined") {
+          applySectionVisibility(activeSection);
+        }
+        return outcomes;
+      }
+
       async function refreshAfterAction() {
-        await Promise.allSettled([loadProjects(), loadStatus(), loadInterview(), refreshWorkflowViews()]);
+        var gen = state.projectGeneration;
+        await Promise.allSettled([
+          loadProjects(),
+          loadStatus(),
+          loadInterview(),
+          typeof refreshWorkflowViews === "function" ? refreshWorkflowViews() : Promise.resolve()
+        ]);
+        if (gen === state.projectGeneration) {
+          if (typeof applySectionVisibility === "function" && typeof activeSection !== "undefined") {
+            applySectionVisibility(activeSection);
+          }
+        }
       }
 
       function localValidation(label, message) {

@@ -14,6 +14,7 @@ function collectionReset(controller) {
 }
 
 async function collectionFetch(controller, endpoint, render, options) {
+  if (controller.loading) return;
   var opts = options || {};
   var generation = ++controller.generation;
   controller.loading = true;
@@ -73,7 +74,13 @@ function collectionMoreButton(controller, endpoint, render, buttonId, countId) {
   button.textContent = "載入更多";
   button.removeAttribute("aria-busy");
   if (!controller.end) {
-    button.addEventListener("click", function () { void collectionFetch(controller, endpoint, render); });
+    button.onclick = function () {
+      if (!controller.loading && !controller.end) {
+        void collectionFetch(controller, endpoint, render);
+      }
+    };
+  } else {
+    button.onclick = null;
   }
 }
 `;

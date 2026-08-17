@@ -28,17 +28,50 @@ export const DASHBOARD_DRAFT_STORE_JS = `      var cradDraftStore = (function ()
           return KEY_PREFIX + currentProjectId() + ":" + formKey + (objectKey ? ":" + objectKey : "");
         }
 
-        function readRaw(key) {
+        function getStorage() {
           try {
-            return window.sessionStorage.getItem(key);
+            if (typeof window !== "undefined" && window.sessionStorage) {
+              return window.sessionStorage;
+            }
+          } catch (error) {
+            // Storage blocked or SecurityError
+          }
+          return null;
+        }
+
+        function getStorageSnapshotKeys() {
+          var storage = getStorage();
+          if (!storage) return [];
+          var keys = [];
+          try {
+            var len = typeof storage.length === "number" ? storage.length : 0;
+            for (var i = 0; i < len; i += 1) {
+              var k = storage.key(i);
+              if (typeof k === "string") {
+                keys.push(k);
+              }
+            }
+          } catch (error) {
+            // Failure-safe on enumeration error
+          }
+          return keys;
+        }
+
+        function readRaw(key) {
+          var storage = getStorage();
+          if (!storage) return null;
+          try {
+            return storage.getItem(key);
           } catch (error) {
             return null;
           }
         }
 
         function writeRaw(key, raw) {
+          var storage = getStorage();
+          if (!storage) return false;
           try {
-            window.sessionStorage.setItem(key, raw);
+            storage.setItem(key, raw);
             return true;
           } catch (error) {
             return false;
@@ -46,8 +79,10 @@ export const DASHBOARD_DRAFT_STORE_JS = `      var cradDraftStore = (function ()
         }
 
         function removeRaw(key) {
+          var storage = getStorage();
+          if (!storage) return;
           try {
-            window.sessionStorage.removeItem(key);
+            storage.removeItem(key);
           } catch (error) {
           }
         }
@@ -66,7 +101,8 @@ export const DASHBOARD_DRAFT_STORE_JS = `      var cradDraftStore = (function ()
           if (typeof entry.value !== "string" || entry.value.length === 0 || entry.value.length > MAX_VALUE_LENGTH) return null;
           if (typeof entry.project_id !== "string" || entry.project_id.length === 0) return null;
           if (typeof entry.saved_at !== "string" || typeof entry.expires_at !== "string") return null;
-          if (Date.parse(entry.expires_at) <= Date.now()) return null;
+          var expiresMs = Date.parse(entry.expires_at);
+          if (isNaN(expiresMs) || expiresMs <= Date.now()) return null;
           return entry;
         }
 
@@ -112,14 +148,15 @@ export const DASHBOARD_DRAFT_STORE_JS = `      var cradDraftStore = (function ()
 
         function clearProjectDrafts() {
           var projectId = currentProjectId();
-          var prefix = KEY_PREFIX + projectId + ":";
           if (projectId.length === 0) return;
-          var keys = [];
-          for (var index = 0; index < window.sessionStorage.length; index += 1) {
-            var key = window.sessionStorage.key(index);
-            if (key !== null && key.indexOf(prefix) === 0) keys.push(key);
+          var prefix = KEY_PREFIX + projectId + ":";
+          var allKeys = getStorageSnapshotKeys();
+          var keysToRemove = [];
+          for (var index = 0; index < allKeys.length; index += 1) {
+            var key = allKeys[index];
+            if (key !== null && key.indexOf(prefix) === 0) keysToRemove.push(key);
           }
-          for (var i = 0; i < keys.length; i += 1) removeRaw(keys[i]);
+          for (var i = 0; i < keysToRemove.length; i += 1) removeRaw(keysToRemove[i]);
         }
 
         function scanDrafts() {
@@ -127,8 +164,9 @@ export const DASHBOARD_DRAFT_STORE_JS = `      var cradDraftStore = (function ()
           if (projectId.length === 0) return [];
           var prefix = KEY_PREFIX + projectId + ":";
           var results = [];
-          for (var index = 0; index < window.sessionStorage.length; index += 1) {
-            var key = window.sessionStorage.key(index);
+          var allKeys = getStorageSnapshotKeys();
+          for (var index = 0; index < allKeys.length; index += 1) {
+            var key = allKeys[index];
             if (key === null || key.indexOf(prefix) !== 0) continue;
             var raw = readRaw(key);
             if (raw === null) continue;

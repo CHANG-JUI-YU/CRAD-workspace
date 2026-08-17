@@ -30,7 +30,7 @@ export const DASHBOARD_ACTIONS_JS = `      function submitRequest() {
         }
         void runTask("切換專案", async function () {
           var payload = await postJson("/workspace/project/select", { project: project });
-          await refreshAfterAction();
+          await transitionProjectContext(project);
           return payload;
         });
       }

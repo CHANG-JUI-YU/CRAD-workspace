@@ -309,13 +309,18 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
       }
 
       function reducedMotion() {
-        return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       }
 
       function switchPanel(panel) {
+        if (typeof syncSectionForPanel === "function") {
+          syncSectionForPanel(panel);
+        }
         var anchor = byId(panelAnchorId(panel));
         if (anchor === null || anchor === undefined) return;
-        anchor.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" });
+        if (anchor.scrollIntoView) {
+          anchor.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" });
+        }
       }
 
       function revealDiagnosticTarget(target, code, btnEl) {
@@ -1592,6 +1597,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
       var SEVERITIES = ["critical", "error", "warning", "info"];
       var currentOverrides = {};
       var repairPlanHash = "";
+      var operationDraftAnswers = {};
 
       function operationMatchesFilter(operation, filter) {
         var states = OPERATION_FILTERS[filter] || "";
@@ -1602,14 +1608,16 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
       function answerNeedsInput(operationId, input) {
         return function () {
           if (state.busy) return;
-          var value = input.value.trim();
-          if (!value) {
+          var value = (input ? input.value : "") || operationDraftAnswers[operationId] || "";
+          var trimmed = value.trim();
+          if (!trimmed) {
             localValidation("Operation 回答", "回答不可為空。");
             return;
           }
-          var body = { request: value, target_operation_id: operationId, operation_id: operationId };
+          var body = { request: trimmed, target_operation_id: operationId, operation_id: operationId };
           void runTask("回答 Operation", async function () {
             var payload = await postJson("/workspace/request", body);
+            delete operationDraftAnswers[operationId];
             await loadDashboardData();
             return payload;
           });
@@ -1659,30 +1667,27 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         modal.appendChild(fileInput);
 
         var actionRow = document.createElement("div");
-        actionRow.style.cssText = "display:flex;justify-content:flex-end;gap:8px;";
+        actionRow.style.cssText = "display:flex;gap:8px;justify-content:flex-end;";
 
         var cancelBtn = document.createElement("button");
         cancelBtn.type = "button";
         cancelBtn.textContent = "取消";
-        cancelBtn.style.cssText = "padding:8px 16px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;";
         cancelBtn.addEventListener("click", function () { overlay.remove(); });
         actionRow.appendChild(cancelBtn);
 
         var submitBtn = document.createElement("button");
         submitBtn.type = "button";
+        submitBtn.className = "primary";
         submitBtn.textContent = "確認上傳並繼續重播";
-        submitBtn.style.cssText = "padding:8px 16px;border:none;background:#0066cc;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;";
-
         submitBtn.addEventListener("click", async function () {
           var files = fileInput.files;
           if (!files || files.length === 0) {
-            errBox.textContent = "請選擇至少一個檔案。";
+            errBox.textContent = "請至少選取一個檔案。";
             errBox.style.display = "block";
             return;
           }
-          errBox.style.display = "none";
           submitBtn.disabled = true;
-          submitBtn.textContent = "讀取中...";
+          errBox.style.display = "none";
 
           var replacements = [];
           for (var i = 0; i < files.length; i += 1) {
@@ -1724,18 +1729,64 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
 
       function renderOperationList(operations) {
         var target = byId("operation-list");
-        var filter = byId("operation-filter").value;
+        var filter = byId("operation-filter") ? byId("operation-filter").value : "all";
         cachedOperations = Array.isArray(operations) ? operations : [];
-        target.textContent = "";
+
+        var focusedOpId = null;
+        var selectionStart = null;
+        var selectionEnd = null;
+        if (target && target.querySelectorAll) {
+          var existingInputs = target.querySelectorAll("input.operation-answer-input");
+          for (var k = 0; k < existingInputs.length; k += 1) {
+            var existingInp = existingInputs[k];
+            var opKey = existingInp.getAttribute("data-operation-id");
+            if (opKey) {
+              if (existingInp.value) {
+                operationDraftAnswers[opKey] = existingInp.value;
+              }
+              if (document.activeElement === existingInp) {
+                focusedOpId = opKey;
+                try {
+                  selectionStart = existingInp.selectionStart;
+                  selectionEnd = existingInp.selectionEnd;
+                } catch (err) {}
+              }
+            }
+          }
+        }
+
+        if (target) target.textContent = "";
         if (cachedOperations.length === 0) {
-          byId("operation-message").textContent = "目前沒有 operation。";
+          var emptyMsg = byId("operation-message");
+          if (emptyMsg) emptyMsg.textContent = "目前沒有 operation。";
           return;
         }
+
         var visible = [];
+        var activeNeedsInputIds = new Set();
         for (var i = 0; i < cachedOperations.length; i += 1) {
-          if (isRecord(cachedOperations[i]) && operationMatchesFilter(cachedOperations[i], filter)) visible.push(cachedOperations[i]);
+          var opItem = cachedOperations[i];
+          if (isRecord(opItem)) {
+            if (opItem.status === "needs_input") {
+              activeNeedsInputIds.add(opItem.id);
+            }
+            if (operationMatchesFilter(opItem, filter)) {
+              visible.push(opItem);
+            }
+          }
         }
-        byId("operation-message").textContent = "共 " + cachedOperations.length + " 個 operation（顯示 " + visible.length + " 個）。";
+
+        var draftKeys = Object.keys(operationDraftAnswers);
+        for (var n = 0; n < draftKeys.length; n += 1) {
+          if (!activeNeedsInputIds.has(draftKeys[n])) {
+            delete operationDraftAnswers[draftKeys[n]];
+          }
+        }
+
+        var msgEl = byId("operation-message");
+        if (msgEl) msgEl.textContent = "共 " + cachedOperations.length + " 個 operation（顯示 " + visible.length + " 個）。";
+        if (!target) return;
+
         for (var j = 0; j < visible.length; j += 1) {
           var operation = visible[j];
           var row = document.createElement("div");
@@ -1792,7 +1843,19 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
           } else if (status === "needs_input") {
             var answer = document.createElement("input");
             answer.type = "text";
+            answer.className = "operation-answer-input";
+            answer.setAttribute("data-operation-id", operation.id);
             answer.placeholder = "回答此問題…";
+            var existingAnswer = operationDraftAnswers[operation.id] || "";
+            if (existingAnswer) {
+              answer.value = existingAnswer;
+            }
+            (function (opId, inputEl) {
+              inputEl.addEventListener("input", function () {
+                operationDraftAnswers[opId] = inputEl.value;
+              });
+            })(operation.id, answer);
+
             var send = document.createElement("button");
             send.type = "button";
             send.textContent = "送出";

@@ -1,4 +1,13 @@
 export const DASHBOARD_NAV_JS = `
+function reducedMotion() {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function panelAnchorId(panel) {
+  if (typeof panel !== "string" || panel.length === 0) return null;
+  return panel.indexOf("-panel") === -1 ? panel + "-panel" : panel;
+}
+
 var DASHBOARD_SECTIONS = [
   { id: "overview", label: "總覽" },
   { id: "define", label: "定義" },
@@ -28,6 +37,7 @@ function sectionLabel(sectionId) {
   return sectionId;
 }
 function parseSectionHash() {
+  if (typeof window === "undefined" || !window.location) return undefined;
   var raw = window.location.hash;
   if (typeof raw !== "string" || raw.indexOf("#section:") !== 0) { return undefined; }
   var section = raw.slice("#section:".length);
@@ -37,22 +47,38 @@ function parseSectionHash() {
   return undefined;
 }
 function applySectionVisibility(section) {
-  var panels = document.querySelectorAll("section.panel");
-  for (var i = 0; i < panels.length; i += 1) {
-    var panel = panels[i];
-    var key = panel.id !== undefined && panel.id !== "" ? panel.id.replace(/-panel$/u, "") : String(panel.getAttribute("aria-labelledby") || "").replace(/-heading$/u, "");
-    var own = sectionOfPanel(key) === section;
-    panel.hidden = !own;
+  var target = section || activeSection || "overview";
+  var valid = false;
+  for (var k = 0; k < DASHBOARD_SECTIONS.length; k += 1) {
+    if (DASHBOARD_SECTIONS[k].id === target) { valid = true; break; }
   }
-  for (var j = 0; j < DASHBOARD_SECTIONS.length; j += 1) {
-    var button = document.getElementById("section-nav-" + DASHBOARD_SECTIONS[j].id);
-    if (button !== null) {
-      if (DASHBOARD_SECTIONS[j].id === section) {
-        button.setAttribute("aria-current", "page");
-        button.classList.add("active");
-      } else {
-        button.removeAttribute("aria-current");
-        button.classList.remove("active");
+  if (!valid) target = "overview";
+  activeSection = target;
+
+  if (typeof document !== "undefined" && document.querySelectorAll) {
+    var panels = document.querySelectorAll("section.panel");
+    for (var i = 0; i < panels.length; i += 1) {
+      var panel = panels[i];
+      if (panel.id === "home-panel") {
+        if (typeof state !== "undefined" && state.sessionUnselected) {
+          panel.hidden = false;
+          continue;
+        }
+      }
+      var key = panel.id !== undefined && panel.id !== "" ? panel.id.replace(/-panel$/u, "") : String(panel.getAttribute("aria-labelledby") || "").replace(/-heading$/u, "");
+      var own = sectionOfPanel(key) === target;
+      panel.hidden = !own;
+    }
+    for (var j = 0; j < DASHBOARD_SECTIONS.length; j += 1) {
+      var button = document.getElementById("section-nav-" + DASHBOARD_SECTIONS[j].id);
+      if (button !== null) {
+        if (DASHBOARD_SECTIONS[j].id === target) {
+          button.setAttribute("aria-current", "page");
+          button.classList.add("active");
+        } else {
+          button.removeAttribute("aria-current");
+          button.classList.remove("active");
+        }
       }
     }
   }
@@ -64,11 +90,14 @@ function switchSection(section, options) {
     if (DASHBOARD_SECTIONS[i].id === target) { valid = true; break; }
   }
   if (!valid) { target = "overview"; }
-  if (target === activeSection && options && options.force !== true) { return; }
+  if (target === activeSection && options && options.force !== true) {
+    applySectionVisibility(target);
+    return;
+  }
   activeSection = target;
   applySectionVisibility(target);
   var opts = options || {};
-  if (opts.pushHistory !== false && !sectionHistoryGuard) {
+  if (opts.pushHistory !== false && !sectionHistoryGuard && typeof window !== "undefined" && window.history && window.history.pushState) {
     try {
       window.history.pushState({ section: target }, "", "#section:" + target);
     } catch (err) { /* noop */ }
@@ -81,6 +110,7 @@ function syncSectionForPanel(panel) {
   switchSection(own, { pushHistory: false });
 }
 function updateSectionNav() {
+  if (typeof document === "undefined" || !document.getElementById) return;
   var nav = document.getElementById("section-nav");
   if (nav === null) { return; }
   for (var i = 0; i < DASHBOARD_SECTIONS.length; i += 1) {
@@ -103,27 +133,30 @@ function updateSectionNav() {
 }
 function switchPanel(panel) {
   var anchor = panelAnchorId(panel);
-  if (anchor !== null) {
+  if (anchor !== null && typeof document !== "undefined" && document.getElementById) {
     var el = document.getElementById(anchor);
-    if (el !== null) { el.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" }); }
+    if (el !== null && el.scrollIntoView) { el.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" }); }
   }
   syncSectionForPanel(panel);
 }
-window.addEventListener("popstate", function () {
-  var section = parseSectionHash();
-  if (section === undefined) { return; }
-  sectionHistoryGuard = true;
-  try {
-    if (section !== activeSection) {
-      activeSection = section;
-      applySectionVisibility(section);
+if (typeof window !== "undefined" && window.addEventListener) {
+  window.addEventListener("popstate", function () {
+    var section = parseSectionHash();
+    if (section === undefined) { return; }
+    sectionHistoryGuard = true;
+    try {
+      if (section !== activeSection) {
+        activeSection = section;
+        applySectionVisibility(section);
+      }
+    } finally {
+      sectionHistoryGuard = false;
     }
-  } finally {
-    sectionHistoryGuard = false;
-  }
-});
+  });
+}
 var sectionHash = parseSectionHash();
 if (sectionHash !== undefined && sectionHash !== "overview") {
   activeSection = sectionHash;
 }
+updateSectionNav();
 `;
