@@ -21,7 +21,9 @@ type ProvenanceImageIdentity,
   type RepairInspection,
   type ReviewRecord,
   type SourceCandidate,
+  type SourceEvidenceComponent,
   type SourceRecord,
+  type UrlIngestionRecord,
 } from "@st-workspace/core";
 import {
   buildRequiredArtifactManifest,
@@ -105,6 +107,7 @@ export interface DashboardCounts {
   builds: number;
   images: number;
   audit_events: number;
+  url_ingestions: number;
 }
 
 export interface DashboardStatusCounts {
@@ -228,7 +231,11 @@ export interface DashboardSourceView {
   media_type: string;
   original_name?: string;
   url?: string;
+  canonical_url?: string;
+  final_url?: string;
+  content_size?: number;
   official?: boolean;
+  evidence_components?: SourceEvidenceComponent[];
   chunk_count: number;
   canonical_chars: number;
   selection_snapshot?: SourceRecord["selection_snapshot"];
@@ -239,11 +246,41 @@ export interface DashboardCandidateView {
   title: string;
   snippet?: string;
   url?: string;
+  canonical_url?: string;
+  final_url?: string;
+  content_size?: number;
   domain?: string;
   status: SourceCandidate["status"];
   official?: boolean;
   failure?: { code: string; message: string };
+  evidence_components?: SourceEvidenceComponent[];
   selection_snapshot?: SourceCandidate["selection_snapshot"];
+}
+
+export interface DashboardUrlIngestionView {
+  id: string;
+  operation_id: string;
+  task_id?: string;
+  route?: UrlIngestionRecord["route"];
+  url: string;
+  requested_url: string;
+  status: UrlIngestionRecord["status"];
+  canonical_url?: string;
+  final_url?: string;
+  title?: string;
+  media_type?: string;
+  content_size?: number;
+  error_code?: string;
+  error_message?: string;
+  next_actions?: Array<"retry" | "change_url">;
+  retry_of?: string;
+  successor_of?: string;
+  source_id?: string;
+  evidence_components?: SourceEvidenceComponent[];
+  context?: UrlIngestionRecord["context"];
+  transitions: NonNullable<UrlIngestionRecord["transitions"]>;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface OperationAttachmentStatusView {
@@ -396,6 +433,11 @@ export interface DashboardFactQuery {
 export interface DashboardSourceQuery {
   query?: DashboardQuery;
   filter?: { status?: SourceCandidate["status"]; domain?: string; official?: boolean; search?: string };
+}
+
+export interface DashboardUrlIngestionQuery {
+  query?: DashboardQuery;
+  filter?: { status?: UrlIngestionRecord["status"]; task_id?: string; operation_id?: string; search?: string };
 }
 
 export interface DashboardOperationQuery {
@@ -584,7 +626,11 @@ function mapSource(state: ProjectState, source: SourceRecord): DashboardSourceVi
     media_type: source.media_type,
     ...(source.original_name === undefined ? {} : { original_name: source.original_name }),
     ...(candidate?.url === undefined ? {} : { url: candidate.url }),
+    ...(source.canonical_url === undefined ? {} : { canonical_url: source.canonical_url }),
+    ...(source.final_url === undefined ? {} : { final_url: source.final_url }),
+    ...(source.content_size === undefined ? {} : { content_size: source.content_size }),
     ...(candidate?.official === undefined ? {} : { official: candidate.official }),
+    ...(source.evidence_components === undefined ? {} : { evidence_components: source.evidence_components }),
     chunk_count: state.knowledge_chunks.filter((chunk) => chunk.source_id === source.id).length,
     canonical_chars: source.canonical_text.length,
     ...(source.selection_snapshot === undefined ? {} : { selection_snapshot: source.selection_snapshot }),
@@ -597,11 +643,44 @@ function mapCandidate(candidate: SourceCandidate): DashboardCandidateView {
     title: candidate.title,
     ...(candidate.snippet === undefined ? {} : { snippet: candidate.snippet }),
     ...(candidate.url === undefined ? {} : { url: candidate.url }),
+    ...(candidate.canonical_url === undefined ? {} : { canonical_url: candidate.canonical_url }),
+    ...(candidate.final_url === undefined ? {} : { final_url: candidate.final_url }),
+    ...(candidate.content_size === undefined ? {} : { content_size: candidate.content_size }),
     ...(candidate.domain === undefined ? {} : { domain: candidate.domain }),
     status: candidate.status,
     ...(candidate.official === undefined ? {} : { official: candidate.official }),
     ...(candidate.failure === undefined ? {} : { failure: candidate.failure }),
+    ...(candidate.evidence_components === undefined ? {} : { evidence_components: candidate.evidence_components }),
     ...(candidate.selection_snapshot === undefined ? {} : { selection_snapshot: candidate.selection_snapshot }),
+  };
+}
+
+function mapUrlIngestion(state: ProjectState, record: UrlIngestionRecord): DashboardUrlIngestionView {
+  const source = record.source_id === undefined ? undefined : state.sources.find((item) => item.id === record.source_id);
+  return {
+    id: record.id,
+    operation_id: record.operation_id,
+    ...(record.task_id === undefined ? {} : { task_id: record.task_id }),
+    ...(record.route === undefined ? {} : { route: record.route }),
+    url: record.url,
+    requested_url: record.requested_url ?? record.url,
+    status: record.status,
+    ...(record.canonical_url === undefined ? {} : { canonical_url: record.canonical_url }),
+    ...(record.final_url === undefined ? {} : { final_url: record.final_url }),
+    ...(record.title === undefined ? {} : { title: record.title }),
+    ...(record.media_type === undefined ? {} : { media_type: record.media_type }),
+    ...(record.content_size === undefined ? {} : { content_size: record.content_size }),
+    ...(record.error_code === undefined ? {} : { error_code: record.error_code }),
+    ...(record.error_message === undefined ? {} : { error_message: record.error_message }),
+    ...(record.next_actions === undefined ? {} : { next_actions: record.next_actions }),
+    ...(record.retry_of === undefined ? {} : { retry_of: record.retry_of }),
+    ...(record.successor_of === undefined ? {} : { successor_of: record.successor_of }),
+    ...(record.source_id === undefined ? {} : { source_id: record.source_id }),
+    ...(source?.evidence_components === undefined ? {} : { evidence_components: source.evidence_components }),
+    ...(record.context === undefined ? {} : { context: record.context }),
+    transitions: record.transitions ?? [],
+    created_at: record.created_at,
+    updated_at: record.updated_at,
   };
 }
 
@@ -884,6 +963,7 @@ export function buildDashboardSummary(state: ProjectState, repair: RepairInspect
       builds: state.builds.length,
       images: state.images.length,
       audit_events: state.audit.length,
+      url_ingestions: state.url_ingestions.length,
     },
     status_counts: {
       operations: statusCounts(state.operations.map((operation) => operation.status)),
@@ -998,6 +1078,22 @@ export function queryDashboardSources(state: ProjectState, options: DashboardSou
     return includesText(`${source.title} ${source.original_name ?? ""}`, filter?.search);
   });
   return page(sortByNewest(sources, (source) => source.created_at).map((source) => mapSource(state, source)), options.query, { collection: "sources", revision: state.revision });
+}
+
+export function queryDashboardUrlIngestions(state: ProjectState, options: DashboardUrlIngestionQuery = {}): DashboardPage<DashboardUrlIngestionView> {
+  const filter = options.filter;
+  const ingestions = state.url_ingestions.filter((record) => {
+    if (filter?.status !== undefined && record.status !== filter.status) return false;
+    if (filter?.task_id !== undefined && record.task_id !== filter.task_id) return false;
+    if (filter?.operation_id !== undefined && record.operation_id !== filter.operation_id) return false;
+    return includesText(`${record.id} ${record.url} ${record.title ?? ""} ${record.error_code ?? ""} ${record.error_message ?? ""}`, filter?.search);
+  });
+  return page(sortByNewest(ingestions, (record) => record.updated_at ?? record.created_at).map((record) => mapUrlIngestion(state, record)), options.query, { collection: "url-ingestions", revision: state.revision });
+}
+
+export function dashboardUrlIngestionDetail(state: ProjectState, id: string): DashboardUrlIngestionView | undefined {
+  const record = state.url_ingestions.find((item) => item.id === id);
+  return record === undefined ? undefined : mapUrlIngestion(state, record);
 }
 
 export function queryDashboardCandidates(state: ProjectState, options: DashboardSourceQuery = {}): DashboardPage<DashboardCandidateView> {

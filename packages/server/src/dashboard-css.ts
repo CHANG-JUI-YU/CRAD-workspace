@@ -557,6 +557,33 @@ export const DASHBOARD_CSS = `  <style>
       display: grid;
       gap: 0.5rem;
     }
+    .url-ingestion-monitor {
+      margin-top: 0.9rem;
+      padding-top: 0.85rem;
+      border-top: 1px solid var(--color-border);
+    }
+    .url-ingestion-section { display: grid; gap: 0.55rem; }
+    .url-ingestion-section h3 { margin: 0; }
+    .url-ingestion-list { display: grid; gap: 0.5rem; }
+    .url-ingestion-card {
+      border: 1px solid var(--color-border);
+      border-radius: 0.6rem;
+      padding: 0.65rem 0.75rem;
+      background: var(--color-surface);
+    }
+    .url-ingestion-card.needs-attention { border-color: var(--color-warning-border); background: var(--color-warning-bg); }
+    .url-ingestion-summary { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; cursor: pointer; }
+    .url-ingestion-url { max-width: 42rem; overflow-wrap: anywhere; font-weight: 650; color: var(--color-text-primary); }
+    .url-ingestion-details { display: grid; gap: 0.55rem; margin-top: 0.65rem; padding-top: 0.65rem; border-top: 1px solid var(--color-divider); }
+    .url-ingestion-meta { display: grid; grid-template-columns: minmax(7rem, 0.35fr) minmax(0, 1fr); gap: 0.25rem 0.75rem; margin: 0; }
+    .url-ingestion-meta dt { color: var(--color-text-muted); font-size: 0.82rem; }
+    .url-ingestion-meta dd { margin: 0; overflow-wrap: anywhere; color: var(--color-text-primary); }
+    .url-ingestion-history, .url-ingestion-context { overflow-wrap: anywhere; }
+    .url-ingestion-components { margin: 0.65rem 0 0; padding-left: 1.35rem; color: var(--color-text-secondary); }
+    .url-ingestion-components li + li { margin-top: 0.25rem; }
+    .url-ingestion-failure { padding: 0.45rem 0.6rem; border: 1px solid var(--color-error-border); border-radius: 0.4rem; overflow-wrap: anywhere; }
+    .url-ingestion-actions { display: flex; gap: 0.45rem; flex-wrap: wrap; }
+    .url-ingestion-summary-note { margin-bottom: 0.15rem; }
     .evidence-passage {
       margin-top: 0.4rem;
       padding: 0.4rem 0.55rem;

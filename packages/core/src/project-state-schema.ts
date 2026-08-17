@@ -16,6 +16,20 @@ import {
   researchTaskSchema,
 } from "./coverage.js";
 
+const sourceEvidenceComponentSchema = z.object({
+  id: z.string().min(1),
+  type: z.enum(["text", "url", "attachment"]),
+  ordinal: z.number().int().nonnegative(),
+  content_hash: z.string().regex(/^[a-f0-9]{64}$/u),
+  content_size: z.number().int().nonnegative(),
+  media_type: z.string().min(1).optional(),
+  title: z.string().min(1).optional(),
+  original_name: z.string().min(1).optional(),
+  requested_url: z.string().url().optional(),
+  canonical_url: z.string().url().optional(),
+  final_url: z.string().url().optional(),
+}).strict();
+
 const sourceCandidateSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
@@ -28,6 +42,7 @@ const sourceCandidateSchema = z.object({
   status: z.enum(["pending", "approved", "rejected", "ingested", "blocked_external", "failed"]),
   content: z.string().optional(),
   media_type: z.string().optional(),
+  content_size: z.number().int().nonnegative().optional(),
   content_hash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   source_revision: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   extension: z.string().optional(),
@@ -41,6 +56,7 @@ const sourceCandidateSchema = z.object({
     selected_by: z.string().min(1),
   }).strict().optional(),
   failure: z.object({ code: z.string().min(1), message: z.string().min(1) }).strict().optional(),
+  evidence_components: z.array(sourceEvidenceComponentSchema).optional(),
 }).strict();
 const sourceRecordSchema = z.object({
   id: z.string().min(1),
@@ -52,6 +68,7 @@ const sourceRecordSchema = z.object({
   original_hash: z.string().regex(/^[a-f0-9]{64}$/u),
   revision: z.string().regex(/^[a-f0-9]{64}$/u),
   media_type: z.string().min(1),
+  content_size: z.number().int().nonnegative().optional(),
   original_name: z.string().optional(),
   provenance_kind: z.enum(["external_source", "user_supplement"]).optional(),
   selection_snapshot: z.object({
@@ -62,6 +79,7 @@ const sourceRecordSchema = z.object({
     selected_at: z.string().datetime({ offset: true }),
     selected_by: z.string().min(1),
   }).strict().optional(),
+  evidence_components: z.array(sourceEvidenceComponentSchema).optional(),
   created_at: z.string().datetime({ offset: true }),
 }).strict();
 

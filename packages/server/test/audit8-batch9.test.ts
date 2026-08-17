@@ -3,6 +3,9 @@ import { MemoryProjectRepository } from "@st-workspace/core";
 import { WorkspaceRuntime } from "@st-workspace/runtime";
 import { createWorkspaceServer } from "../src/index.js";
 import type { Server } from "node:http";
+import { DASHBOARD_CSS } from "../src/dashboard-css.js";
+import { DASHBOARD_MARKUP } from "../src/dashboard-markup.js";
+import { DASHBOARD_PANELS_COVERAGE_JS } from "../src/dashboard-panels-coverage.js";
 
 const SOURCE_ADAPTATION_VALUES = [
   "角色設定",
@@ -170,5 +173,28 @@ describe("#119 interview amendment endpoints (server)", () => {
     expect(html).toContain("/workspace/interview/amend-preview");
     expect(html).toContain("/workspace/interview/amend");
     expect(html).not.toContain("innerHTML");
+  });
+});
+
+describe("Audit 8 Batch 9 - URL ingestion Dashboard read model surface", () => {
+  it("exposes progressive URL lifecycle disclosure, paging and executable recovery controls", () => {
+    expect(DASHBOARD_MARKUP).toContain('id="url-ingestion-monitor"');
+    expect(DASHBOARD_PANELS_COVERAGE_JS).toContain("function renderUrlIngestionMonitor(page)");
+    expect(DASHBOARD_PANELS_COVERAGE_JS).toContain("/workspace/dashboard/url-ingestions");
+    expect(DASHBOARD_PANELS_COVERAGE_JS).toContain("/workspace/coverage/url-ingestion/recover");
+    expect(DASHBOARD_PANELS_COVERAGE_JS).toContain("retry_url");
+    expect(DASHBOARD_PANELS_COVERAGE_JS).toContain("change_url");
+    expect(DASHBOARD_PANELS_COVERAGE_JS).toContain("aria-busy");
+    expect(DASHBOARD_PANELS_COVERAGE_JS).toContain("record.transitions");
+    expect(DASHBOARD_PANELS_COVERAGE_JS).toContain("record.evidence_components");
+    expect(DASHBOARD_PANELS_COVERAGE_JS).not.toContain("innerHTML");
+  });
+
+  it("uses semantic theme tokens for the lifecycle monitor and remains parseable", () => {
+    expect(DASHBOARD_CSS).toContain(".url-ingestion-card");
+    expect(DASHBOARD_CSS).toContain("var(--color-warning-bg)");
+    expect(DASHBOARD_CSS).toContain("var(--color-error-border)");
+    expect(DASHBOARD_CSS).toContain("@media (prefers-color-scheme: dark)");
+    expect(() => new Function(DASHBOARD_PANELS_COVERAGE_JS)).not.toThrow();
   });
 });

@@ -23,11 +23,9 @@ import {
 import {
   KnowledgeService,
   applyDerivedResearchBatchStatus,
-  chunkSource,
   claimResearchTask,
   createResearchBatchFromAssessment,
   createResearchBatchWithScope,
-  createUserSupplementSource,
   coverageAssessmentFreshness,
   deriveCoverageAssessmentEligibility,
   deriveCoverageCenterMatrix,
@@ -42,10 +40,10 @@ import {
   resolveResearchTargets,
   reviseResearchTask,
   submitResearchTaskCandidates,
-  KNOWLEDGE_EXTRACTOR_REVISION,
   RESEARCH_IN_FLIGHT_STATUSES,
   type CoverageCenterMatrix,
   type CoverageResearchRecoverInput,
+  type CoverageUrlIngestionRecoverInput,
   type CoverageResearchStartPreviewInput,
   type CoverageResolutionConfirmInput,
   type CoverageResolutionPreviewInput,
@@ -60,10 +58,10 @@ import {
 import { type AttachmentStore, contentHash, type OperationAttachmentRef, type StagedAttachmentSession } from "@st-workspace/core";
 import { now } from "./operation-runner.js";
 import {
-  fetchAndValidateUrlContent,
+  beginUrlIngestion,
   ingestUserSupplementEvidence,
-  type UrlIngestionProjection,
 } from "./coverage-supplement-service.js";
+import { queryDashboardUrlIngestions, type DashboardUrlIngestionView, type DashboardPage } from "./dashboard-read-model.js";
 
 export interface CoverageApplicationDeps {
   repository: ProjectRepository;
@@ -328,7 +326,8 @@ async function recordFailedOperation(
     updated_at: now(),
   };
   try {
-  await deps.repository.commit(state.revision, (current) => {
+    const latest = await deps.repository.read();
+    await deps.repository.commit(latest.revision, (current) => {
       const existingIndex = current.operations.findIndex((op) => op.id === operation.id);
       const updatedOps = existingIndex >= 0
         ? current.operations.map((op, idx) => (idx === existingIndex ? failedOp : op))
@@ -740,6 +739,22 @@ export async function executeCoverageSupplement(
   assertAssessmentMatches(state, payload.assessment_id, payload.assessment_revision);
 
   let currentState = state;
+  let urlLifecycle: Awaited<ReturnType<typeof beginUrlIngestion>> | undefined;
+  if (typeof payload.url === "string" && payload.url.trim() !== "") {
+    urlLifecycle = await beginUrlIngestion(deps.repository, currentState, {
+      operation_id: operation.id,
+      requested_url: payload.url.trim(),
+      ...(typeof payload.url_ingestion_id === "string" ? { retry_of: payload.url_ingestion_id } : {}),
+      route: "coverage_supplement",
+      context: {
+        assessment_id: payload.assessment_id,
+        assessment_revision: payload.assessment_revision,
+        requirement_id: payload.requirement_id,
+        ...(payload.character_id === undefined ? {} : { character_id: payload.character_id }),
+      },
+    });
+    currentState = urlLifecycle.state;
+  }
   const executionInput = executionInputFor(operation, actor, "director", "orchestrator");
 
   let parentResolution: CoverageResolution | undefined;
@@ -749,7 +764,7 @@ export async function executeCoverageSupplement(
 
   const explicitResolutionId = payload.pending_resolution_id ?? payload.resolution_id;
   if (explicitResolutionId !== undefined && typeof explicitResolutionId === "string" && explicitResolutionId.trim().length > 0) {
-    const existing = state.coverage_resolutions.find((r) => r.id === explicitResolutionId);
+    const existing = currentState.coverage_resolutions.find((r) => r.id === explicitResolutionId);
     if (existing === undefined) {
       throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Resolution "${explicitResolutionId}" not found.`, true);
     }
@@ -762,7 +777,7 @@ export async function executeCoverageSupplement(
     if (existing.assessment_id !== payload.assessment_id) {
       throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Resolution "${explicitResolutionId}" targets assessment "${existing.assessment_id}", which does not match current assessment "${payload.assessment_id}".`, true);
     }
-    const currentReqSet = state.coverage_requirement_sets.at(-1);
+    const currentReqSet = currentState.coverage_requirement_sets.at(-1);
     if (currentReqSet !== undefined && existing.requirement_set_revision !== currentReqSet.revision) {
       throw new CoreError("COVERAGE_RESOLUTION_INVALID", `Resolution "${explicitResolutionId}" targets requirement set revision ${existing.requirement_set_revision}, which is no longer current.`, true);
     }
@@ -770,7 +785,7 @@ export async function executeCoverageSupplement(
     userDecisionId = existing.user_decision_id;
   } else {
     // Check if there is already an existing pending user_supplement resolution for this requirement/character
-    const existingPending = state.coverage_resolutions.find(
+    const existingPending = currentState.coverage_resolutions.find(
       (r) =>
         r.status === "pending" &&
         r.mode === "user_supplement" &&
@@ -828,6 +843,7 @@ export async function executeCoverageSupplement(
       ...(payload.url === undefined ? {} : { url: payload.url }),
       attachments,
       defaultTitle: "User supplement",
+      ...(urlLifecycle === undefined ? {} : { urlLifecycle }),
     },
   );
 
@@ -986,6 +1002,7 @@ export async function coverageSupplement(
     ...(input.resolution_id === undefined ? {} : { resolution_id: input.resolution_id }),
     ...(input.text === undefined ? {} : { text: input.text }),
     ...(input.url === undefined ? {} : { url: input.url }),
+    ...(input.url_ingestion_id === undefined ? {} : { url_ingestion_id: input.url_ingestion_id }),
   };
 
   const operation = coverageOperation(
@@ -1114,78 +1131,46 @@ export async function executeCoverageResearchRecover(
       action,
       summary: `已建立 successor 研究任務 ${revised.task.id}。`,
     };
-  } else if (action === "manual_url") {
-    const targetUrl = command.payload.url?.trim();
+  } else if (action === "manual_url" || action === "retry_url" || action === "change_url") {
+    const predecessorId = command.payload.url_ingestion_id;
+    const predecessor = predecessorId === undefined ? undefined : mutated.url_ingestions.find((item) => item.id === predecessorId);
+    if ((action === "retry_url" || action === "change_url") && (predecessorId === undefined || predecessor === undefined)) {
+      throw new CoreError("URL_INGESTION_NOT_FOUND", "URL retry requires an existing failed URL ingestion.", true);
+    }
+    const targetUrl = action === "retry_url"
+      ? predecessor?.requested_url ?? predecessor?.url
+      : command.payload.url?.trim();
     if (!targetUrl) {
-      throw new CoreError("OPERATION_COMMAND_INVALID", "手動提供 URL 必須包含有效的 url。", true);
+      throw new CoreError("OPERATION_COMMAND_INVALID", "手動提供或更換 URL 必須包含有效的 url。", true);
     }
-    const ingestId = internalId("ingest");
-    const ingestNow = now();
-    const fetchingState = await deps.repository.commit(mutated.revision, (current) => ({
-      ...current,
-      url_ingestions: [
-        ...current.url_ingestions,
-        { id: ingestId, operation_id: operation.id, url: targetUrl, status: "fetching", created_at: ingestNow, updated_at: ingestNow },
-      ],
-    }));
-    mutated = fetchingState;
-    let urlResult: Awaited<ReturnType<typeof fetchAndValidateUrlContent>>;
-    try {
-      urlResult = await fetchAndValidateUrlContent(deps.fetcher, targetUrl);
-    } catch (error) {
-      const errorCode = error instanceof CoreError ? error.code : "URL_FETCH_FAILED";
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      await deps.repository.commit(fetchingState.revision, (current) => ({
-        ...current,
-        url_ingestions: current.url_ingestions.map((r) =>
-          r.id === ingestId ? { ...r, status: "fetch_failed", error_code: errorCode, error_message: errorMessage, updated_at: now() } : r,
-        ),
-      }));
-      throw new CoreError(errorCode, errorMessage, true, {
-        url_ingestion_id: ingestId,
-        status: "fetch_failed",
-        error_code: errorCode,
-        error_message: errorMessage,
-        next_actions: ["retry", "change_url"],
-      });
-    }
-
-    const { candidate, source, state: s1 } = createUserSupplementSource(
+    const lifecycle = await beginUrlIngestion(deps.repository, mutated, {
+      operation_id: operation.id,
+      requested_url: targetUrl,
+      ...(predecessorId === undefined ? {} : { retry_of: predecessorId }),
+      route: "coverage_research_recover",
+      task_id: task.id,
+      context: {
+        assessment_id: batch?.assessment_id ?? latestAssessment.id,
+        assessment_revision: latestAssessment.revision,
+        ...(task.requirement_ids[0] === undefined ? {} : { requirement_id: task.requirement_ids[0] }),
+        ...(task.character_id === undefined ? {} : { character_id: task.character_id }),
+      },
+    });
+    mutated = lifecycle.state;
+    const supplementRes = await ingestUserSupplementEvidence(
+      deps.fetcher,
       mutated,
-      urlResult.text,
-      actor,
       operation.id,
-      urlResult.media_type,
-      urlResult.title || `Manual URL: ${targetUrl}`,
+      actor,
+      { url: targetUrl, defaultTitle: `URL source (${targetUrl})`, urlLifecycle: lifecycle },
     );
-    const sourceWithUrl: SourceRecord = {
-      ...source,
-      canonical_url: urlResult.canonical_url,
-      final_url: urlResult.final_url,
-      provenance_kind: "external_source",
+    const sourceWithUrl: SourceRecord = { ...supplementRes.source, provenance_kind: "external_source" };
+    const s2: ProjectState = {
+      ...supplementRes.state,
+      sources: supplementRes.state.sources.map((s) => (s.id === sourceWithUrl.id ? sourceWithUrl : s)),
     };
-    const s1Updated: ProjectState = {
-      ...s1,
-      sources: s1.sources.map((s) => (s.id === source.id ? sourceWithUrl : s)),
-      url_ingestions: s1.url_ingestions.map((r) =>
-        r.id === ingestId
-          ? {
-              ...r,
-              status: "ingested",
-              final_url: urlResult.final_url,
-              canonical_url: urlResult.canonical_url,
-              ...(urlResult.title === undefined ? {} : { title: urlResult.title }),
-              media_type: urlResult.media_type,
-              content_size: urlResult.content_size,
-              source_id: sourceWithUrl.id,
-              updated_at: now(),
-            }
-          : r,
-      ),
-    };
-
-    const chunks = chunkSource(sourceWithUrl, KNOWLEDGE_EXTRACTOR_REVISION);
-    const s2: ProjectState = { ...s1Updated, knowledge_chunks: [...s1Updated.knowledge_chunks, ...chunks] };
+    const candidate = supplementRes.candidate;
+    const chunks = supplementRes.chunks;
 
     // Create Lineage Links for the task's requirements
     const newLineages: CoverageResearchLineageLink[] = [];
@@ -1223,7 +1208,7 @@ export async function executeCoverageResearchRecover(
       chunk_count: chunks.length,
       task_id: task.id,
       action,
-      summary: `已成功攝入手動 URL 來源並提煉 ${chunks.length} 個知識分片。`,
+      summary: `已成功攝入 URL 來源並提煉 ${chunks.length} 個知識分片。`,
     };
   } else if (action === "supplement") {
     const choice = command.payload.choice?.trim();
@@ -1232,8 +1217,27 @@ export async function executeCoverageResearchRecover(
       throw new CoreError("OPERATION_COMMAND_INVALID", "選擇補充資料恢復時必須提供 choice 與 rationale。", true);
     }
 
+    let supplementState = mutated;
+    let urlLifecycle: Awaited<ReturnType<typeof beginUrlIngestion>> | undefined;
+    if (command.payload.url !== undefined && command.payload.url.trim() !== "") {
+      urlLifecycle = await beginUrlIngestion(deps.repository, supplementState, {
+        operation_id: operation.id,
+        requested_url: command.payload.url.trim(),
+        ...(command.payload.url_ingestion_id === undefined ? {} : { retry_of: command.payload.url_ingestion_id }),
+        route: "coverage_research_recover",
+        task_id: task.id,
+        context: {
+          assessment_id: batch?.assessment_id ?? latestAssessment.id,
+          assessment_revision: latestAssessment.revision,
+          ...(task.requirement_ids[0] === undefined ? {} : { requirement_id: task.requirement_ids[0] }),
+          ...(task.character_id === undefined ? {} : { character_id: task.character_id }),
+        },
+      });
+      supplementState = urlLifecycle.state;
+    }
+
     const recorded = recordUserDecisionAndResolution(
-      mutated,
+      supplementState,
       "user_supplement",
       task.requirement_ids,
       choice,
@@ -1254,6 +1258,7 @@ export async function executeCoverageResearchRecover(
         ...(command.payload.url === undefined ? {} : { url: command.payload.url }),
         attachments,
         defaultTitle: `補充資料 (Task ${task.id})`,
+        ...(urlLifecycle === undefined ? {} : { urlLifecycle }),
       },
     );
 
@@ -1386,6 +1391,7 @@ export async function coverageResearchRecover(
       ...(input.text === undefined ? {} : { text: input.text }),
       ...(input.choice === undefined ? {} : { choice: input.choice }),
       ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
+      ...(input.url_ingestion_id === undefined ? {} : { url_ingestion_id: input.url_ingestion_id }),
     },
     "source-researcher",
     "researcher",
@@ -1421,6 +1427,61 @@ export async function coverageResearchRecover(
     }
     return await recordFailedOperation(deps, state, operation, error);
   }
+}
+
+/** Retry a failed URL ingestion using a fresh immutable operation id. */
+export async function coverageUrlIngestionRecover(
+  deps: CoverageApplicationDeps,
+  actor: string,
+  input: CoverageUrlIngestionRecoverInput,
+): Promise<CoverageCommandResult> {
+  const state = await deps.repository.read();
+  const ingestion = state.url_ingestions.find((item) => item.id === input.url_ingestion_id);
+  if (ingestion === undefined) throw new CoreError("URL_INGESTION_NOT_FOUND", `URL ingestion "${input.url_ingestion_id}" not found.`, true);
+  if (ingestion.status !== "fetch_failed") throw new CoreError("URL_INGESTION_RETRY_INVALID", "Only a failed URL ingestion can be retried.", true);
+  const operation = state.operations.find((item) => item.id === ingestion.operation_id);
+  const command = operation?.command;
+  if (operation === undefined || command === undefined) {
+    throw new CoreError("URL_INGESTION_CONTEXT_MISSING", "The failed URL ingestion has no executable command context.", true);
+  }
+  const payload = command.payload as Record<string, unknown>;
+  const refs = (command as unknown as { attachment_refs?: OperationAttachmentRef[] }).attachment_refs
+    ?? (payload.attachment_refs as OperationAttachmentRef[] | undefined)
+    ?? [];
+  let attachments: Array<{ name: string; content: Uint8Array; media_type?: string }> = [];
+  if (refs.length > 0) {
+    if (deps.attachmentStore === undefined) {
+      throw new CoreError("URL_INGESTION_ATTACHMENTS_UNAVAILABLE", "The failed URL command has attachments that are not available for automatic retry.", true);
+    }
+    attachments = await deps.attachmentStore.load(operation.id, refs);
+  }
+  if (command.type === "coverage_research_recover") {
+    const taskId = typeof payload.task_id === "string" ? payload.task_id : ingestion.task_id;
+    if (taskId === undefined) throw new CoreError("URL_INGESTION_CONTEXT_MISSING", "The failed URL ingestion has no research task context.", true);
+    return coverageResearchRecover(deps, actor, {
+      task_id: taskId,
+      action: input.action,
+      url_ingestion_id: ingestion.id,
+      ...(input.action === "change_url" ? { url: input.url } : {}),
+    }, attachments);
+  }
+  if (command.type === "coverage_supplement") {
+    const targetUrl = input.action === "change_url" ? input.url : ingestion.requested_url ?? ingestion.url;
+    return coverageSupplement(deps, actor, {
+      assessment_id: String(payload.assessment_id),
+      assessment_revision: String(payload.assessment_revision),
+      requirement_id: String(payload.requirement_id),
+      ...(typeof payload.character_id === "string" ? { character_id: payload.character_id } : {}),
+      ...(typeof payload.choice === "string" ? { choice: payload.choice } : {}),
+      ...(typeof payload.rationale === "string" ? { rationale: payload.rationale } : {}),
+      ...(typeof payload.pending_resolution_id === "string" ? { pending_resolution_id: payload.pending_resolution_id } : {}),
+      ...(typeof payload.resolution_id === "string" ? { resolution_id: payload.resolution_id } : {}),
+      ...(typeof payload.text === "string" ? { text: payload.text } : {}),
+      ...(targetUrl === undefined ? {} : { url: targetUrl }),
+      url_ingestion_id: ingestion.id,
+    }, attachments);
+  }
+  throw new CoreError("URL_INGESTION_CONTEXT_MISSING", "The failed operation is not a URL ingestion command.", true);
 }
 
 /**
@@ -1465,10 +1526,11 @@ export async function dashboardCoverage(deps: CoverageApplicationDeps): Promise<
   };
 }
 
-export async function dashboardCoverageCenter(deps: CoverageApplicationDeps): Promise<{ matrix: CoverageCenterMatrix; monitor: ResearchMonitor }> {
+export async function dashboardCoverageCenter(deps: CoverageApplicationDeps): Promise<{ matrix: CoverageCenterMatrix; monitor: ResearchMonitor; url_ingestions: DashboardPage<DashboardUrlIngestionView> }> {
   const state = await deps.repository.read();
   return {
     matrix: deriveCoverageCenterMatrix(state),
     monitor: deriveResearchMonitor(state, new Date().toISOString()),
+    url_ingestions: queryDashboardUrlIngestions(state, { query: { limit: 50 } }),
   };
 }

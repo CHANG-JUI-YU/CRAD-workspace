@@ -121,6 +121,7 @@ import {
   type ArtifactCoverageLineage,
   type CoverageCenterMatrix,
   type CoverageResearchRecoverInput,
+  type CoverageUrlIngestionRecoverInput,
   type CoverageResolutionConfirmInput,
   type CoverageResolutionPreviewInput,
   type CoverageSupplementInput,
@@ -133,7 +134,7 @@ import {
 import type { CardModeSelection } from "@st-workspace/compiler";
 import { AgentRouter, type AgentResolution } from "./agent-router.js";
 import type { DashboardProvenanceView, PublishCompletionView, PublishDownloadResult, PublishExecutionKind, PublishProvenanceConfirmInput, PublishProvenancePreviewResult } from "./runtime-views.js";
-import { coverageResearchCandidates as coverageResearchCandidatesQuery, coverageResearchClaim as coverageResearchClaimQuery, coverageResearchExhaust as coverageResearchExhaustQuery, coverageResearchRecover as coverageResearchRecoverQuery, coverageResearchStart as coverageResearchStartQuery, coverageResearchStartPreview as coverageResearchStartPreviewQuery, coverageResolutionConfirm as coverageResolutionConfirmQuery, coverageResolutionPreview as coverageResolutionPreviewQuery, coverageSupplement as coverageSupplementQuery, dashboardCoverage as dashboardCoverageQuery, dashboardCoverageCenter as dashboardCoverageCenterQuery, executeCoverageResearchCandidates, executeCoverageResearchClaim, executeCoverageResearchExhaust, executeCoverageResearchRecover, executeCoverageResearchStart, executeCoverageResolutionConfirm, executeCoverageSupplement, type CoverageApplicationDeps, type CoverageCommandOutcome } from "./coverage-application.js";
+import { coverageResearchCandidates as coverageResearchCandidatesQuery, coverageResearchClaim as coverageResearchClaimQuery, coverageResearchExhaust as coverageResearchExhaustQuery, coverageResearchRecover as coverageResearchRecoverQuery, coverageUrlIngestionRecover as coverageUrlIngestionRecoverQuery, coverageResearchStart as coverageResearchStartQuery, coverageResearchStartPreview as coverageResearchStartPreviewQuery, coverageResolutionConfirm as coverageResolutionConfirmQuery, coverageResolutionPreview as coverageResolutionPreviewQuery, coverageSupplement as coverageSupplementQuery, dashboardCoverage as dashboardCoverageQuery, dashboardCoverageCenter as dashboardCoverageCenterQuery, executeCoverageResearchCandidates, executeCoverageResearchClaim, executeCoverageResearchExhaust, executeCoverageResearchRecover, executeCoverageResearchStart, executeCoverageResolutionConfirm, executeCoverageSupplement, type CoverageApplicationDeps, type CoverageCommandOutcome } from "./coverage-application.js";
 import {
   artifactQueryFromDashboardQuery,
   auditQueryFromDashboardQuery,
@@ -178,6 +179,7 @@ import {
   type DashboardReviewRunView,
   type DashboardReviewView,
   type DashboardSourceView,
+  type DashboardUrlIngestionView,
   type DashboardSummary,
   type DashboardQuery,
 } from "./dashboard-read-model.js";
@@ -229,13 +231,14 @@ export type {
   DashboardReviewRunView,
   DashboardReviewView,
   DashboardSourceView,
+  DashboardUrlIngestionView,
   DashboardSummary,
   DashboardQuery,
 } from "./dashboard-read-model.js";
 
 import { authoringKnowledgeContext as authoringKnowledgeContextQuery, templateContext as templateContextQuery, zhujiContext as zhujiContextQuery } from "./authoring-application.js";
 import { dashboardSnapshot as dashboardSnapshotQuery, publishPreview as publishPreviewQuery, buildReadiness as buildReadinessQuery, tavernCompat as tavernCompatQuery, repairPreview as repairPreviewQuery, repairRun as repairRunQuery } from "./build-application.js";
-import { dashboardArtifacts as dashboardArtifactsQuery, dashboardArtifact as dashboardArtifactQuery, dashboardArtifactHistory as dashboardArtifactHistoryQuery, dashboardAudit as dashboardAuditQuery, dashboardBuilds as dashboardBuildsQuery, dashboardCandidates as dashboardCandidatesQuery, dashboardFacts as dashboardFactsQuery, dashboardIssues as dashboardIssuesQuery, dashboardOperation as dashboardOperationQuery, dashboardOperations as dashboardOperationsQuery, dashboardPublishes as dashboardPublishesQuery, dashboardReviewRun as dashboardReviewRunQuery, dashboardReviewRuns as dashboardReviewRunsQuery, dashboardReviews as dashboardReviewsQuery, dashboardSource as dashboardSourceQuery, dashboardSources as dashboardSourcesQuery, dashboardSummary as dashboardSummaryQuery, dashboardCandidate as dashboardCandidateQuery } from "./dashboard-query.js";
+import { dashboardArtifacts as dashboardArtifactsQuery, dashboardArtifact as dashboardArtifactQuery, dashboardArtifactHistory as dashboardArtifactHistoryQuery, dashboardAudit as dashboardAuditQuery, dashboardBuilds as dashboardBuildsQuery, dashboardCandidates as dashboardCandidatesQuery, dashboardFacts as dashboardFactsQuery, dashboardIssues as dashboardIssuesQuery, dashboardOperation as dashboardOperationQuery, dashboardOperations as dashboardOperationsQuery, dashboardPublishes as dashboardPublishesQuery, dashboardReviewRun as dashboardReviewRunQuery, dashboardReviewRuns as dashboardReviewRunsQuery, dashboardReviews as dashboardReviewsQuery, dashboardSource as dashboardSourceQuery, dashboardSources as dashboardSourcesQuery, dashboardUrlIngestions as dashboardUrlIngestionsQuery, dashboardSummary as dashboardSummaryQuery, dashboardCandidate as dashboardCandidateQuery } from "./dashboard-query.js";
 import { applyFactReviewBatch as applyFactReviewBatchQuery, factReviewContext as factReviewContextQuery, reextract as reextractQuery, resolveFactConflict as resolveFactConflictQuery, startFactReviewRun as startFactReviewRunQuery } from "./fact-review-application.js";
 import { buildBlueprintPrecheck, collaborationMode, createBlueprintArtifact, directionForSubject, intakeKeyForConfirmation, interviewCharacterSubjects, interviewContext as interviewContextQuery, interviewAmendmentImpactPreview as interviewAmendmentImpactPreviewQuery, amendInterviewAnswer as amendInterviewAnswerQuery, isBarePrecheckConfirmation, isBlueprintConfirmation, isBlueprintRevisionRequest, latestBlueprintSnapshot, mergeExpansionIntoBlueprint, mergePatchBlueprint, mergeWorldIntoBlueprint, nonEmptyInterviewValue, nonEmptyString, objectValue, PALETTE_MODULE_ORDER, parsePrecheckConfirmQuestionId, precheckConfirmQuestion, precheckSubjectLabel, sourceAdaptationIntentFromValues, sourceFactsReady, startInterview as startInterviewQuery, worldConfig, isSourceAdaptationProject, relationshipConfig, authoringModeForSubject, canonPolicyFromValues, ZHUJI_MODULE_ORDER } from "./interview-application.js";
 import { availableCardModesRuntime, blueprintRosterIds, executionLeaseGuard, latestByKey, now, OPERATION_LEASE_MS, parsedModeModules, parseBuildModeSelection, reconstructPublishOutcome, responseFromOperation, stripLease } from "./operation-runner.js";
@@ -2589,6 +2592,10 @@ export class WorkspaceRuntime {
     return dashboardSourcesQuery({ repository: this.repository }, query);
   }
 
+  async dashboardUrlIngestions(query?: DashboardQuery): Promise<DashboardPage<DashboardUrlIngestionView>> {
+    return dashboardUrlIngestionsQuery({ repository: this.repository }, query);
+  }
+
   async dashboardCandidates(query?: DashboardQuery): Promise<DashboardPage<DashboardCandidateView>> {
     return dashboardCandidatesQuery({ repository: this.repository }, query);
   }
@@ -3169,11 +3176,15 @@ export class WorkspaceRuntime {
     return coverageResearchRecoverQuery(this.coverageDeps(), actor, input, attachments);
   }
 
+  async coverageUrlIngestionRecover(actor: string, input: CoverageUrlIngestionRecoverInput): Promise<Record<string, unknown>> {
+    return coverageUrlIngestionRecoverQuery(this.coverageDeps(), actor, input);
+  }
+
   async dashboardCoverage(): Promise<Record<string, unknown>> {
     return dashboardCoverageQuery(this.coverageDeps());
   }
 
-  async dashboardCoverageCenter(): Promise<{ matrix: CoverageCenterMatrix; monitor: ResearchMonitor }> {
+  async dashboardCoverageCenter(): Promise<{ matrix: CoverageCenterMatrix; monitor: ResearchMonitor; url_ingestions: DashboardPage<DashboardUrlIngestionView> }> {
     return dashboardCoverageCenterQuery(this.coverageDeps());
   }
 

@@ -84,6 +84,7 @@ export const coverageSupplementCommandPayloadSchema = z.object({
   resolution_id: z.string().min(1).optional(),
   text: z.string().min(1).optional(),
   url: z.string().url().optional(),
+  url_ingestion_id: z.string().min(1).optional(),
   attachment_refs: z.array(z.object({
     id: z.string().min(1),
     name: z.string().min(1),
@@ -94,13 +95,14 @@ export const coverageSupplementCommandPayloadSchema = z.object({
 
 export const coverageResearchRecoverCommandPayloadSchema = z.object({
   task_id: z.string().min(1),
-  action: z.enum(["revise_query", "revise_constraints", "manual_url", "supplement", "creative_completion"]),
+  action: z.enum(["revise_query", "revise_constraints", "manual_url", "retry_url", "change_url", "supplement", "creative_completion"]),
   query_seeds: z.array(z.string().min(1)).optional(),
   source_constraints: z.array(z.string().min(1)).optional(),
   url: z.string().url().optional(),
   text: z.string().min(1).optional(),
   choice: z.string().min(1).optional(),
   rationale: z.string().min(1).optional(),
+  url_ingestion_id: z.string().min(1).optional(),
   attachment_refs: z.array(z.object({
     id: z.string().min(1),
     name: z.string().min(1),

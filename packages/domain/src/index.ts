@@ -142,6 +142,8 @@ export interface FetchResult {
   content: Uint8Array;
   media_type?: string;
   final_url?: string;
+  canonical_url?: string;
+  title?: string;
   name?: string;
 }
 

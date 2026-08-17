@@ -170,12 +170,30 @@ export interface SourceCandidate {
   status: CandidateStatus;
   content?: string;
   media_type?: string;
+  content_size?: number;
   content_hash?: string;
   source_revision?: string;
   extension?: string;
   approved_at?: string;
   selection_snapshot?: SourceSelectionSnapshot;
   failure?: { code: string; message: string };
+  evidence_components?: SourceEvidenceComponent[];
+}
+
+export type SourceEvidenceComponentType = "text" | "url" | "attachment";
+
+export interface SourceEvidenceComponent {
+  id: string;
+  type: SourceEvidenceComponentType;
+  ordinal: number;
+  content_hash: string;
+  content_size: number;
+  media_type?: string;
+  title?: string;
+  original_name?: string;
+  requested_url?: string;
+  canonical_url?: string;
+  final_url?: string;
 }
 
 export interface SourceSelectionSnapshot {
@@ -197,9 +215,11 @@ export interface SourceRecord {
   original_hash: string;
   revision: string;
   media_type: string;
+  content_size?: number;
   original_name?: string;
   provenance_kind?: "external_source" | "user_supplement";
   selection_snapshot?: SourceSelectionSnapshot;
+  evidence_components?: SourceEvidenceComponent[];
   created_at: string;
 }
 
@@ -507,6 +527,7 @@ export interface UrlIngestionRecord {
   id: string;
   operation_id: string;
   url: string;
+  requested_url?: string;
   status: "url_received" | "fetching" | "fetch_failed" | "content_validated" | "ingested";
   final_url?: string;
   canonical_url?: string;
@@ -515,11 +536,39 @@ export interface UrlIngestionRecord {
   content_size?: number;
   error_code?: string;
   error_message?: string;
+  next_actions?: Array<"retry" | "change_url">;
   retry_of?: string;
   successor_of?: string;
   source_id?: string;
+  route?: "coverage_supplement" | "coverage_research_recover";
+  task_id?: string;
+  context?: {
+    assessment_id?: string;
+    assessment_revision?: string;
+    requirement_id?: string;
+    character_id?: string;
+  };
+  transitions?: UrlIngestionTransition[];
   created_at: string;
   updated_at: string;
+}
+
+export interface UrlIngestionTransition {
+  id: string;
+  sequence: number;
+  operation_id: string;
+  status: UrlIngestionRecord["status"];
+  occurred_at: string;
+  requested_url?: string;
+  final_url?: string;
+  canonical_url?: string;
+  title?: string;
+  media_type?: string;
+  content_size?: number;
+  error_code?: string;
+  error_message?: string;
+  next_actions?: Array<"retry" | "change_url">;
+  source_id?: string;
 }
 
 export function createProjectState(projectId: string): ProjectState {

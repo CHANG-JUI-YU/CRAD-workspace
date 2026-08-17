@@ -24,6 +24,7 @@ import {
   queryDashboardReviewRuns,
   queryDashboardReviews,
   queryDashboardSources,
+  queryDashboardUrlIngestions,
   readDashboardSummary,
   reviewQueryFromDashboardQuery,
   reviewRunQueryFromDashboardQuery,
@@ -44,6 +45,8 @@ import {
   type DashboardReviewRunView,
   type DashboardReviewView,
   type DashboardSourceView,
+  type DashboardUrlIngestionView,
+  type DashboardUrlIngestionQuery,
   type DashboardSummary,
 } from "./dashboard-read-model.js";
 
@@ -78,6 +81,20 @@ export async function dashboardFacts(deps: DashboardQueryDeps, query?: Dashboard
 export async function dashboardSources(deps: DashboardQueryDeps, query?: DashboardQuery): Promise<DashboardPage<DashboardSourceView>> {
   const state = await deps.repository.read();
   return queryDashboardSources(state, query === undefined ? {} : sourceQueryFromDashboardQuery(query));
+}
+
+export async function dashboardUrlIngestions(deps: DashboardQueryDeps, query?: DashboardQuery): Promise<DashboardPage<DashboardUrlIngestionView>> {
+  const state = await deps.repository.read();
+  const filter: NonNullable<DashboardUrlIngestionQuery["filter"]> = {};
+  const status = query?.filter?.status;
+  if (typeof status === "string" && ["url_received", "fetching", "fetch_failed", "content_validated", "ingested"].includes(status)) filter.status = status as NonNullable<typeof filter.status>;
+  const taskId = query?.filter?.task_id;
+  if (typeof taskId === "string" && taskId.length > 0) filter.task_id = taskId;
+  const operationId = query?.filter?.operation_id;
+  if (typeof operationId === "string" && operationId.length > 0) filter.operation_id = operationId;
+  const search = query?.filter?.search;
+  if (typeof search === "string" && search.length > 0) filter.search = search;
+  return queryDashboardUrlIngestions(state, { ...(query === undefined ? {} : { query }), filter });
 }
 
 export async function dashboardCandidates(deps: DashboardQueryDeps, query?: DashboardQuery): Promise<DashboardPage<DashboardCandidateView>> {

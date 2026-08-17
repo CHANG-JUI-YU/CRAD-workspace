@@ -275,6 +275,7 @@ export const coverageSupplementInputSchema = coverageResolutionScopeSchema.exten
   text: z.string().trim().min(1).optional(),
   url: z.string().url().optional(),
   attachments: attachmentsSchema,
+  url_ingestion_id: z.string().min(1).optional(),
 }).strict().superRefine((value, ctx) => {
   const hasText = value.text !== undefined && value.text.trim().length > 0;
   const hasUrl = value.url !== undefined && value.url.trim().length > 0;
@@ -287,13 +288,14 @@ export type CoverageSupplementInput = z.infer<typeof coverageSupplementInputSche
 
 export const coverageResearchRecoverInputSchema = z.object({
   task_id: z.string().min(1),
-  action: z.enum(["revise_query", "revise_constraints", "manual_url", "supplement", "creative_completion"]),
+  action: z.enum(["revise_query", "revise_constraints", "manual_url", "retry_url", "change_url", "supplement", "creative_completion"]),
   query_seeds: z.array(z.string().min(1)).optional(),
   source_constraints: z.array(z.string().min(1)).optional(),
   url: z.string().url().optional(),
   text: z.string().min(1).optional(),
   choice: z.string().min(1).optional(),
   rationale: z.string().min(1).optional(),
+  url_ingestion_id: z.string().min(1).optional(),
   attachments: attachmentsSchema,
   operation_id: z.string().min(1).optional(),
 }).strict().superRefine((value, ctx) => {
@@ -308,6 +310,17 @@ export const coverageResearchRecoverInputSchema = z.object({
   } else if (value.action === "manual_url") {
     if (value.url === undefined || value.url.trim() === "") {
       ctx.addIssue({ code: "custom", path: ["url"], message: "手動提供 URL 必須包含有效的 url。" });
+    }
+  } else if (value.action === "retry_url") {
+    if (value.url_ingestion_id === undefined || value.url_ingestion_id.trim() === "") {
+      ctx.addIssue({ code: "custom", path: ["url_ingestion_id"], message: "重試 URL 必須指定失敗的 URL ingestion。" });
+    }
+  } else if (value.action === "change_url") {
+    if (value.url_ingestion_id === undefined || value.url_ingestion_id.trim() === "") {
+      ctx.addIssue({ code: "custom", path: ["url_ingestion_id"], message: "更換 URL 必須指定失敗的 URL ingestion。" });
+    }
+    if (value.url === undefined || value.url.trim() === "") {
+      ctx.addIssue({ code: "custom", path: ["url"], message: "更換 URL 必須包含有效的新 url。" });
     }
   } else if (value.action === "supplement") {
     const hasText = value.text !== undefined && value.text.trim() !== "";
@@ -326,6 +339,17 @@ export const coverageResearchRecoverInputSchema = z.object({
   }
 });
 export type CoverageResearchRecoverInput = z.infer<typeof coverageResearchRecoverInputSchema>;
+
+export const coverageUrlIngestionRecoverInputSchema = z.object({
+  url_ingestion_id: z.string().min(1),
+  action: z.enum(["retry_url", "change_url"]),
+  url: z.string().url().optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.action === "change_url" && (value.url === undefined || value.url.trim() === "")) {
+    ctx.addIssue({ code: "custom", path: ["url"], message: "更換 URL 必須包含有效的新 url。" });
+  }
+});
+export type CoverageUrlIngestionRecoverInput = z.infer<typeof coverageUrlIngestionRecoverInputSchema>;
 
 export const coverSelectInputSchema = z.object({
   image_id: z.string().min(1).optional(),

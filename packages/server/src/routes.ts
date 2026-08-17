@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { CoreError, internalId, z, type AdaptationDecision, type RequestResult } from "@st-workspace/core";
-import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverageResearchCandidatesInputSchema, coverageResearchClaimInputSchema, coverageResearchExhaustInputSchema, coverageResearchRecoverInputSchema, coverageResearchStartInputSchema, coverageResearchStartPreviewInputSchema, coverageResolutionConfirmInputSchema, coverageResolutionPreviewInputSchema, coverageSupplementInputSchema, decodeAttachments, factReviewBatchInputSchema, coverSelectInputSchema, imageInputSchema, imageRemoveInputSchema, interviewAmendPreviewSchema, interviewAmendSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, publishProvenanceConfirmSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
+import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverageResearchCandidatesInputSchema, coverageResearchClaimInputSchema, coverageResearchExhaustInputSchema, coverageResearchRecoverInputSchema, coverageResearchStartInputSchema, coverageResearchStartPreviewInputSchema, coverageResolutionConfirmInputSchema, coverageResolutionPreviewInputSchema, coverageSupplementInputSchema, coverageUrlIngestionRecoverInputSchema, decodeAttachments, factReviewBatchInputSchema, coverSelectInputSchema, imageInputSchema, imageRemoveInputSchema, interviewAmendPreviewSchema, interviewAmendSchema, issueUpdateInputSchema, operationIdSchema, projectSchema, publishProvenanceConfirmSchema, qualityLevelSchema, qualityProfileInputSchema, reextractInputSchema, requestSchema, sourceSelectionInputSchema, templateKindSchema, type IssueUpdateInput } from "@st-workspace/domain";
 import { type AgentAdapter, type WorkspaceProjectManager, type WorkspaceRuntime, type WorkspaceWorker } from "@st-workspace/runtime";
 import { structuredError } from "./errors.js";
 import { body, compact, dashboardPathId, dashboardQuery, json, parseRequest, restError } from "./http-utils.js";
@@ -97,6 +97,10 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       }
       if (request.method === "GET" && url.pathname === "/workspace/dashboard/sources") {
         json(response, 200, await (await deps.getRuntime()).dashboardSources(dashboardQuery(url)));
+        return true;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/url-ingestions") {
+        json(response, 200, await (await deps.getRuntime()).dashboardUrlIngestions(dashboardQuery(url)));
         return true;
       }
       if (request.method === "GET" && url.pathname === "/workspace/dashboard/candidates") {
@@ -545,6 +549,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
           ...(input.resolution_id === undefined ? {} : { resolution_id: input.resolution_id }),
           ...(input.text === undefined ? {} : { text: input.text }),
           ...(input.url === undefined ? {} : { url: input.url }),
+          ...(input.url_ingestion_id === undefined ? {} : { url_ingestion_id: input.url_ingestion_id }),
           ...(input.operation_id === undefined ? {} : { operation_id: input.operation_id }),
         }, attachments));
         return true;
@@ -562,8 +567,15 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
           ...(input.text === undefined ? {} : { text: input.text }),
           ...(input.choice === undefined ? {} : { choice: input.choice }),
           ...(input.rationale === undefined ? {} : { rationale: input.rationale }),
+          ...(input.url_ingestion_id === undefined ? {} : { url_ingestion_id: input.url_ingestion_id }),
           ...(input.operation_id === undefined ? {} : { operation_id: input.operation_id }),
         }, attachments));
+        return true;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/coverage/url-ingestion/recover") {
+        const parsed = await body(request);
+        const input = parseRequest(coverageUrlIngestionRecoverInputSchema, parsed, "COVERAGE_URL_INGESTION_REQUIRED");
+        json(response, 200, await (await deps.getRuntime()).coverageUrlIngestionRecover(deps.actor, input));
         return true;
       }
       if (request.method === "POST" && url.pathname === "/workspace/knowledge/reextract") {

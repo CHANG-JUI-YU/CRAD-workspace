@@ -306,6 +306,7 @@ export const DASHBOARD_MARKUP = `<body>
       <div id="coverage-center-message" class="panel-message" aria-live="polite">尚未取得覆蓋矩陣資料。</div>
       <div id="coverage-center" class="coverage-center"></div>
       <div id="research-monitor" class="research-monitor"></div>
+      <div id="url-ingestion-monitor" class="url-ingestion-monitor" aria-live="polite"></div>
     </section>
 
     <section class="panel panel-wide" aria-labelledby="workflow-heading">

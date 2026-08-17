@@ -5,12 +5,15 @@ var COVERAGE_CELL_PAGE_SIZE = 24;
 var RESEARCH_BATCH_PAGE_SIZE = 8;
 var RESEARCH_TASK_PAGE_SIZE = 12;
 var RESEARCH_LINEAGE_PAGE_SIZE = 8;
+var URL_INGESTION_PAGE_SIZE = 20;
 var coverageViewState = {
   cellFilter: "all",
   visibleCellCount: COVERAGE_CELL_PAGE_SIZE,
   visibleBatchCount: RESEARCH_BATCH_PAGE_SIZE,
   visibleTaskCount: RESEARCH_TASK_PAGE_SIZE,
   visibleLineageCount: RESEARCH_LINEAGE_PAGE_SIZE,
+  urlIngestionCursor: null,
+  expandedUrlIngestions: {},
   expandedCells: {},
   expandedBatches: {},
   expandedLineages: {},
@@ -25,6 +28,8 @@ function resetCoverageViewState() {
   coverageViewState.visibleBatchCount = RESEARCH_BATCH_PAGE_SIZE;
   coverageViewState.visibleTaskCount = RESEARCH_TASK_PAGE_SIZE;
   coverageViewState.visibleLineageCount = RESEARCH_LINEAGE_PAGE_SIZE;
+  coverageViewState.urlIngestionCursor = null;
+  coverageViewState.expandedUrlIngestions = {};
   coverageViewState.expandedCells = {};
   coverageViewState.expandedBatches = {};
   coverageViewState.expandedLineages = {};
@@ -1996,6 +2001,296 @@ function renderResearchTasks(tasks, monitor) {
   return section;
 }
 
+function urlIngestionNeedsAttention(record) {
+  return record && (record.status === "fetch_failed" || record.status === "fetching" || record.status === "url_received");
+}
+
+function urlIngestionPageForCoverageView() {
+  var page = currentCoverageCenter && currentCoverageCenter.url_ingestions;
+  if (!page || !Array.isArray(page.items)) return { items: [], total: 0, limit: URL_INGESTION_PAGE_SIZE };
+  return page;
+}
+
+function urlIngestionLineageLabel(record) {
+  var parts = [];
+  if (record.retry_of) parts.push("前一筆 " + record.retry_of.slice(0, 12));
+  if (record.successor_of) parts.push("後繼 " + record.successor_of.slice(0, 12));
+  return parts.join(" · ");
+}
+
+function submitUrlIngestionAction(record, action, newUrl, button, feedback) {
+  if (!record || !button) return;
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  button.setAttribute("data-disabled-reason", "URL ingestion 操作執行中");
+  if (feedback) {
+    feedback.className = "panel-message loading-state";
+    feedback.textContent = action === "retry_url" ? "正在重試 URL…" : "正在以新 URL 重建 ingestion…";
+  }
+  var body = { url_ingestion_id: record.id, action: action };
+  if (action === "change_url") body.url = newUrl;
+  postJson("/workspace/coverage/url-ingestion/recover", body).then(function (result) {
+    if (feedback) {
+      feedback.className = "panel-message";
+      feedback.textContent = result && result.summary ? result.summary : "URL ingestion 已重新提交。";
+    }
+    return Promise.allSettled([loadCoverageCenterData(), refreshWorkflowViews()]);
+  }).catch(function (error) {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    if (feedback) {
+      feedback.className = "panel-message error-state";
+      feedback.setAttribute("role", "alert");
+      feedback.textContent = "URL ingestion 操作失敗：" + (error && error.message ? error.message : String(error));
+    }
+  });
+}
+
+function openUrlChangeDialog(record) {
+  var modalHandle = createAccessibleModal({
+    id: "url-ingestion-change-modal",
+    titleText: "更換 URL 並重試",
+    initialFocusSelector: 'input[type="url"]',
+  });
+  var modal = modalHandle.modal;
+  var description = document.createElement("p");
+  description.className = "muted";
+  description.textContent = "前一筆失敗紀錄會保留；新 URL 會建立明確的 successor。";
+  modal.appendChild(description);
+  var label = document.createElement("label");
+  label.textContent = "新的來源 URL：";
+  var input = document.createElement("input");
+  input.type = "url";
+  input.required = true;
+  input.setAttribute("aria-label", "新的來源 URL");
+  input.value = record && record.requested_url ? record.requested_url : "";
+  input.className = "dialog-input";
+  label.appendChild(input);
+  modal.appendChild(label);
+  var errorBox = document.createElement("div");
+  errorBox.className = "dialog-error";
+  errorBox.setAttribute("role", "alert");
+  errorBox.setAttribute("aria-live", "polite");
+  errorBox.hidden = true;
+  modal.appendChild(errorBox);
+  var actions = document.createElement("div");
+  actions.className = "dialog-actions";
+  var cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "btn-secondary";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", function () { modalHandle.close({ cancelled: true }); });
+  var submit = document.createElement("button");
+  submit.type = "button";
+  submit.className = "btn-primary";
+  submit.textContent = "更換並重試";
+  submit.addEventListener("click", function () {
+    var value = input.value.trim();
+    if (!value || !/^https?:\\\/\\\//iu.test(value)) {
+      errorBox.hidden = false;
+      errorBox.textContent = "請輸入有效的 http(s) URL。";
+      input.focus();
+      return;
+    }
+    submit.disabled = true;
+    submit.setAttribute("aria-busy", "true");
+    postJson("/workspace/coverage/url-ingestion/recover", { url_ingestion_id: record.id, action: "change_url", url: value }).then(function () {
+      modalHandle.close();
+      return Promise.allSettled([loadCoverageCenterData(), refreshWorkflowViews()]);
+    }).catch(function (error) {
+      submit.disabled = false;
+      submit.removeAttribute("aria-busy");
+      errorBox.hidden = false;
+      errorBox.textContent = "更換 URL 失敗：" + (error && error.message ? error.message : String(error));
+    });
+  });
+  actions.appendChild(cancel);
+  actions.appendChild(submit);
+  modal.appendChild(actions);
+  document.body.appendChild(modalHandle.overlay);
+  modalHandle.focusFirst();
+}
+
+function renderUrlIngestionCard(record, feedback) {
+  var card = document.createElement("details");
+  card.className = "url-ingestion-card" + (urlIngestionNeedsAttention(record) ? " needs-attention" : "");
+  card.open = urlIngestionNeedsAttention(record);
+  var summary = document.createElement("summary");
+  summary.className = "url-ingestion-summary";
+  var status = document.createElement("span");
+  status.className = "status-badge " + statusClass(record.status);
+  status.textContent = record.status;
+  summary.appendChild(status);
+  var label = document.createElement("span");
+  label.className = "url-ingestion-url";
+  label.textContent = record.requested_url || record.url;
+  summary.appendChild(label);
+  var summaryMeta = document.createElement("span");
+  summaryMeta.className = "muted";
+  summaryMeta.textContent = (record.title || "尚未取得標題") + (record.content_size !== undefined ? " · " + record.content_size + " bytes" : "");
+  summary.appendChild(summaryMeta);
+  card.appendChild(summary);
+
+  var body = document.createElement("div");
+  body.className = "url-ingestion-details";
+  var meta = document.createElement("dl");
+  meta.className = "url-ingestion-meta";
+  function addMeta(term, value) {
+    if (value === undefined || value === null || value === "") return;
+    var dt = document.createElement("dt");
+    dt.textContent = term;
+    var dd = document.createElement("dd");
+    dd.textContent = String(value);
+    meta.appendChild(dt);
+    meta.appendChild(dd);
+  }
+  addMeta("Ingestion ID", record.id);
+  addMeta("Operation ID", record.operation_id);
+  addMeta("Requested URL", record.requested_url || record.url);
+  addMeta("Canonical URL", record.canonical_url);
+  addMeta("Final URL", record.final_url);
+  addMeta("Title", record.title);
+  addMeta("Media type", record.media_type);
+  addMeta("Size", record.content_size === undefined ? undefined : record.content_size + " bytes");
+  addMeta("Source ID", record.source_id);
+  addMeta("Lineage", urlIngestionLineageLabel(record));
+  body.appendChild(meta);
+  if (record.error_code || record.error_message) {
+    var failure = document.createElement("div");
+    failure.className = "url-ingestion-failure error-state";
+    failure.setAttribute("role", "alert");
+    failure.textContent = (record.error_code || "URL_FETCH_FAILED") + "：" + (record.error_message || "URL ingestion 失敗");
+    body.appendChild(failure);
+  }
+  var transitions = Array.isArray(record.transitions) ? record.transitions : [];
+  var history = document.createElement("div");
+  history.className = "url-ingestion-history muted";
+  history.textContent = transitions.length > 0
+    ? "Lifecycle：" + transitions.map(function (item) { return item.sequence + ". " + item.status; }).join(" → ")
+    : "尚無 lifecycle history（legacy record）。";
+  body.appendChild(history);
+  if (record.context) {
+    var context = document.createElement("div");
+    context.className = "url-ingestion-context muted";
+    context.textContent = "Context：" + (record.context.requirement_id || "") + (record.task_id ? " · Task " + record.task_id : "");
+    body.appendChild(context);
+  }
+  if (Array.isArray(record.evidence_components) && record.evidence_components.length > 0) {
+    var componentsHeading = document.createElement("h4");
+    componentsHeading.textContent = "Evidence components";
+    body.appendChild(componentsHeading);
+    var components = document.createElement("ul");
+    components.className = "url-ingestion-components";
+    for (var componentIndex = 0; componentIndex < record.evidence_components.length; componentIndex += 1) {
+      var component = record.evidence_components[componentIndex];
+      var componentItem = document.createElement("li");
+      var componentLabel = component.type || "unknown";
+      var componentName = component.title || component.original_name || "";
+      var componentDetails = componentName ? " · " + componentName : "";
+      if (component.media_type) componentDetails += " · " + component.media_type;
+      if (component.content_size !== undefined) componentDetails += " · " + component.content_size + " bytes";
+      componentItem.textContent = (componentIndex + 1) + ". " + componentLabel + componentDetails;
+      components.appendChild(componentItem);
+    }
+    body.appendChild(components);
+  }
+  if (record.status === "fetch_failed") {
+    var actions = document.createElement("div");
+    actions.className = "url-ingestion-actions";
+    var retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "btn-secondary btn-compact";
+    retry.textContent = "重試原 URL";
+    retry.setAttribute("aria-label", "重試失敗的 URL：" + (record.requested_url || record.url));
+    retry.addEventListener("click", function (event) {
+      event.preventDefault();
+      submitUrlIngestionAction(record, "retry_url", null, retry, feedback);
+    });
+    actions.appendChild(retry);
+    var change = document.createElement("button");
+    change.type = "button";
+    change.className = "btn-secondary btn-compact";
+    change.textContent = "更換 URL";
+    change.setAttribute("aria-label", "更換失敗 ingestion 的 URL");
+    change.addEventListener("click", function (event) {
+      event.preventDefault();
+      openUrlChangeDialog(record);
+    });
+    actions.appendChild(change);
+    body.appendChild(actions);
+  }
+  card.appendChild(body);
+  return card;
+}
+
+function renderUrlIngestionMonitor(page) {
+  var container = byId("url-ingestion-monitor");
+  if (!container) return;
+  container.textContent = "";
+  var normalized = page && Array.isArray(page.items) ? page : { items: [], total: 0, limit: URL_INGESTION_PAGE_SIZE };
+  var items = prioritizeResearchItems(normalized.items, urlIngestionNeedsAttention);
+  var section = document.createElement("section");
+  section.className = "url-ingestion-section";
+  var heading = document.createElement("h3");
+  heading.textContent = "URL ingestion 監控";
+  section.appendChild(heading);
+  var summary = document.createElement("div");
+  summary.className = "muted url-ingestion-summary-note";
+  var failed = items.filter(function (item) { return item.status === "fetch_failed"; }).length;
+  summary.textContent = "顯示 " + items.length + " / " + (normalized.total || items.length) + " 筆；失敗 " + failed + " 筆。展開單筆可查看完整 lifecycle、metadata 與 lineage。";
+  section.appendChild(summary);
+  var feedback = document.createElement("div");
+  feedback.id = "url-ingestion-action-message";
+  feedback.className = "panel-message";
+  feedback.setAttribute("aria-live", "polite");
+  section.appendChild(feedback);
+  if (items.length === 0) {
+    var empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = normalized.total === 0 ? "目前沒有 URL ingestion 紀錄。" : "目前頁面沒有可顯示的 URL ingestion。";
+    section.appendChild(empty);
+  } else {
+    var list = document.createElement("div");
+    list.className = "url-ingestion-list";
+    for (var i = 0; i < items.length; i += 1) list.appendChild(renderUrlIngestionCard(items[i], feedback));
+    section.appendChild(list);
+  }
+  if (normalized.next_cursor) {
+    var more = document.createElement("button");
+    more.type = "button";
+    more.className = "btn-secondary coverage-more-button";
+    more.textContent = "載入更多 URL ingestion";
+    more.setAttribute("aria-label", "載入更多 URL ingestion 紀錄");
+    more.addEventListener("click", function () {
+      more.disabled = true;
+      more.setAttribute("aria-busy", "true");
+      requestJson("/workspace/dashboard/url-ingestions?limit=" + URL_INGESTION_PAGE_SIZE + "&cursor=" + encodeURIComponent(normalized.next_cursor)).then(function (nextPage) {
+        var current = urlIngestionPageForCoverageView();
+        currentCoverageCenter.url_ingestions = {
+          items: (current.items || []).concat(nextPage.items || []),
+          total: nextPage.total,
+          limit: nextPage.limit,
+          next_cursor: nextPage.next_cursor,
+        };
+        renderUrlIngestionMonitor(currentCoverageCenter.url_ingestions);
+      }).catch(function (error) {
+        more.disabled = false;
+        more.removeAttribute("aria-busy");
+        feedback.className = "panel-message error-state";
+        feedback.setAttribute("role", "alert");
+        feedback.textContent = "載入更多 URL ingestion 失敗：" + (error && error.message ? error.message : String(error));
+      });
+    });
+    section.appendChild(more);
+  } else if (items.length > 0) {
+    var allShown = document.createElement("div");
+    allShown.className = "empty-state coverage-all-shown";
+    allShown.textContent = "已顯示全部 URL ingestion 紀錄。";
+    section.appendChild(allShown);
+  }
+  container.appendChild(section);
+}
+
 function renderResearchMonitor(monitor) {
   if (typeof captureCoverageViewPosition === "function") captureCoverageViewPosition();
   var container = byId("research-monitor");
@@ -2059,6 +2354,7 @@ async function loadCoverageCenterData() {
     if (requestGeneration !== coverageRequestGeneration || (generation !== null && typeof state !== "undefined" && generation !== state.projectGeneration)) return payload;
     renderCoverageCenter(payload);
     renderResearchMonitor(payload.monitor);
+    renderUrlIngestionMonitor(payload.url_ingestions);
     restoreCoverageViewPosition();
     return payload;
   } catch (error) {
