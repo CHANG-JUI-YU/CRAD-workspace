@@ -1670,7 +1670,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
 
         var desc = document.createElement("p");
         desc.style.cssText = "font-size:0.9em;color:#555;margin-bottom:12px;";
-        desc.textContent = "此操作需要附件檔案才能繼續重播。請選取對應的檔案進行補傳：";
+        desc.textContent = "此操作需要附件檔案才能繼續重播。請選取對應的檔案進行補傳（單檔限制 5MB，最多 20 個檔案）：";
         modal.appendChild(desc);
 
         var errBox = document.createElement("div");
@@ -1696,6 +1696,55 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         submitBtn.type = "button";
         submitBtn.className = "primary";
         submitBtn.textContent = "確認上傳並繼續重播";
+
+        function readFileAsBase64(file) {
+          return new Promise(function (resolve, reject) {
+            var reader = new FileReader();
+            reader.onload = function () {
+              var result = reader.result;
+              if (typeof result === "string") {
+                var commaIdx = result.indexOf(",");
+                var b64 = commaIdx >= 0 ? result.slice(commaIdx + 1) : result;
+                resolve(b64);
+              } else {
+                reject(new Error("無法讀取檔案內容"));
+              }
+            };
+            reader.onerror = function () {
+              reject(reader.error || new Error("檔案讀取失敗"));
+            };
+            reader.readAsDataURL(file);
+          });
+        }
+
+        fileInput.addEventListener("change", function () {
+          errBox.style.display = "none";
+          var files = fileInput.files;
+          if (files && files.length > 20) {
+            errBox.textContent = "一次最多僅能上傳 20 個附件檔案。";
+            errBox.style.display = "block";
+            submitBtn.disabled = true;
+            return;
+          }
+          if (files) {
+            for (var i = 0; i < files.length; i += 1) {
+              if (files[i].size === 0) {
+                errBox.textContent = "檔案「" + files[i].name + "」為空檔案（0 位元組），請重新選取。";
+                errBox.style.display = "block";
+                submitBtn.disabled = true;
+                return;
+              }
+              if (files[i].size > 5 * 1024 * 1024) {
+                errBox.textContent = "檔案「" + files[i].name + "」超過 5MB 上限，請重新選取。";
+                errBox.style.display = "block";
+                submitBtn.disabled = true;
+                return;
+              }
+            }
+          }
+          submitBtn.disabled = false;
+        });
+
         submitBtn.addEventListener("click", async function () {
           var files = fileInput.files;
           if (!files || files.length === 0) {
@@ -1703,26 +1752,41 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
             errBox.style.display = "block";
             return;
           }
-          submitBtn.disabled = true;
-          errBox.style.display = "none";
-
-          var replacements = [];
-          for (var i = 0; i < files.length; i += 1) {
-            var file = files[i];
-            var buffer = await file.arrayBuffer();
-            var bytes = new Uint8Array(buffer);
-            var binary = "";
-            for (var b = 0; b < bytes.byteLength; b += 1) binary += String.fromCharCode(bytes[b]);
-            var b64 = window.btoa(binary);
-            replacements.push({
-              name: file.name,
-              content_base64: b64,
-              media_type: file.type || "text/plain",
-            });
+          if (files.length > 20) {
+            errBox.textContent = "一次最多僅能上傳 20 個附件檔案。";
+            errBox.style.display = "block";
+            return;
+          }
+          for (var f = 0; f < files.length; f += 1) {
+            if (files[f].size === 0) {
+              errBox.textContent = "檔案「" + files[f].name + "」為空檔案（0 位元組）。";
+              errBox.style.display = "block";
+              return;
+            }
+            if (files[f].size > 5 * 1024 * 1024) {
+              errBox.textContent = "檔案「" + files[f].name + "」超過 5MB 上限。";
+              errBox.style.display = "block";
+              return;
+            }
           }
 
-          submitBtn.textContent = "上傳中...";
+          submitBtn.disabled = true;
+          errBox.style.display = "none";
+          submitBtn.textContent = "轉碼上傳中...";
+
+          var replacements = [];
           try {
+            for (var i = 0; i < files.length; i += 1) {
+              var file = files[i];
+              var b64 = await readFileAsBase64(file);
+              replacements.push({
+                name: file.name,
+                content_base64: b64,
+                media_type: file.type || "text/plain",
+              });
+            }
+
+            submitBtn.textContent = "上傳中...";
             var res = await postJson("/workspace/operation/attachments/reupload", {
               operation_id: operation.id,
               replacements: replacements,

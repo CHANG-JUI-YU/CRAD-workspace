@@ -146,11 +146,41 @@ const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
     impact: "此請求未執行。",
     next_actions: ["在請求中加入 image_id。"],
   },
+  IMAGE_ID_INVALID: {
+    category: "image",
+    message_zh: "圖片識別碼格式不正確或含有非法字元。",
+    impact: "此請求未執行。",
+    next_actions: ["檢查圖片識別碼並避免使用特殊跳脫字符。"],
+  },
   IMAGE_NOT_FOUND: {
     category: "image",
     message_zh: "找不到指定的角色圖。",
     impact: "此請求未執行。",
     next_actions: ["重新整理後確認圖片清單。"],
+  },
+  ATTACHMENT_INVALID_BASE64: {
+    category: "attachment",
+    message_zh: "附件 base64 編碼格式不正確。",
+    impact: "此請求未執行。",
+    next_actions: ["重新選取檔案上傳。"],
+  },
+  ATTACHMENT_EMPTY: {
+    category: "attachment",
+    message_zh: "附件內容不可為空檔案（0 位元組）。",
+    impact: "此請求未執行。",
+    next_actions: ["選取包含內容的檔案。"],
+  },
+  ATTACHMENT_TOO_LARGE: {
+    category: "attachment",
+    message_zh: "附件檔案過大，超過單檔上限。",
+    impact: "此請求未執行。",
+    next_actions: ["選取小於 20MB 的檔案。"],
+  },
+  ATTACHMENT_CONTENT_REQUIRED: {
+    category: "attachment",
+    message_zh: "缺少附件內容。",
+    impact: "此請求未執行。",
+    next_actions: ["提供附件 base64 內容。"],
   },
   BLUEPRINT_PRECHECK_REQUIRED: {
     category: "blueprint",

@@ -23,16 +23,27 @@ function visibleAgents(agentAdapter: AgentAdapter): { default_agent: string; age
   return { default_agent: "director", agents: agentAdapter.list() };
 }
 
+const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/u;
+const MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024;
+const MAX_ATTACHMENT_COUNT = 20;
+
 const operationAttachmentReuploadSchema = z.object({
   operation_id: z.string().min(1),
   replacements: z.array(z.object({
-    missing_ref_id: z.string().optional(),
-    original_ref_id: z.string().optional(),
-    name: z.string().min(1),
+    missing_ref_id: z.string().min(1).optional(),
+    original_ref_id: z.string().min(1).optional(),
+    name: z.string().trim().min(1).max(255).refine((n) => !n.includes("..") && !n.includes("/") && !n.includes("\\"), {
+      message: "Invalid attachment filename",
+    }),
     content_base64: z.string().optional(),
     content: z.string().optional(),
-    media_type: z.string().optional(),
-  })).min(1),
+    media_type: z.string().max(100).optional(),
+  }).refine((r) => {
+    const raw = r.content_base64 ?? r.content;
+    return typeof raw === "string" && raw.trim().length > 0;
+  }, {
+    message: "Attachment content is required",
+  })).min(1).max(MAX_ATTACHMENT_COUNT),
 }).strict();
 
 export async function handleRestRequest(request: IncomingMessage, response: ServerResponse, url: URL, deps: WorkspaceRouteDeps): Promise<boolean> {
@@ -218,7 +229,19 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       }
       const imageMatch = request.method === "GET" ? /^\/workspace\/images\/([^/]+)$/u.exec(url.pathname) : null;
       if (imageMatch !== null) {
-        const image = await (await deps.getRuntime()).getProjectImage(imageMatch[1] ?? "");
+        const rawImageId = imageMatch[1] ?? "";
+        let imageId: string;
+        try {
+          imageId = decodeURIComponent(rawImageId);
+        } catch {
+          restError(response, new CoreError("IMAGE_ID_INVALID", `Malformed percent-encoded image identifier: ${rawImageId}`, true));
+          return true;
+        }
+        if (!imageId || imageId === "." || imageId === ".." || imageId.includes("/") || imageId.includes("\\") || imageId.includes("\0")) {
+          restError(response, new CoreError("IMAGE_ID_INVALID", `Invalid image identifier: ${rawImageId}`, true));
+          return true;
+        }
+        const image = await (await deps.getRuntime()).getProjectImage(imageId);
         if (image === undefined) {
           restError(response, new CoreError("IMAGE_NOT_FOUND", "Image not found", true));
           return true;
@@ -392,6 +415,10 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       if (request.method === "POST" && url.pathname === "/workspace/images/remove") {
         const parsed = await body(request);
         const { image_id } = parseRequest(imageRemoveInputSchema, parsed, "IMAGE_ID_REQUIRED");
+        if (!image_id || image_id === "." || image_id === ".." || image_id.includes("/") || image_id.includes("\\") || image_id.includes("\0")) {
+          restError(response, new CoreError("IMAGE_ID_INVALID", `Invalid image identifier: ${image_id}`, true));
+          return true;
+        }
         const removed = await (await deps.getRuntime()).removeProjectImage(image_id, deps.actor);
         json(response, 200, { status: removed ? "removed" : "not_found", image_id });
         return true;
@@ -399,6 +426,10 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       if (request.method === "POST" && url.pathname === "/workspace/cover/select") {
         const parsed = await body(request);
         const { image_id, placeholder } = parseRequest(coverSelectInputSchema, parsed, "COVER_SELECT_REQUIRED");
+        if (image_id !== undefined && (!image_id || image_id === "." || image_id === ".." || image_id.includes("/") || image_id.includes("\\") || image_id.includes("\0"))) {
+          restError(response, new CoreError("IMAGE_ID_INVALID", `Invalid image identifier: ${image_id}`, true));
+          return true;
+        }
         const options: { image_id?: string; placeholder?: boolean } = {};
         if (image_id !== undefined) options.image_id = image_id;
         if (placeholder !== undefined) options.placeholder = placeholder;
@@ -562,18 +593,50 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
       }
       if (request.method === "POST" && url.pathname === "/workspace/operation/attachments/reupload") {
         const parsed = await body(request);
-        const input = parseRequest(operationAttachmentReuploadSchema, parsed, "OPERATION_ID_REQUIRED");
-        const replacements = input.replacements.map((r) => {
-          const rawBase64 = r.content_base64 ?? r.content ?? "";
-          const content = Buffer.from(rawBase64, "base64");
+        let input: z.infer<typeof operationAttachmentReuploadSchema>;
+        try {
+          input = parseRequest(operationAttachmentReuploadSchema, parsed, "OPERATION_ID_REQUIRED");
+        } catch (error) {
+          if (error instanceof CoreError) {
+            restError(response, error);
+            return true;
+          }
+          throw error;
+        }
+        const replacements = [];
+        for (const r of input.replacements) {
+          const rawBase64 = (r.content_base64 ?? r.content ?? "").trim();
+          if (!rawBase64) {
+            restError(response, new CoreError("ATTACHMENT_CONTENT_REQUIRED", "附件內容為必填。", true));
+            return true;
+          }
+          if (rawBase64.length % 4 !== 0 || !BASE64_PATTERN.test(rawBase64)) {
+            restError(response, new CoreError("ATTACHMENT_INVALID_BASE64", "附件 base64 編碼格式不正確。", true));
+            return true;
+          }
+          let content: Buffer;
+          try {
+            content = Buffer.from(rawBase64, "base64");
+          } catch {
+            restError(response, new CoreError("ATTACHMENT_INVALID_BASE64", "附件 base64 解碼失敗。", true));
+            return true;
+          }
+          if (content.byteLength === 0) {
+            restError(response, new CoreError("ATTACHMENT_EMPTY", "附件內容不可為空（0 位元組）。", true));
+            return true;
+          }
+          if (content.byteLength > MAX_ATTACHMENT_SIZE) {
+            restError(response, new CoreError("ATTACHMENT_TOO_LARGE", "附件檔案過大，單檔限制為 5MB。", true));
+            return true;
+          }
           const missingRefId = r.missing_ref_id ?? r.original_ref_id;
-          return {
+          replacements.push({
             ...(missingRefId === undefined ? {} : { missing_ref_id: missingRefId }),
             name: r.name,
-            content,
+            content: new Uint8Array(content),
             ...(r.media_type === undefined ? {} : { media_type: r.media_type }),
-          };
-        });
+          });
+        }
         const runtime = await deps.getRuntime();
         json(response, 200, await runtime.reuploadOperationAttachments(input.operation_id, replacements, { actor: deps.actor, attachments: [] }));
         return true;

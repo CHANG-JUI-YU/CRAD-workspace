@@ -343,13 +343,8 @@ function openRecoveryDialog(cell, action) {
       var file = fileInput.files[0];
       var reader = new FileReader();
       reader.onload = function (e) {
-        var arrayBuffer = e.target.result;
-        var bytes = new Uint8Array(arrayBuffer);
-        var binaryStr = "";
-        for (var i = 0; i < bytes.byteLength; i++) {
-          binaryStr += String.fromCharCode(bytes[i]);
-        }
-        var base64 = window.btoa(binaryStr);
+        var dataUrl = (e.target && e.target.result) || reader.result || "";
+        var base64 = typeof dataUrl === "string" && dataUrl.indexOf(",") >= 0 ? dataUrl.slice(dataUrl.indexOf(",") + 1) : "";
         sendRecover([{ name: file.name, content: base64, media_type: file.type || "text/plain" }]);
       };
       reader.onerror = function () {
@@ -358,7 +353,7 @@ function openRecoveryDialog(cell, action) {
         errBox.textContent = "讀取附件檔案失敗。";
         errBox.style.display = "block";
       };
-      reader.readAsArrayBuffer(file);
+      reader.readAsDataURL(file);
     } else {
       sendRecover(null);
     }
@@ -519,13 +514,8 @@ function openSupplementDialog(cell, preview) {
       var file = fileInput.files[0];
       var reader = new FileReader();
       reader.onload = function (e) {
-        var arrayBuffer = e.target.result;
-        var bytes = new Uint8Array(arrayBuffer);
-        var binaryStr = "";
-        for (var i = 0; i < bytes.byteLength; i++) {
-          binaryStr += String.fromCharCode(bytes[i]);
-        }
-        var base64 = window.btoa(binaryStr);
+        var dataUrl = (e.target && e.target.result) || reader.result || "";
+        var base64 = typeof dataUrl === "string" && dataUrl.indexOf(",") >= 0 ? dataUrl.slice(dataUrl.indexOf(",") + 1) : "";
         processSubmission([{ name: file.name, content: base64, media_type: file.type || "text/plain" }]);
       };
       reader.onerror = function () {
@@ -534,7 +524,7 @@ function openSupplementDialog(cell, preview) {
         errBox.textContent = "讀取附件檔案失敗。";
         errBox.style.display = "block";
       };
-      reader.readAsArrayBuffer(file);
+      reader.readAsDataURL(file);
     } else {
       processSubmission(null);
     }

@@ -49,19 +49,55 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId, bu
         return { width: width, height: height };
       }
 
+      var cropPreviewGeneration = 0;
+      var currentCropObjectUrl = null;
+
+      function cleanupCropPreview() {
+        if (currentCropObjectUrl) {
+          try {
+            URL.revokeObjectURL(currentCropObjectUrl);
+          } catch (_e) {}
+          currentCropObjectUrl = null;
+        }
+        var container = byId("image-crop-preview");
+        if (container) {
+          container.textContent = "";
+          container.hidden = true;
+        }
+      }
+
       function renderCropPreview() {
         var container = byId("image-crop-preview");
+        if (!container) return;
         container.textContent = "";
+
+        if (currentCropObjectUrl) {
+          try {
+            URL.revokeObjectURL(currentCropObjectUrl);
+          } catch (_e) {}
+          currentCropObjectUrl = null;
+        }
+
+        var gen = ++cropPreviewGeneration;
         var fileInput = byId("image-file");
-        var file = fileInput.files && fileInput.files.length > 0 ? fileInput.files[0] : undefined;
-        var ratio = parseRatio(byId("image-ratio").value);
+        var file = fileInput && fileInput.files && fileInput.files.length > 0 ? fileInput.files[0] : undefined;
+        var ratioEl = byId("image-ratio");
+        var ratio = ratioEl ? parseRatio(ratioEl.value) : undefined;
         if (file === undefined || !file.type || file.type.indexOf("image/") !== 0) {
           container.hidden = true;
           return;
         }
         var image = new Image();
         var url = URL.createObjectURL(file);
+        currentCropObjectUrl = url;
+
         image.onload = function () {
+          if (gen !== cropPreviewGeneration) {
+            try {
+              URL.revokeObjectURL(url);
+            } catch (_e) {}
+            return;
+          }
           var naturalRatio = image.naturalWidth / image.naturalHeight;
           var canvas = document.createElement("canvas");
           var maxWidth = 480;
@@ -106,11 +142,28 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId, bu
             container.append(canvas, plainText);
           }
           container.hidden = false;
-          URL.revokeObjectURL(url);
+          try {
+            URL.revokeObjectURL(url);
+          } catch (_e) {}
+          if (currentCropObjectUrl === url) {
+            currentCropObjectUrl = null;
+          }
         };
         image.onerror = function () {
+          if (gen !== cropPreviewGeneration) {
+            try {
+              URL.revokeObjectURL(url);
+            } catch (_e) {}
+            return;
+          }
           container.textContent = "無法讀取圖片預覽。";
           container.hidden = false;
+          try {
+            URL.revokeObjectURL(url);
+          } catch (_e) {}
+          if (currentCropObjectUrl === url) {
+            currentCropObjectUrl = null;
+          }
         };
         image.src = url;
       }
@@ -157,7 +210,7 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId, bu
             row.append(badge);
           }
           var preview = document.createElement("img");
-          setProtectedImageSource(preview, "/workspace/images/" + imageId);
+          setProtectedImageSource(preview, "/workspace/images/" + encodeURIComponent(imageId));
           preview.setAttribute("alt", "角色圖預覽");
           preview.className = "image-thumb";
           var text = document.createElement("span");

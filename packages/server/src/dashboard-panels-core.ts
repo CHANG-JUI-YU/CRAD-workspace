@@ -1138,6 +1138,9 @@ function renderLatestError(label, error, prefix) {
         if (typeof currentActiveModal !== "undefined" && currentActiveModal && typeof currentActiveModal.close === "function") {
           currentActiveModal.close({ cancelled: true, suppressFocusRestore: true });
         }
+        if (typeof cleanupCropPreview === "function") {
+          cleanupCropPreview();
+        }
 
         state.status = null;
         state.interviewQuestion = null;
