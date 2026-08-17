@@ -10,17 +10,23 @@
   "scripts": {
     "build": "pnpm -r build",
     "typecheck": "pnpm -r build && pnpm -r typecheck",
-    "test": "pnpm -r build && vitest run",
-    "test:coverage": "pnpm -r build && vitest run --coverage",
+    "typecheck:only": "pnpm -r typecheck",
+    "test": "pnpm build && pnpm test:only",
+    "test:only": "vitest run",
+    "test:coverage": "pnpm build && pnpm test:coverage:only",
+    "test:coverage:only": "vitest run --coverage",
+    "audit:truncation": "tsx tools/audit-truncation-scan.ts",
     "agent:lint": "tsx tools/agent-lint.ts",
     "test:watch": "vitest",
-    "check": "pnpm typecheck && pnpm test"
+    "check": "pnpm build && pnpm typecheck:only && pnpm test:only"
   },
   "devDependencies": {
     "@types/node": "20.19.9",
     "@vitest/coverage-v8": "3.2.4",
+    "jsonc-parser": "3.3.1",
     "tsx": "4.20.3",
     "typescript": "5.8.3",
-    "vitest": "3.2.4"
+    "vitest": "3.2.4",
+    "yaml": "2.8.1"
   }
 }

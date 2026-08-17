@@ -1,216 +1,422 @@
 import { readFile, readdir, stat } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { AGENT_ALIASES, AGENT_DEFINITIONS, type AgentDefinition } from "../packages/runtime/src/agent-registry.js";
+import { TEMPLATE_BINDINGS } from "../packages/core/src/templates.js";
+import { parseJsoncFile, parseYamlFile, StructuredConfigError } from "./structured-config.js";
 
-const root = path.resolve(process.argv[2] ?? process.cwd());
-const agentsRoot = path.join(root, ".agents");
-const promptsRoot = path.join(agentsRoot, "agents");
-const personalitiesRoot = path.join(agentsRoot, "personalities");
-const skillsRoot = path.join(agentsRoot, "skills");
-const runtimeInstructionsPath = path.join(personalitiesRoot, "runtime-instructions.md");
-const registryPath = path.join(agentsRoot, "registry.yaml");
-const aliasesPath = path.join(agentsRoot, "aliases.yaml");
-const openCodeConfigPath = path.join(root, "opencode.jsonc");
-const templateSourcePath = path.join(root, "packages", "core", "src", "templates.ts");
-const agentRegistrySourcePath = path.join(root, "packages", "runtime", "src", "agent-registry.ts");
+const DEFAULT_ROOT = process.cwd();
+const FOUNDATION_PERSONALITIES = ["base-adult.yaml", "default-neutral.yaml"] as const;
+const RUNTIME_INSTRUCTIONS = "runtime-instructions.md";
 
-const failures: string[] = [];
+export interface RegistryAgent {
+  readonly id: string;
+  readonly role: string;
+  readonly prompt: string;
+  readonly personality: string;
+  readonly skills: readonly string[];
+  readonly intents: readonly string[];
+  readonly shared_executor?: string;
+  readonly read_only?: boolean;
+}
 
-async function exists(file: string): Promise<boolean> {
+export interface OpenCodeAgentConfig {
+  readonly prompt: string;
+  readonly mode: string;
+  readonly permission?: Record<string, unknown>;
+}
+
+export interface OpenCodeConfig {
+  readonly default_agent?: string;
+  readonly agent: Readonly<Record<string, OpenCodeAgentConfig>>;
+  readonly mcp: Readonly<Record<string, Record<string, unknown>>>;
+}
+
+export interface RuntimeRegistryContract {
+  readonly definitions: readonly AgentDefinition[];
+  readonly aliases: Readonly<Record<string, string>>;
+}
+
+export interface AgentLintDependencies {
+  readonly runtime?: RuntimeRegistryContract;
+  readonly templateBindings?: Readonly<Record<string, readonly unknown[]>>;
+}
+
+export interface AgentLintReport {
+  readonly root: string;
+  readonly registryAgents: number;
+  readonly prompts: number;
+  readonly personalities: number;
+  readonly skills: number;
+  readonly aliases: number;
+  readonly status: "ok";
+}
+
+export class AgentLintError extends Error {
+  constructor(readonly failures: readonly string[]) {
+    super(failures.join("\n"));
+    this.name = "AgentLintError";
+  }
+}
+
+class AgentShapeError extends Error {
+  constructor(readonly filePath: string, location: string, message: string) {
+    super(`${filePath}: invalid ${location}: ${message}`);
+    this.name = "AgentShapeError";
+  }
+}
+
+const defaultDependencies: Required<AgentLintDependencies> = {
+  runtime: { definitions: AGENT_DEFINITIONS, aliases: AGENT_ALIASES },
+  templateBindings: TEMPLATE_BINDINGS,
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function record(value: unknown, filePath: string, location: string): Record<string, unknown> {
+  if (!isRecord(value)) throw new AgentShapeError(filePath, location, "expected an object");
+  return value;
+}
+
+function stringValue(value: unknown, filePath: string, location: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) throw new AgentShapeError(filePath, location, "expected a non-empty string");
+  return value.trim();
+}
+
+function optionalString(value: unknown, filePath: string, location: string): string | undefined {
+  if (value === undefined) return undefined;
+  return stringValue(value, filePath, location);
+}
+
+function stringArray(value: unknown, filePath: string, location: string): string[] {
+  if (!Array.isArray(value)) throw new AgentShapeError(filePath, location, "expected an array");
+  return value.map((item, index) => stringValue(item, filePath, `${location}[${index}]`));
+}
+
+function optionalBoolean(value: unknown, filePath: string, location: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw new AgentShapeError(filePath, location, "expected a boolean");
+  return value;
+}
+
+function normalizedPath(value: string): string {
+  return value.replaceAll("\\", "/").replace(/^\.\//u, "");
+}
+
+export function parseRegistryDocument(value: unknown, filePath = ".agents/registry.yaml"): readonly RegistryAgent[] {
+  const root = record(value, filePath, "root");
+  if (root.schema_version !== undefined && (typeof root.schema_version !== "number" || !Number.isInteger(root.schema_version))) {
+    throw new AgentShapeError(filePath, "schema_version", "expected an integer");
+  }
+  const agents = root.agents;
+  if (!Array.isArray(agents)) throw new AgentShapeError(filePath, "agents", "expected an array");
+  return agents.map((valueAtIndex, index) => {
+    const location = `agents[${index}]`;
+    const item = record(valueAtIndex, filePath, location);
+    const readOnly = optionalBoolean(item.read_only, filePath, `${location}.read_only`);
+    return {
+      id: stringValue(item.id, filePath, `${location}.id`).toLocaleLowerCase(),
+      role: stringValue(item.role, filePath, `${location}.role`),
+      prompt: normalizedPath(stringValue(item.prompt, filePath, `${location}.prompt`)),
+      personality: stringValue(item.personality, filePath, `${location}.personality`).toLocaleLowerCase(),
+      skills: stringArray(item.skills, filePath, `${location}.skills`).map((skill) => skill.toLocaleLowerCase()),
+      intents: stringArray(item.intents, filePath, `${location}.intents`),
+      ...(item.shared_executor === undefined ? {} : { shared_executor: stringValue(item.shared_executor, filePath, `${location}.shared_executor`) }),
+      ...(readOnly === undefined ? {} : { read_only: readOnly }),
+    };
+  });
+}
+
+export function parseAliasDocument(value: unknown, filePath = ".agents/aliases.yaml"): Readonly<Record<string, string>> {
+  const root = record(value, filePath, "root");
+  const aliasesValue = record(root.aliases, filePath, "aliases");
+  const aliases: Record<string, string> = {};
+  for (const [alias, target] of Object.entries(aliasesValue)) {
+    const normalizedAlias = stringValue(alias, filePath, `aliases key`).toLocaleLowerCase();
+    aliases[normalizedAlias] = stringValue(target, filePath, `aliases.${alias}`).toLocaleLowerCase();
+  }
+  return aliases;
+}
+
+function parseOpenCodeAgent(value: unknown, filePath: string, agentId: string): OpenCodeAgentConfig {
+  const item = record(value, filePath, `agent.${agentId}`);
+  const permissionValue = item.permission;
+  const permission = permissionValue === undefined ? undefined : record(permissionValue, filePath, `agent.${agentId}.permission`);
+  return {
+    prompt: stringValue(item.prompt, filePath, `agent.${agentId}.prompt`),
+    mode: stringValue(item.mode, filePath, `agent.${agentId}.mode`),
+    ...(permission === undefined ? {} : { permission }),
+  };
+}
+
+export function parseOpenCodeDocument(value: unknown, filePath = "opencode.jsonc"): OpenCodeConfig {
+  const root = record(value, filePath, "root");
+  const agentsValue = record(root.agent, filePath, "agent");
+  const agents: Record<string, OpenCodeAgentConfig> = {};
+  for (const [agentId, agentValue] of Object.entries(agentsValue)) agents[agentId.toLocaleLowerCase()] = parseOpenCodeAgent(agentValue, filePath, agentId);
+  const mcpValue = record(root.mcp, filePath, "mcp");
+  const mcp: Record<string, Record<string, unknown>> = {};
+  for (const [name, config] of Object.entries(mcpValue)) mcp[name] = record(config, filePath, `mcp.${name}`);
+  if (root.default_agent !== undefined) stringValue(root.default_agent, filePath, "default_agent");
+  return {
+    ...(root.default_agent === undefined ? {} : { default_agent: stringValue(root.default_agent, filePath, "default_agent") }),
+    agent: agents,
+    mcp,
+  };
+}
+
+function promptMounts(prompt: string): readonly string[] {
+  return [...prompt.matchAll(/\{file:([^}]+)\}/gu)].map((match) => normalizedPath(match[1] ?? ""));
+}
+
+function promptBinding(prompt: string, label: "Personality" | "Skill"): string | undefined {
+  if (label === "Personality") return prompt.match(/^Personality:\s*\.agents\/personalities\/([^\s]+\.yaml)\s*$/imu)?.[1];
+  return prompt.match(/^Skill:\s*\.agents\/skills\/([^\s]+\/SKILL\.md)\s*$/imu)?.[1];
+}
+
+function relativeFiles(root: string, values: readonly string[]): Set<string> {
+  return new Set(values.map((value) => normalizedPath(path.relative(root, value))));
+}
+
+function setDifference(left: ReadonlySet<string>, right: ReadonlySet<string>): string[] {
+  return [...left].filter((value) => !right.has(value)).sort((a, b) => a.localeCompare(b));
+}
+
+function checkSet(failures: string[], label: string, expected: ReadonlySet<string>, actual: ReadonlySet<string>): void {
+  const missing = setDifference(expected, actual);
+  const orphaned = setDifference(actual, expected);
+  if (missing.length > 0) failures.push(`${label} missing: ${missing.join(", ")}`);
+  if (orphaned.length > 0) failures.push(`${label} orphaned/unreferenced: ${orphaned.join(", ")}`);
+}
+
+async function exists(filePath: string): Promise<boolean> {
   try {
-    await stat(file);
+    await stat(filePath);
     return true;
   } catch {
     return false;
   }
 }
 
-async function text(file: string): Promise<string> {
-  return readFile(file, "utf8");
+async function directoryEntries(directory: string): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  return entries.map((entry) => entry.name).sort((a, b) => a.localeCompare(b));
 }
 
-function lines(value: string): string[] {
-  return value.split(/\r?\n/u);
+async function directoryNames(directory: string): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort((a, b) => a.localeCompare(b));
 }
 
-function registryIds(value: string): string[] {
-  return lines(value).flatMap((line) => {
-    const match = line.match(/^\s+- id:\s*([a-z0-9-]+)\s*$/iu);
-    return match === null ? [] : [match[1]!.toLocaleLowerCase()];
-  });
-}
-
-function registryEntries(value: string): Array<{ id: string; prompt?: string; personality?: string; skills: string[]; readOnly: boolean }> {
-  return value.split(/\n(?=\s+- id:)/u).flatMap((block) => {
-    const id = block.match(/^\s+- id:\s*([a-z0-9-]+)\s*$/imu)?.[1]?.toLocaleLowerCase();
-    if (id === undefined) return [];
-    const prompt = block.match(/^\s+prompt:\s*(\S+)\s*$/imu)?.[1];
-    const personality = block.match(/^\s+personality:\s*([a-z0-9-]+)\s*$/imu)?.[1];
-    const skills = block.match(/^\s+skills:\s*\[([^\]]*)\]\s*$/imu)?.[1]?.split(",").map((item) => item.trim()).filter((item) => item.length > 0) ?? [];
-    const readOnly = /^\s+read_only:\s*true\s*$/imu.test(block);
-    return [{ id, prompt, personality, skills, readOnly }];
-  });
-}
-
-function tsDefinitionBlocks(value: string): Array<{ id: string; readOnly: boolean }> {
-  const start = value.indexOf("AGENT_DEFINITIONS");
-  const end = value.indexOf("AGENT_ALIASES", start);
-  if (start < 0 || end < 0) return [];
-  return value.slice(start, end).split(/^\s*definition\("/um).slice(1).flatMap((chunk) => {
-    const id = chunk.match(/^([a-z0-9-]+)/u)?.[1];
-    return id === undefined ? [] : [{ id, readOnly: /read_only:\s*true/u.test(chunk) }];
-  });
-}
-
-function tsAliasEntries(value: string): Array<[string, string]> {
-  const start = value.indexOf("AGENT_ALIASES");
-  const end = value.indexOf("};", start);
-  if (start < 0 || end < 0) return [];
-  const output: Array<[string, string]> = [];
-  for (const match of value.slice(start, end).matchAll(/"?([a-z0-9-]+)"?\s*:\s*"([a-z0-9-]+)"/gu)) {
-    output.push([match[1]!.toLocaleLowerCase(), match[2]!.toLocaleLowerCase()]);
+async function validatePersonalityFiles(root: string, files: readonly string[], failures: string[]): Promise<void> {
+  const availableIds = new Set(files.map((file) => path.basename(file, ".yaml")));
+  for (const file of files) {
+    const filePath = path.join(root, ".agents", "personalities", file);
+    let parsed: unknown;
+    try {
+      parsed = await parseYamlFile(filePath);
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : `${filePath}: ${String(error)}`);
+      continue;
+    }
+    const item = record(parsed, filePath, "root");
+    try {
+      if (stringValue(item.id, filePath, "id").toLocaleLowerCase() !== path.basename(file, ".yaml").toLocaleLowerCase()) failures.push(`${filePath}: id must match the filename`);
+      stringValue(item.tone, filePath, "tone");
+      stringArray(item.style, filePath, "style");
+      stringArray(item.prohibited_behaviors, filePath, "prohibited_behaviors");
+      const extensions = record(item.extensions, filePath, "extensions");
+      if (extensions.inherits !== undefined) {
+        const parent = stringValue(extensions.inherits, filePath, "extensions.inherits");
+        if (!availableIds.has(parent)) failures.push(`${filePath}: extensions.inherits points to missing personality ${parent}`);
+      }
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : `${filePath}: ${String(error)}`);
+    }
   }
-  return output;
 }
 
-function aliases(value: string): Array<[string, string]> {
-  return lines(value).flatMap((line) => {
-    const match = line.match(/^\s{2}([a-z0-9-]+):\s*([a-z0-9-]+)\s*$/iu);
-    return match === null ? [] : [[match[1]!.toLocaleLowerCase(), match[2]!.toLocaleLowerCase()]];
-  });
-}
-
-function field(value: string, name: string): string | undefined {
-  return lines(value).find((line) => line.startsWith(name + ":"))?.slice(name.length + 1).trim();
-}
-
-async function main(): Promise<void> {
-  for (const required of [registryPath, aliasesPath, promptsRoot, personalitiesRoot, skillsRoot, runtimeInstructionsPath, openCodeConfigPath, templateSourcePath, agentRegistrySourcePath]) {
-    if (!(await exists(required))) failures.push("missing " + path.relative(root, required));
+async function validatePromptFiles(root: string, promptFiles: readonly string[], failures: string[]): Promise<void> {
+  for (const file of promptFiles) {
+    const filePath = path.join(root, file);
+    const contents = await readFile(filePath, "utf8");
+    const personality = promptBinding(contents, "Personality");
+    const skill = promptBinding(contents, "Skill");
+    if (personality === undefined) failures.push(`${file}: missing Personality binding`);
+    if (skill === undefined) failures.push(`${file}: missing Skill binding`);
+    if (personality !== undefined && !(await exists(path.join(root, ".agents", "personalities", personality)))) failures.push(`${file}: personality binding does not exist: ${personality}`);
+    if (skill !== undefined && !(await exists(path.join(root, ".agents", "skills", skill)))) failures.push(`${file}: skill binding does not exist: ${skill}`);
   }
-  if (failures.length > 0) throw new Error(failures.join("\n"));
+}
 
-  const registry = await text(registryPath);
-  const aliasText = await text(aliasesPath);
-  const openCodeConfig = await text(openCodeConfigPath);
-  const templateSource = await text(templateSourcePath);
-  const runtimeInstructions = await text(runtimeInstructionsPath);
-  const registrySource = await text(agentRegistrySourcePath);
-  const directorStart = openCodeConfig.indexOf('"director": {');
-  const nextAgentStart = directorStart >= 0 ? openCodeConfig.indexOf('"source-researcher": {', directorStart) : -1;
-  const directorConfig = directorStart >= 0 && nextAgentStart > directorStart ? openCodeConfig.slice(directorStart, nextAgentStart) : "";
-  if (!directorConfig.includes("{file:./.agents/personalities/runtime-instructions.md}")) failures.push("OpenCode Director prompt is missing personality runtime instructions");
+async function validateRuntimeInstructions(root: string, failures: string[]): Promise<void> {
+  const filePath = path.join(root, ".agents", "personalities", RUNTIME_INSTRUCTIONS);
+  const contents = await readFile(filePath, "utf8");
   for (const requiredInstruction of [
     "必須實際執行的行為指令",
     "每次對使用者輸出時",
     "不得於流程性輸出或提問時暫停、重置或退回中性口吻",
     "prohibited_behaviors",
   ]) {
-    if (!runtimeInstructions.includes(requiredInstruction)) failures.push("personality runtime instructions missing rule: " + requiredInstruction);
+    if (!contents.includes(requiredInstruction)) failures.push(`${filePath}: missing runtime instruction: ${requiredInstruction}`);
   }
-  for (const source of [
-    ".agents/agents/director.md",
-    ".agents/personalities/base-adult.yaml",
-    ".agents/personalities/director.yaml",
-    ".agents/skills/director-orchestration/SKILL.md",
-  ]) {
-    if (!openCodeConfig.includes(`{file:./${source}}`)) failures.push("OpenCode Director prompt is missing file binding: " + source);
-  }
-  const ids = registryIds(registry);
-  const entries = registryEntries(registry);
-  if (ids.length !== 23) failures.push("expected 23 registry agents, found " + ids.length);
-  if (new Set(ids).size !== ids.length) failures.push("registry contains duplicate agent ids");
-  for (const entry of entries) {
-    if (entry.prompt === undefined || !(await exists(path.join(root, entry.prompt)))) failures.push("registry entry " + entry.id + " has invalid prompt");
-    if (entry.personality === undefined || !(await exists(path.join(personalitiesRoot, entry.personality + ".yaml")))) failures.push("registry entry " + entry.id + " has invalid personality");
-    for (const skill of entry.skills) {
-      if (!(await exists(path.join(skillsRoot, skill, "SKILL.md")))) failures.push("registry entry " + entry.id + " has invalid skill " + skill);
-    }
-    if (entry.prompt !== undefined && !openCodeConfig.includes(`{file:./${entry.prompt}}`)) failures.push("OpenCode agent " + entry.id + " is missing prompt mount");
-    if (!openCodeConfig.includes("{file:./.agents/personalities/base-adult.yaml}")) failures.push("OpenCode agent " + entry.id + " is missing base personality mount");
-    if (entry.personality !== undefined && !openCodeConfig.includes(`{file:./.agents/personalities/${entry.personality}.yaml}`)) failures.push("OpenCode agent " + entry.id + " is missing personality mount");
-    for (const skill of entry.skills) if (!openCodeConfig.includes(`{file:./.agents/skills/${skill}/SKILL.md}`)) failures.push("OpenCode agent " + entry.id + " is missing skill mount " + skill);
-  }
-
-  const aliasEntries = aliases(aliasText);
-  for (const [alias, target] of aliasEntries) {
-    if (!ids.includes(target)) failures.push("alias " + alias + " targets unknown agent " + target);
-  }
-
-  const tsDefinitions = tsDefinitionBlocks(registrySource);
-  const tsIds = tsDefinitions.map((item) => item.id);
-  for (const id of ids) {
-    if (!tsIds.includes(id)) failures.push("registry agent " + id + " is missing from the TypeScript agent registry");
-  }
-  for (const item of tsDefinitions) {
-    if (!ids.includes(item.id)) failures.push("TypeScript agent " + item.id + " is missing from .agents/registry.yaml");
-  }
-  const tsReadOnly = new Map(tsDefinitions.map((item) => [item.id, item.readOnly]));
-  for (const entry of entries) {
-    const tsFlag = tsReadOnly.get(entry.id);
-    if (tsFlag !== undefined && tsFlag !== entry.readOnly) failures.push("agent " + entry.id + " has inconsistent read_only between registry.yaml and the TypeScript registry");
-  }
-  const tsAliases = tsAliasEntries(registrySource);
-  const tsAliasPairs = new Set(tsAliases.map(([alias, target]) => alias + " -> " + target));
-  const yamlAliasPairs = new Set(aliasEntries.map(([alias, target]) => alias + " -> " + target));
-  for (const [alias, target] of aliasEntries) {
-    if (!tsAliasPairs.has(alias + " -> " + target)) failures.push("alias " + alias + " -> " + target + " is missing from the TypeScript alias map");
-  }
-  for (const [alias, target] of tsAliases) {
-    if (!yamlAliasPairs.has(alias + " -> " + target)) failures.push("TypeScript alias " + alias + " -> " + target + " is missing from .agents/aliases.yaml");
-  }
-
-  const promptFiles = (await readdir(promptsRoot)).filter((file) => file.endsWith(".md")).sort();
-  const personalityFiles = (await readdir(personalitiesRoot)).filter((file) => file.endsWith(".yaml")).sort();
-  const skillDirs = (await readdir(skillsRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
-  if (promptFiles.length !== 21) failures.push("expected 21 active prompts, found " + promptFiles.length);
-  if (personalityFiles.length !== 23) failures.push("expected 23 personality YAML files, found " + personalityFiles.length);
-  if (skillDirs.length !== 21) failures.push("expected 21 active skills, found " + skillDirs.length);
-  for (const skill of skillDirs) {
-    if (!templateSource.includes(`\"${skill}\": [`)) failures.push("template registry is missing skill binding: " + skill);
-  }
-
-  const activeContent: Array<{ file: string; value: string }> = [];
-  for (const file of promptFiles) activeContent.push({ file: path.join("agents", file), value: await text(path.join(promptsRoot, file)) });
-  for (const skill of skillDirs) {
-    const file = path.join(skillsRoot, skill, "SKILL.md");
-    if (!(await exists(file))) {
-      failures.push("skill " + skill + " is missing SKILL.md");
-      continue;
-    }
-    activeContent.push({ file: path.join("skills", skill, "SKILL.md"), value: await text(file) });
-  }
-
-  const banned = /\b(?:task_id|lease_id|batch_id|candidate_id|revision|capability|file_path|bytes_base64|source_research_approve|source_research_fetch_approved)\b/iu;
-  for (const item of activeContent) {
-    if (banned.test(item.value)) failures.push("active contract contains low-level token: " + item.file);
-  }
-
-  for (const file of promptFiles) {
-    const value = await text(path.join(promptsRoot, file));
-    const personality = value.match(/^Personality:\s*\.agents\/personalities\/([a-z0-9-]+)\.yaml\s*$/imu)?.[1];
-    const skill = value.match(/^Skill:\s*\.agents\/skills\/([a-z0-9-]+)\/SKILL\.md\s*$/imu)?.[1];
-    if (personality === undefined || !(await exists(path.join(personalitiesRoot, personality + ".yaml")))) failures.push("prompt " + file + " has invalid personality binding");
-    if (skill === undefined || !(await exists(path.join(skillsRoot, skill, "SKILL.md")))) failures.push("prompt " + file + " has invalid skill binding");
-  }
-
-  for (const file of personalityFiles) {
-    const value = await text(path.join(personalitiesRoot, file));
-    const id = field(value, "id");
-    if (id === undefined) failures.push("personality " + file + " has no id");
-    const parent = field(value, "inherits");
-    if (parent !== undefined && !(await exists(path.join(personalitiesRoot, parent + ".yaml")))) failures.push("personality " + file + " inherits missing " + parent + ".yaml");
-  }
-
-  const registryLines = lines(registry);
-  for (let index = 0; index < registryLines.length; index += 1) {
-    const role = registryLines[index]?.match(/^\s+role:\s*([a-z-]+)\s*$/iu)?.[1];
-    if (role !== "critic" && role !== "reviewer") continue;
-    const next = registryLines.slice(index, index + 8).join("\n");
-    if (!/read_only:\s*true/iu.test(next)) failures.push("critic/reviewer entry missing read_only near line " + (index + 1));
-  }
-
-  if (failures.length > 0) throw new Error(failures.join("\n"));
-  console.log(JSON.stringify({ root, registry_agents: ids.length, prompts: promptFiles.length, personalities: personalityFiles.length, skills: skillDirs.length, aliases: aliasEntries.length, status: "ok" }, null, 2));
 }
 
-await main();
+async function validateActiveContracts(root: string, promptFiles: readonly string[], skillIds: ReadonlySet<string>, failures: string[]): Promise<void> {
+  const banned = /\b(?:task_id|lease_id|batch_id|candidate_id|revision|capability|file_path|bytes_base64|source_research_approve|source_research_fetch_approved)\b/iu;
+  const files = [
+    ...promptFiles.map((file) => path.join(root, file)),
+    ...[...skillIds].map((skill) => path.join(root, ".agents", "skills", skill, "SKILL.md")),
+  ];
+  for (const filePath of files) {
+    const contents = await readFile(filePath, "utf8");
+    if (banned.test(contents)) failures.push(`active contract contains low-level token: ${path.relative(root, filePath)}`);
+  }
+}
+
+function validateOpenCodeMcp(config: OpenCodeConfig, failures: string[]): void {
+  const mcp = config.mcp["st-workspace"];
+  if (mcp === undefined) {
+    failures.push("opencode.jsonc: missing mcp.st-workspace");
+    return;
+  }
+  if (mcp.type !== "remote") failures.push("opencode.jsonc: mcp.st-workspace.type must be \"remote\"");
+  if (typeof mcp.url !== "string" || mcp.url.length === 0) failures.push("opencode.jsonc: mcp.st-workspace.url must be a non-empty string");
+  if (typeof mcp.enabled !== "boolean") failures.push("opencode.jsonc: mcp.st-workspace.enabled must be a boolean");
+  if (typeof mcp.oauth !== "boolean") failures.push("opencode.jsonc: mcp.st-workspace.oauth must be a boolean");
+}
+
+function compareRuntimeRegistry(
+  entries: readonly RegistryAgent[],
+  aliases: Readonly<Record<string, string>>,
+  runtime: RuntimeRegistryContract,
+  failures: string[],
+): void {
+  const registryById = new Map(entries.map((entry) => [entry.id, entry]));
+  const runtimeById = new Map(runtime.definitions.map((entry) => [entry.id.toLocaleLowerCase(), entry]));
+  checkSet(failures, "runtime agent ids", new Set(registryById.keys()), new Set(runtimeById.keys()));
+  for (const entry of entries) {
+    const runtimeEntry = runtimeById.get(entry.id);
+    if (runtimeEntry === undefined) continue;
+    if (runtimeEntry.role !== entry.role) failures.push(`agent ${entry.id}: runtime role does not match registry`);
+    if (normalizedPath(runtimeEntry.prompt) !== entry.prompt) failures.push(`agent ${entry.id}: runtime prompt does not match registry`);
+    if (runtimeEntry.personality !== entry.personality) failures.push(`agent ${entry.id}: runtime personality does not match registry`);
+    checkSet(failures, `agent ${entry.id} skills`, new Set(entry.skills), new Set(runtimeEntry.skills));
+    const registryReadOnly = entry.read_only ?? false;
+    const runtimeReadOnly = runtimeEntry.read_only ?? false;
+    if (registryReadOnly !== runtimeReadOnly) failures.push(`agent ${entry.id}: runtime read_only does not match registry`);
+  }
+  const runtimeAliases = Object.fromEntries(Object.entries(runtime.aliases).map(([alias, target]) => [alias.toLocaleLowerCase(), target.toLocaleLowerCase()]));
+  checkSet(failures, "agent aliases", new Set(Object.keys(aliases)), new Set(Object.keys(runtimeAliases)));
+  for (const [alias, target] of Object.entries(aliases)) {
+    if (target !== runtimeAliases[alias]) failures.push(`alias ${alias}: runtime target does not match registry (${target})`);
+    if (!registryById.has(target)) failures.push(`alias ${alias} targets unknown agent ${target}`);
+  }
+  for (const [alias, target] of Object.entries(runtimeAliases)) {
+    if (aliases[alias] === undefined) failures.push(`runtime alias ${alias} is missing from .agents/aliases.yaml`);
+    if (!registryById.has(target)) failures.push(`runtime alias ${alias} targets unknown agent ${target}`);
+  }
+}
+
+export async function lintAgentWorkspace(root = DEFAULT_ROOT, dependencies: AgentLintDependencies = {}): Promise<AgentLintReport> {
+  const resolvedRoot = path.resolve(root);
+  const runtime = dependencies.runtime ?? defaultDependencies.runtime;
+  const templateBindings = dependencies.templateBindings ?? defaultDependencies.templateBindings;
+  const registryPath = path.join(resolvedRoot, ".agents", "registry.yaml");
+  const aliasesPath = path.join(resolvedRoot, ".agents", "aliases.yaml");
+  const openCodeConfigPath = path.join(resolvedRoot, "opencode.jsonc");
+  const promptsRoot = path.join(resolvedRoot, ".agents", "agents");
+  const personalitiesRoot = path.join(resolvedRoot, ".agents", "personalities");
+  const skillsRoot = path.join(resolvedRoot, ".agents", "skills");
+  const failures: string[] = [];
+
+  for (const required of [registryPath, aliasesPath, openCodeConfigPath, promptsRoot, personalitiesRoot, skillsRoot, path.join(personalitiesRoot, RUNTIME_INSTRUCTIONS)]) {
+    if (!(await exists(required))) failures.push(`missing ${path.relative(resolvedRoot, required)}`);
+  }
+  if (failures.length > 0) throw new AgentLintError(failures);
+
+  let entries: readonly RegistryAgent[];
+  let aliases: Readonly<Record<string, string>>;
+  let openCodeConfig: OpenCodeConfig;
+  try {
+    entries = parseRegistryDocument(await parseYamlFile(registryPath), registryPath);
+    aliases = parseAliasDocument(await parseYamlFile(aliasesPath), aliasesPath);
+    openCodeConfig = parseOpenCodeDocument(await parseJsoncFile(openCodeConfigPath), openCodeConfigPath);
+  } catch (error) {
+    if (error instanceof StructuredConfigError || error instanceof AgentShapeError) throw new AgentLintError([error.message]);
+    throw error;
+  }
+
+  for (const entry of entries) {
+    if (!(await exists(path.join(resolvedRoot, entry.prompt)))) failures.push(`registry entry ${entry.id} has invalid prompt: ${entry.prompt}`);
+    if (!(await exists(path.join(personalitiesRoot, `${entry.personality}.yaml`)))) failures.push(`registry entry ${entry.id} has invalid personality: ${entry.personality}`);
+    for (const skill of entry.skills) if (!(await exists(path.join(skillsRoot, skill, "SKILL.md")))) failures.push(`registry entry ${entry.id} has invalid skill: ${skill}`);
+  }
+
+  const registryIds = new Set(entries.map((entry) => entry.id));
+  const promptPaths = new Set(entries.map((entry) => entry.prompt));
+  const personalityFiles = new Set([...entries.map((entry) => `${entry.personality}.yaml`), ...FOUNDATION_PERSONALITIES]);
+  const skillIds = new Set(entries.flatMap((entry) => entry.skills));
+  const actualPromptFiles = relativeFiles(resolvedRoot, (await directoryEntries(promptsRoot)).filter((file) => file.endsWith(".md")).map((file) => path.join(promptsRoot, file)));
+  const actualPersonalityFiles = new Set((await directoryEntries(personalitiesRoot)).filter((file) => file.endsWith(".yaml")));
+  const actualSkillIds = new Set(await directoryNames(skillsRoot));
+  checkSet(failures, "active prompt paths", promptPaths, actualPromptFiles);
+  checkSet(failures, "personality files", personalityFiles, actualPersonalityFiles);
+  checkSet(failures, "active skill ids", skillIds, actualSkillIds);
+  checkSet(failures, "template skill bindings", skillIds, new Set(Object.keys(templateBindings)));
+  await validatePersonalityFiles(resolvedRoot, [...actualPersonalityFiles], failures);
+  await validatePromptFiles(resolvedRoot, [...actualPromptFiles], failures);
+  await validateRuntimeInstructions(resolvedRoot, failures);
+  await validateActiveContracts(resolvedRoot, [...actualPromptFiles], skillIds, failures);
+
+  validateOpenCodeMcp(openCodeConfig, failures);
+  const configAgentIds = new Set(Object.keys(openCodeConfig.agent));
+  checkSet(failures, "OpenCode agent ids", registryIds, configAgentIds);
+  if (openCodeConfig.default_agent !== "director") failures.push("opencode.jsonc: default_agent must be director");
+  for (const entry of entries) {
+    const agentConfig = openCodeConfig.agent[entry.id];
+    if (agentConfig === undefined) continue;
+    const mounts = new Set(promptMounts(agentConfig.prompt));
+    const expectedMounts = new Set([
+      entry.prompt,
+      ".agents/personalities/runtime-instructions.md",
+      ".agents/personalities/base-adult.yaml",
+      `.agents/personalities/${entry.personality}.yaml`,
+      ...entry.skills.map((skill) => `.agents/skills/${skill}/SKILL.md`),
+    ]);
+    checkSet(failures, `OpenCode ${entry.id} prompt mounts`, expectedMounts, mounts);
+    if (entry.id === "director" && agentConfig.permission?.question !== "allow") failures.push("OpenCode Director question permission must be allow");
+  }
+
+  compareRuntimeRegistry(entries, aliases, runtime, failures);
+  if (failures.length > 0) throw new AgentLintError(failures);
+  return {
+    root: resolvedRoot,
+    registryAgents: registryIds.size,
+    prompts: promptPaths.size,
+    personalities: personalityFiles.size,
+    skills: skillIds.size,
+    aliases: Object.keys(aliases).length,
+    status: "ok",
+  };
+}
+
+export interface AgentLintIo {
+  readonly out: (message: string) => void;
+  readonly err: (message: string) => void;
+}
+
+export async function runAgentLint(root = process.argv[2] ?? DEFAULT_ROOT, io: AgentLintIo = { out: console.log, err: console.error }): Promise<number> {
+  try {
+    io.out(JSON.stringify(await lintAgentWorkspace(root), null, 2));
+    return 0;
+  } catch (error) {
+    io.err(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
+const isMain = process.argv[1] !== undefined && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+if (isMain) process.exitCode = await runAgentLint();

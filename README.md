@@ -159,11 +159,12 @@ runtime 修改。
 
 ## Agent / Skill / Personality
 
-- `.agents/agents`：21 份高階 Agent prompt；registry 的 23 個 Agent ID 由
-  `.agents/registry.yaml` 與 `.agents/aliases.yaml` 保留。
-- `.agents/personalities`：23 份 personality YAML 原樣保留；Agent prompt 只引用
-  人格，不複製人格內容。
-- `.agents/skills`：21 個高階 Skill；領域規則保留，低階操作契約封裝在 Runtime。
+- `.agents/agents`：registry 引用的高階 Agent prompt；共享 prompt 可由多個 Agent
+  entry 正式共用。
+- `.agents/personalities`：registry 引用的 personality YAML，以及正式的
+  `base-adult`／`default-neutral` 基礎人格；Agent prompt 只引用人格，不複製人格內容。
+- `.agents/skills`：registry 實際綁定的高階 Skill；領域規則保留，低階操作契約封裝在
+  Runtime。
 - `docs/migration/legacy-prompts` 與 `docs/migration/legacy-skills`：舊版參考，
   不會被新版 Runtime 載入。
 
@@ -200,7 +201,22 @@ pnpm typecheck
 pnpm test
 pnpm test:coverage
 pnpm build
+pnpm check
+pnpm agent:lint
+pnpm audit:truncation -- projects
 ```
+
+`pnpm typecheck`、`pnpm test` 與 `pnpm test:coverage` 都會先做 clean workspace
+build。`pnpm check` 會明確執行一次 `build → typecheck-only → test-only`，避免把
+typecheck 與 test 各自的 build 重複執行。
+
+### 維護工具
+
+- `pnpm agent:lint`：以 YAML／JSONC parser 解析 registry、aliases 與 `opencode.jsonc`，
+  驗證 schema、runtime registry、OpenCode mounts、shared resources 與 orphan bindings。
+- `pnpm audit:truncation -- [directory]`：掃描指定目錄（預設 `projects`）中的
+  `state.json`。缺少目錄、非目錄、空目錄、無法讀取、壞 JSON 或截斷狀態都會以非零
+  exit code 結束；只有明確使用 `--allow-empty` 才允許空目錄成功。
 
 CLI：
 
@@ -213,8 +229,11 @@ pnpm --filter @st-workspace/cli start serve
 pnpm --filter @st-workspace/cli start agents
 ```
 
-HTTP/MCP server 預設在 `http://127.0.0.1:8787`（可用 `ST_WORKSPACE_HOST` 改綁定
-host；綁定非本機 host 時必須提供 `--auth-token`，否則拒絕啟動）：
+Direct CLI/server 預設在 `http://127.0.0.1:8787`。`ST_WORKSPACE_HOST`、
+`ST_WORKSPACE_PORT`、`ST_WORKSPACE_PROJECT_ROOT` 與 `ST_WORKSPACE_PROJECT` 只影響
+direct CLI/server；Windows Dashboard launcher 固定使用 `127.0.0.1:8787`。非 loopback
+host 若沒有由 `startWorkspaceServer({ authToken })` 提供非空 token 會拒絕啟動；現有
+CLI 沒有 `--auth-token` flag，也沒有 repository token 環境變數入口。
 
 ### 頁面與狀態
 
@@ -280,17 +299,22 @@ host；綁定非本機 host 時必須提供 `--auth-token`，否則拒絕啟動�
 
 ## Dashboard 使用
 
-Windows 可直接雙擊工作區根目錄的 `ST-Workspace-Dashboard.cmd`。啟動器會先執行
-`pnpm -r build`，只有 build 成功才會在 `127.0.0.1:8787` 啟動唯一的本機 HTTP/MCP
-server，健康檢查通過後自動開啟 `http://127.0.0.1:8787/`。請保持 CMD 視窗開啟；按
-`Ctrl+C` 會停止 server。
+Windows 可直接雙擊工作區根目錄的 `ST-Workspace-Dashboard.cmd`。啟動器會先檢查
+Node.js／pnpm、執行 `pnpm -r build`，只有 build 成功才會 probe 並啟動或沿用
+`127.0.0.1:8787` 的唯一本機 HTTP/MCP server。ready 後開啟
+`http://127.0.0.1:8787/`；health 是 `/workspace/health`，MCP 是 `/mcp`。
 
-OpenCode 的 `st-workspace` MCP 會連到同一個 `http://127.0.0.1:8787/mcp`，不再
-自行建立第二個 runtime。因此使用 OpenCode 前應先啟動 Dashboard；若尚未啟動，
-OpenCode 會顯示 MCP 無法連線。若 8787 已有 ST Workspace server，啟動器會沿用；
-若被其他程式占用則顯示錯誤，不會偷偷改用另一個 port。啟動器會比對目前 dist
-JavaScript 的 content revision；缺少 revision 或 revision 不同的舊 ST Workspace
-server 會回報 `DASHBOARD_SERVICE_STALE`，需要關閉舊視窗後重新啟動。
+若已有相同 runtime revision 的 ST Workspace，launcher 會 reuse 並顯示既有 process
+擁有 server；若是 launcher 新建，才由 launcher process 擁有並在收到 SIGINT／SIGTERM
+時嘗試 shutdown。故 `Ctrl+C` 不保證停止 reuse 的既有 server。revision 缺失／不同
+回報 `DASHBOARD_SERVICE_STALE`；foreign service、認證不相容服務與 port 競爭回報
+`DASHBOARD_PORT_IN_USE`；新 server health 等不到 ready 回報
+`DASHBOARD_HEALTH_TIMEOUT`，不會偷偷改用另一個 port。
+
+OpenCode 的 `st-workspace` MCP 只連到同一個 remote
+`http://127.0.0.1:8787/mcp`，不會自行建立第二個 runtime。因此使用 OpenCode 前應
+先啟動 Dashboard 或 direct server；若尚未啟動，OpenCode 會顯示 MCP 無法連線，不會
+fallback 到 local helper。舊 OpenCode session 需重開工作區或重啟 TUI 才會取得新設定。
 未選專案時顯示首頁三入口（建立新專案／開啟既有專案／舊卡審核）。面板包括：
 
 - 訪談：逐題回答，continue／world／expansion 流程先選目標專案（含 revision 與

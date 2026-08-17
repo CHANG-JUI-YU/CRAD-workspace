@@ -1,3 +1,11 @@
+/**
+ * Legacy/diagnostic stdio bridge.
+ *
+ * The supported OpenCode integration is the remote MCP entry in opencode.jsonc
+ * and the single server owned by the Dashboard launcher or direct server
+ * process. Keep this helper only for legacy protocol diagnostics; do not use it
+ * as the primary startup path.
+ */
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { resolve } from "node:path";
