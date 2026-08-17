@@ -49,6 +49,12 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId, bu
         return { width: width, height: height };
       }
 
+      function dashboardCssColor(token) {
+        if (typeof document === "undefined" || typeof getComputedStyle !== "function") return "transparent";
+        var value = getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+        return value || (document.body ? getComputedStyle(document.body).color : "") || "transparent";
+      }
+
       var cropPreviewGeneration = 0;
       var currentCropObjectUrl = null;
 
@@ -125,10 +131,10 @@ export const DASHBOARD_PANELS_MEDIA_JS = `      function removeImage(imageId, bu
             var sy = offsetY * scale;
             var sw = cropWidth * scale;
             var sh = cropHeight * scale;
-            ctx.strokeStyle = "#1d6fb8";
+            ctx.strokeStyle = typeof dashboardCssColor === "function" ? dashboardCssColor("--color-accent") : "currentColor";
             ctx.lineWidth = 2;
             ctx.strokeRect(sx, sy, sw, sh);
-            ctx.fillStyle = "rgba(29,111,184,0.12)";
+            ctx.fillStyle = typeof dashboardCssColor === "function" ? dashboardCssColor("--color-accent-overlay") : "transparent";
             ctx.fillRect(sx, sy, sw, sh);
             canvas.setAttribute("data-crop", "1");
             var sizeText = document.createElement("div");

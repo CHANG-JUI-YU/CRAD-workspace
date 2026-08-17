@@ -1165,6 +1165,9 @@ function renderLatestError(label, error, prefix) {
         if (typeof currentCoverageCenter !== "undefined") {
           currentCoverageCenter = null;
         }
+        if (typeof resetCoverageViewState === "function") {
+          resetCoverageViewState();
+        }
         if (typeof cachedOperations !== "undefined") {
           cachedOperations = [];
         }
@@ -1181,7 +1184,7 @@ function renderLatestError(label, error, prefix) {
         var elementsToClear = [
           "precheck-matrix", "provenance-summary", "provenance-stale-diff",
           "provenance-confirm-message", "readiness-message", "coverage-center",
-          "coverage-center-message", "operation-list", "image-list",
+          "coverage-center-message", "research-monitor", "operation-list", "image-list",
           "workflow-tasks", "latest-summary", "latest-json", "latest-recovery"
         ];
         for (var i = 0; i < elementsToClear.length; i += 1) {

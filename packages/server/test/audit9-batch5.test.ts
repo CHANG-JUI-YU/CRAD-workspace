@@ -410,7 +410,7 @@ describe("Audit 9 Batch 5 Suite", () => {
 
     it("includes global :focus-visible rules with high contrast", () => {
       expect(DASHBOARD_CSS).toContain(":focus-visible");
-      expect(DASHBOARD_CSS).toContain("outline: 2px solid #005fb8");
+      expect(DASHBOARD_CSS).toContain("outline: 2px solid var(--color-focus)");
       expect(DASHBOARD_CSS).toContain("outline-offset: 2px");
     });
 

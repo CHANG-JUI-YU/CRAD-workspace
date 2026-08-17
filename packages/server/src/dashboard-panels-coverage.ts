@@ -1,13 +1,134 @@
 export const DASHBOARD_PANELS_COVERAGE_JS = `
 var currentCoverageCenter = null;
+var coverageRequestGeneration = 0;
+var COVERAGE_CELL_PAGE_SIZE = 24;
+var RESEARCH_BATCH_PAGE_SIZE = 8;
+var RESEARCH_TASK_PAGE_SIZE = 12;
+var RESEARCH_LINEAGE_PAGE_SIZE = 8;
+var coverageViewState = {
+  cellFilter: "all",
+  visibleCellCount: COVERAGE_CELL_PAGE_SIZE,
+  visibleBatchCount: RESEARCH_BATCH_PAGE_SIZE,
+  visibleTaskCount: RESEARCH_TASK_PAGE_SIZE,
+  visibleLineageCount: RESEARCH_LINEAGE_PAGE_SIZE,
+  expandedCells: {},
+  expandedBatches: {},
+  expandedLineages: {},
+  focusKey: null,
+  scrollY: null,
+};
+
+function resetCoverageViewState() {
+  coverageRequestGeneration += 1;
+  coverageViewState.cellFilter = "all";
+  coverageViewState.visibleCellCount = COVERAGE_CELL_PAGE_SIZE;
+  coverageViewState.visibleBatchCount = RESEARCH_BATCH_PAGE_SIZE;
+  coverageViewState.visibleTaskCount = RESEARCH_TASK_PAGE_SIZE;
+  coverageViewState.visibleLineageCount = RESEARCH_LINEAGE_PAGE_SIZE;
+  coverageViewState.expandedCells = {};
+  coverageViewState.expandedBatches = {};
+  coverageViewState.expandedLineages = {};
+  coverageViewState.focusKey = null;
+  coverageViewState.scrollY = null;
+}
+
+function coverageCellKey(cell) {
+  return (cell.character_id || "world") + "__" + cell.requirement_id;
+}
+
+function captureCoverageViewPosition() {
+  if (typeof document !== "undefined" && document.activeElement && document.activeElement.getAttribute) {
+    var focusKey = document.activeElement.getAttribute("data-coverage-focus-key");
+    coverageViewState.focusKey = focusKey || null;
+  }
+  if (typeof window !== "undefined" && typeof window.scrollY === "number") {
+    coverageViewState.scrollY = window.scrollY;
+  }
+}
+
+function restoreCoverageViewPosition() {
+  if (coverageViewState.focusKey && typeof document !== "undefined" && document.querySelector) {
+    var focusTarget = document.querySelector('[data-coverage-focus-key="' + coverageViewState.focusKey.replace(/"/g, '\\"') + '"]');
+    if (focusTarget && typeof focusTarget.focus === "function") focusTarget.focus({ preventScroll: true });
+  }
+  if (coverageViewState.scrollY !== null && typeof window !== "undefined" && typeof window.scrollTo === "function") {
+    window.scrollTo(0, coverageViewState.scrollY);
+  }
+}
+
+function isCoverageCellAttention(cell) {
+  if (!cell) return false;
+  if (cell.status === "missing" || cell.status === "conflict" || cell.status === "stale") return true;
+  if (cell.missing_prerequisite) return true;
+  if (cell.supplement_lifecycle && cell.supplement_lifecycle.requires_attention) return true;
+  var currentTasks = Array.isArray(cell.current_research_tasks) ? cell.current_research_tasks : [];
+  return currentTasks.some(function (task) { return task.status === "failed" || task.status === "exhausted"; });
+}
+
+function isCoverageCellActive(cell) {
+  if (!cell) return false;
+  if (cell.status === "candidate_signal") return true;
+  return Array.isArray(cell.current_research_tasks) && cell.current_research_tasks.length > 0;
+}
+
+function coverageCellMatchesFilter(cell) {
+  if (coverageViewState.cellFilter === "attention") return isCoverageCellAttention(cell);
+  if (coverageViewState.cellFilter === "active") return isCoverageCellActive(cell);
+  if (coverageViewState.cellFilter === "covered") {
+    return cell.status === "source_covered" || cell.status === "supplement" || cell.status === "creative_completion";
+  }
+  return true;
+}
+
+function prioritizeCoverageCells(cells) {
+  return cells.map(function (cell, index) {
+    return { cell: cell, index: index, priority: isCoverageCellAttention(cell) ? 0 : (isCoverageCellActive(cell) ? 1 : 2) };
+  }).sort(function (a, b) {
+    return a.priority - b.priority || a.index - b.index;
+  }).map(function (entry) { return entry.cell; });
+}
+
+function researchStatusCount(tasks, statuses) {
+  var count = 0;
+  for (var i = 0; i < tasks.length; i += 1) {
+    if (statuses.indexOf(tasks[i].projected_status || tasks[i].status) !== -1) count += 1;
+  }
+  return count;
+}
+
+function prioritizeResearchItems(items, isImportant) {
+  return items.map(function (item, index) {
+    return { item: item, index: index, priority: isImportant(item) ? 0 : 1 };
+  }).sort(function (a, b) {
+    return a.priority - b.priority || a.index - b.index;
+  }).map(function (entry) { return entry.item; });
+}
 
 function setCoverageNotice(text) {
   var el = byId("coverage-center-message") || byId("coverage-message");
-  if (el) el.textContent = text;
+  if (el) {
+    el.className = "panel-message";
+    el.removeAttribute("role");
+    el.textContent = text;
+  }
+}
+
+function setCoverageLoading(text) {
+  var el = byId("coverage-center-message") || byId("coverage-message");
+  if (el) {
+    el.className = "panel-message loading-state";
+    el.setAttribute("aria-live", "polite");
+    el.textContent = text;
+  }
 }
 
 function setCoverageError(error) {
   setAreaError(byId("coverage-center-message") ? "coverage-center-message" : "coverage-message", error);
+  var el = byId("coverage-center-message") || byId("coverage-message");
+  if (el) {
+    el.className = "panel-message error-state";
+    el.setAttribute("role", "alert");
+  }
 }
 
 function coverageCellTitle(cell) {
@@ -21,10 +142,11 @@ function coverageAssessmentRef() {
   return undefined;
 }
 
-function coverageButton(label, onClick) {
+function coverageButton(label, onClick, focusKey) {
   var button = document.createElement("button");
   button.type = "button";
   button.textContent = label;
+  if (focusKey) button.setAttribute("data-coverage-focus-key", focusKey);
   button.addEventListener("click", onClick);
   return button;
 }
@@ -50,7 +172,7 @@ function startCoverageResearch(cell, isAssessmentWide) {
     var modal = modalHandle.modal;
 
     var infoBox = document.createElement("div");
-    infoBox.style.cssText = "background:#f8f9fa;border-left:4px solid #0066cc;padding:12px 16px;margin-bottom:16px;font-size:0.9em;color:#333;line-height:1.6;";
+    infoBox.style.cssText = "background:var(--color-surface-subtle);border-left:4px solid var(--color-accent);padding:12px 16px;margin-bottom:16px;font-size:0.9em;color:var(--color-text-primary);line-height:1.6;";
     
     var line1 = document.createElement("div");
     line1.textContent = "範圍：" + (isAssessmentWide ? "全評估所有缺口項目" : coverageCellTitle(cell));
@@ -70,14 +192,14 @@ function startCoverageResearch(cell, isAssessmentWide) {
 
     if (preview.already_covered) {
       var noteDiv = document.createElement("div");
-      noteDiv.style.cssText = "margin-top:8px;color:#856404;background:#fff3cd;padding:6px 10px;border-radius:4px;";
+      noteDiv.style.cssText = "margin-top:8px;color:var(--color-warning-text);background:var(--color-warning-bg);padding:6px 10px;border-radius:4px;";
       noteDiv.textContent = "注意：所有請求目標均已有正在執行的研究任務，確認後將直接重用既有工作。";
       infoBox.appendChild(noteDiv);
     }
     modal.appendChild(infoBox);
 
     var errBox = document.createElement("div");
-    errBox.style.cssText = "color:#dc3545;font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
+    errBox.style.cssText = "color:var(--color-error-strong);font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
     modal.appendChild(errBox);
 
     var actionRow = document.createElement("div");
@@ -86,7 +208,7 @@ function startCoverageResearch(cell, isAssessmentWide) {
     var cancelBtn = document.createElement("button");
     cancelBtn.type = "button";
     cancelBtn.textContent = "取消";
-    cancelBtn.style.cssText = "padding:8px 16px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;";
+    cancelBtn.style.cssText = "padding:8px 16px;border:1px solid var(--color-control-border);background:var(--color-surface);border-radius:4px;cursor:pointer;";
     cancelBtn.addEventListener("click", function () { modalHandle.close({ cancelled: true }); });
     actionRow.appendChild(cancelBtn);
 
@@ -94,7 +216,7 @@ function startCoverageResearch(cell, isAssessmentWide) {
     submitBtn.type = "button";
     submitBtn.className = "primary";
     submitBtn.textContent = preview.already_covered ? "重用既有研究任務" : "確認啟動研究";
-    submitBtn.style.cssText = "padding:8px 16px;border:none;background:#0066cc;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;";
+    submitBtn.style.cssText = "padding:8px 16px;border:none;background:var(--color-accent);color:var(--color-on-accent);border-radius:4px;cursor:pointer;font-weight:bold;";
 
     submitBtn.addEventListener("click", function () {
       submitBtn.disabled = true;
@@ -153,7 +275,7 @@ function openRecoveryDialog(cell, action) {
   var modal = modalHandle.modal;
 
   var errBox = document.createElement("div");
-  errBox.style.cssText = "color:#dc3545;font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
+  errBox.style.cssText = "color:var(--color-error-strong);font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
   modal.appendChild(errBox);
 
   var taskGroup = document.createElement("div");
@@ -164,7 +286,7 @@ function openRecoveryDialog(cell, action) {
   taskGroup.appendChild(taskLabel);
 
   var taskSelect = document.createElement("select");
-  taskSelect.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+  taskSelect.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid var(--color-control-border);border-radius:4px;";
   exhaustedTasks.forEach(function (t) {
     var opt = document.createElement("option");
     opt.value = t.id;
@@ -193,7 +315,7 @@ function openRecoveryDialog(cell, action) {
     queryInput = document.createElement("input");
     queryInput.type = "text";
     queryInput.placeholder = "例如：角色別名, 歷史戰役, 家族背景";
-    queryInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+    queryInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid var(--color-control-border);border-radius:4px;";
     inputGroup.appendChild(qLabel);
     inputGroup.appendChild(queryInput);
   } else if (action === "revise_constraints") {
@@ -203,7 +325,7 @@ function openRecoveryDialog(cell, action) {
     constraintsInput = document.createElement("input");
     constraintsInput.type = "text";
     constraintsInput.placeholder = "例如：site:wikipedia.org, official:true";
-    constraintsInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+    constraintsInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid var(--color-control-border);border-radius:4px;";
     inputGroup.appendChild(cLabel);
     inputGroup.appendChild(constraintsInput);
   } else if (action === "manual_url") {
@@ -213,7 +335,7 @@ function openRecoveryDialog(cell, action) {
     urlInput = document.createElement("input");
     urlInput.type = "url";
     urlInput.placeholder = "https://example.com/character-source";
-    urlInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+    urlInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid var(--color-control-border);border-radius:4px;";
     inputGroup.appendChild(uLabel);
     inputGroup.appendChild(urlInput);
   } else if (action === "supplement") {
@@ -222,7 +344,7 @@ function openRecoveryDialog(cell, action) {
     tLabel.textContent = "補充資料內容（純文字）：";
     textInput = document.createElement("textarea");
     textInput.rows = 3;
-    textInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;margin-bottom:8px;";
+    textInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid var(--color-control-border);border-radius:4px;margin-bottom:8px;";
     inputGroup.appendChild(tLabel);
     inputGroup.appendChild(textInput);
 
@@ -231,7 +353,7 @@ function openRecoveryDialog(cell, action) {
     suLabel.textContent = "參考網址 (選填)：";
     urlInput = document.createElement("input");
     urlInput.type = "url";
-    urlInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;margin-bottom:8px;";
+    urlInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid var(--color-control-border);border-radius:4px;margin-bottom:8px;";
     inputGroup.appendChild(suLabel);
     inputGroup.appendChild(urlInput);
 
@@ -250,7 +372,7 @@ function openRecoveryDialog(cell, action) {
     choiceInput = document.createElement("input");
     choiceInput.type = "text";
     choiceInput.value = "授權創作補全設定";
-    choiceInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;margin-bottom:8px;";
+    choiceInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid var(--color-control-border);border-radius:4px;margin-bottom:8px;";
     inputGroup.appendChild(chLabel);
     inputGroup.appendChild(choiceInput);
 
@@ -260,7 +382,7 @@ function openRecoveryDialog(cell, action) {
     rationaleInput = document.createElement("input");
     rationaleInput.type = "text";
     rationaleInput.value = "經多輪研究仍無公開官方來源，授權依世界觀補全。";
-    rationaleInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+    rationaleInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid var(--color-control-border);border-radius:4px;";
     inputGroup.appendChild(rLabel);
     inputGroup.appendChild(rationaleInput);
   }
@@ -273,7 +395,7 @@ function openRecoveryDialog(cell, action) {
   var cancelBtn = document.createElement("button");
   cancelBtn.type = "button";
   cancelBtn.textContent = "取消";
-  cancelBtn.style.cssText = "padding:8px 16px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;";
+  cancelBtn.style.cssText = "padding:8px 16px;border:1px solid var(--color-control-border);background:var(--color-surface);border-radius:4px;cursor:pointer;";
   cancelBtn.addEventListener("click", function () { modalHandle.close({ cancelled: true }); });
   actionRow.appendChild(cancelBtn);
 
@@ -281,7 +403,7 @@ function openRecoveryDialog(cell, action) {
   submitBtn.type = "button";
   submitBtn.className = "primary";
   submitBtn.textContent = "確認執行恢復";
-  submitBtn.style.cssText = "padding:8px 16px;border:none;background:#0066cc;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;";
+  submitBtn.style.cssText = "padding:8px 16px;border:none;background:var(--color-accent);color:var(--color-on-accent);border-radius:4px;cursor:pointer;font-weight:bold;";
 
   submitBtn.addEventListener("click", function () {
     var selectedTaskId = taskSelect.value;
@@ -381,14 +503,14 @@ function openSupplementDialog(cell, preview) {
   var modal = modalHandle.modal;
 
   var previewBox = document.createElement("div");
-  previewBox.style.cssText = "background:#f8f9fa;border-left:4px solid #0066cc;padding:10px 14px;margin-bottom:16px;font-size:0.9em;color:#333;";
+  previewBox.style.cssText = "background:var(--color-surface-subtle);border-left:4px solid var(--color-accent);padding:10px 14px;margin-bottom:16px;font-size:0.9em;color:var(--color-text-primary);";
   previewBox.textContent = pendingResId
     ? "此需求已有已確認之決策授權，本次提交將直接上傳補充資料並綁定至既有決策。"
     : "操作預期影響：" + ((preview && preview.consequences) ? preview.consequences.join("；") : "確認提供補充資料後，系統將記錄決策並進行來源分片與事實提煉。");
   modal.appendChild(previewBox);
 
   var errBox = document.createElement("div");
-  errBox.style.cssText = "color:#dc3545;font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
+  errBox.style.cssText = "color:var(--color-error-strong);font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
   modal.appendChild(errBox);
 
   var textGroup = document.createElement("div");
@@ -398,7 +520,7 @@ function openSupplementDialog(cell, preview) {
   textLabel.textContent = "補充資料內容（純文字）：";
   var textInput = document.createElement("textarea");
   textInput.rows = 3;
-  textInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+  textInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid var(--color-control-border);border-radius:4px;";
   textInput.placeholder = "請輸入補充事實或說明內容...";
   textGroup.appendChild(textLabel);
   textGroup.appendChild(textInput);
@@ -411,7 +533,7 @@ function openSupplementDialog(cell, preview) {
   urlLabel.textContent = "來源網址 URL（選填）：";
   var urlInput = document.createElement("input");
   urlInput.type = "url";
-  urlInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+  urlInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid var(--color-control-border);border-radius:4px;";
   urlInput.placeholder = "https://example.com/source";
   urlGroup.appendChild(urlLabel);
   urlGroup.appendChild(urlInput);
@@ -439,7 +561,7 @@ function openSupplementDialog(cell, preview) {
     rationaleInput = document.createElement("input");
     rationaleInput.type = "text";
     rationaleInput.value = "提供補充資料證據。";
-    rationaleInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;";
+    rationaleInput.style.cssText = "width:100%;padding:8px;box-sizing:border-box;border:1px solid var(--color-control-border);border-radius:4px;";
     rationaleGroup.appendChild(rationaleLabel);
     rationaleGroup.appendChild(rationaleInput);
     modal.appendChild(rationaleGroup);
@@ -451,7 +573,7 @@ function openSupplementDialog(cell, preview) {
   var cancelBtn = document.createElement("button");
   cancelBtn.type = "button";
   cancelBtn.textContent = "取消";
-  cancelBtn.style.cssText = "padding:8px 16px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;";
+  cancelBtn.style.cssText = "padding:8px 16px;border:1px solid var(--color-control-border);background:var(--color-surface);border-radius:4px;cursor:pointer;";
   cancelBtn.addEventListener("click", function () { modalHandle.close({ cancelled: true }); });
   actionRow.appendChild(cancelBtn);
 
@@ -459,7 +581,7 @@ function openSupplementDialog(cell, preview) {
   submitBtn.type = "button";
   submitBtn.className = "primary";
   submitBtn.textContent = pendingResId ? "確認並繼續提交補充資料" : "確認並提交補充資料";
-  submitBtn.style.cssText = "padding:8px 16px;border:none;background:#0066cc;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;";
+  submitBtn.style.cssText = "padding:8px 16px;border:none;background:var(--color-accent);color:var(--color-on-accent);border-radius:4px;cursor:pointer;font-weight:bold;";
 
   submitBtn.addEventListener("click", function () {
     var textVal = textInput.value.trim();
@@ -756,6 +878,7 @@ function renderCellActionButton(cell, actionOpt) {
   if (cell.assessment_id) button.setAttribute("data-assessment-id", cell.assessment_id);
   if (cell.assessment_revision) button.setAttribute("data-assessment-revision", cell.assessment_revision);
   button.setAttribute("data-action", actionOpt.action);
+  button.setAttribute("data-coverage-focus-key", "coverage-action-" + cellId + "-" + actionOpt.action);
 
   if (!actionOpt.enabled) {
     button.disabled = true;
@@ -800,7 +923,7 @@ function renderCellActionButton(cell, actionOpt) {
         }
         if (targetEl && targetEl.scrollIntoView) {
           targetEl.scrollIntoView({ behavior: typeof reducedMotion === "function" && reducedMotion() ? "auto" : "smooth", block: "center" });
-          if (targetEl.style) targetEl.style.outline = "2px solid #0066cc";
+          if (targetEl.style) targetEl.style.outline = "2px solid var(--color-focus)";
           setTimeout(function () { if (targetEl && targetEl.style) targetEl.style.outline = ""; }, 2000);
         }
       }
@@ -841,7 +964,7 @@ function renderCellActionButton(cell, actionOpt) {
         (typeof byId === "function" ? byId(targetId) : null);
       if (el && el.scrollIntoView) {
         el.scrollIntoView({ behavior: typeof reducedMotion === "function" && reducedMotion() ? "auto" : "smooth", block: "center" });
-        if (el.style) el.style.outline = "2px solid #0066cc";
+        if (el.style) el.style.outline = "2px solid var(--color-focus)";
         setTimeout(function () { if (el && el.style) el.style.outline = ""; }, 2000);
       }
     }
@@ -858,17 +981,9 @@ function renderCellActionButton(cell, actionOpt) {
   return container;
 }
 
-function coverageCenterCellElement(cell, tasks) {
+function coverageCellDetailsElement(cell, tasks) {
   var row = document.createElement("div");
-  row.className = "coverage-cell";
-  row.id = coverageCellId(cell.character_id, cell.requirement_id);
-  row.setAttribute("data-cell-id", (cell.character_id || "world") + "__" + cell.requirement_id);
-  row.setAttribute("data-scope", cell.scope || (cell.character_id ? "character" : "world"));
-  if (cell.character_id) row.setAttribute("data-character-id", cell.character_id);
-  row.setAttribute("data-requirement-id", cell.requirement_id);
-  if (cell.assessment_id) row.setAttribute("data-assessment-id", cell.assessment_id);
-  if (cell.assessment_revision) row.setAttribute("data-assessment-revision", cell.assessment_revision);
-  row.setAttribute("data-status", cell.status);
+  row.className = "coverage-cell-details";
 
   var title = document.createElement("div");
   title.className = "coverage-cell-title";
@@ -922,7 +1037,7 @@ function coverageCenterCellElement(cell, tasks) {
 
   if (cell.history_research_tasks && cell.history_research_tasks.length > 0) {
     var historyDiv = document.createElement("div");
-    historyDiv.style.cssText = "font-size:0.85em;color:#666;background:#fafafa;border:1px dashed #ddd;padding:4px 8px;margin-top:6px;border-radius:4px;";
+    historyDiv.className = "coverage-history-detail";
     var hList = cell.history_research_tasks.map(function (ht) {
       return "任務 " + ht.id.slice(0, 8) + " (" + ht.status + ", rev " + ht.assessment_revision.slice(0, 6) + ")";
     });
@@ -933,10 +1048,10 @@ function coverageCenterCellElement(cell, tasks) {
   if (cell.supplement_lifecycle) {
     var sl = cell.supplement_lifecycle;
     var lifeDiv = document.createElement("div");
-    lifeDiv.style.cssText = "font-size:0.85em;background:#f0f7ff;border:1px solid #cce5ff;padding:6px 10px;margin-top:6px;border-radius:4px;color:#004085;";
+    lifeDiv.className = "coverage-lifecycle-detail";
 
     var stageLine = document.createElement("div");
-    stageLine.style.cssText = "font-weight:bold;margin-bottom:2px;";
+    stageLine.className = "coverage-lifecycle-stage";
     stageLine.textContent = "補件生命週期：階段 [" + sl.stage + "] · 狀態 [" + sl.stage_status + "]" + (sl.requires_attention ? " · 需要處理" : "");
     lifeDiv.appendChild(stageLine);
 
@@ -948,21 +1063,21 @@ function coverageCenterCellElement(cell, tasks) {
 
     if (sl.failure_message) {
       var failLine = document.createElement("div");
-      failLine.style.cssText = "color:#721c24;font-weight:bold;margin-top:2px;";
+      failLine.className = "coverage-lifecycle-failure";
       failLine.textContent = "失敗診斷：" + sl.failure_message + (sl.authorization_saved ? "（授權決策已保存，可直接繼續補件）" : "");
       lifeDiv.appendChild(failLine);
     }
 
     if (sl.current_attempt) {
       var curLine = document.createElement("div");
-      curLine.style.cssText = "margin-top:2px;color:#555;";
+      curLine.className = "coverage-lifecycle-attempt";
       curLine.textContent = "當前補件嘗試：" + sl.current_attempt.attempt_id.slice(0, 8) + " (" + sl.current_attempt.stage + ", " + sl.current_attempt.status + ")";
       lifeDiv.appendChild(curLine);
     }
 
     if (sl.historical_attempts && sl.historical_attempts.length > 0) {
       var histLine = document.createElement("div");
-      histLine.style.cssText = "margin-top:2px;color:#777;";
+      histLine.className = "coverage-lifecycle-history";
       var hStrs = sl.historical_attempts.map(function (ha) {
         return ha.attempt_id.slice(0, 8) + " (" + ha.stage + ", " + ha.status + ")";
       });
@@ -982,22 +1097,22 @@ function coverageCenterCellElement(cell, tasks) {
   } else {
     (cell.actions || []).forEach(function (action) {
       if (action === "research") {
-        actions.appendChild(coverageButton("來源研究", function () { startCoverageResearch(cell, false); }));
+        actions.appendChild(coverageButton("來源研究", function () { startCoverageResearch(cell, false); }, "coverage-action-" + coverageCellKey(cell) + "-research"));
       }
       if (action === "revise_query") {
-        actions.appendChild(coverageButton("修改查詢", function () { openRecoveryDialog(cell, "revise_query"); }));
+        actions.appendChild(coverageButton("修改查詢", function () { openRecoveryDialog(cell, "revise_query"); }, "coverage-action-" + coverageCellKey(cell) + "-revise_query"));
       }
       if (action === "revise_constraints") {
-        actions.appendChild(coverageButton("修改來源限制", function () { openRecoveryDialog(cell, "revise_constraints"); }));
+        actions.appendChild(coverageButton("修改來源限制", function () { openRecoveryDialog(cell, "revise_constraints"); }, "coverage-action-" + coverageCellKey(cell) + "-revise_constraints"));
       }
       if (action === "manual_url") {
-        actions.appendChild(coverageButton("手動提供 URL", function () { openRecoveryDialog(cell, "manual_url"); }));
+        actions.appendChild(coverageButton("手動提供 URL", function () { openRecoveryDialog(cell, "manual_url"); }, "coverage-action-" + coverageCellKey(cell) + "-manual_url"));
       }
       if (action === "supplement") {
-        actions.appendChild(coverageButton("提供補充資料", function () { previewCoverageResolution(cell, "user_supplement"); }));
+        actions.appendChild(coverageButton("提供補充資料", function () { previewCoverageResolution(cell, "user_supplement"); }, "coverage-action-" + coverageCellKey(cell) + "-supplement"));
       }
       if (action === "creative_completion") {
-        actions.appendChild(coverageButton("授權創作補全", function () { previewCoverageResolution(cell, "creative_completion"); }));
+        actions.appendChild(coverageButton("授權創作補全", function () { previewCoverageResolution(cell, "creative_completion"); }, "coverage-action-" + coverageCellKey(cell) + "-creative_completion"));
       }
     });
   }
@@ -1005,7 +1120,104 @@ function coverageCenterCellElement(cell, tasks) {
   return row;
 }
 
+function coverageCellDisclosureLabel(cell, expanded) {
+  return (expanded ? "收合" : "查看") + "覆蓋詳細內容：" + coverageCellTitle(cell);
+}
+
+function toggleCoverageCellDetails(cell, details, button, tasks, expanded) {
+  var key = coverageCellKey(cell);
+  var isOpen = expanded === undefined ? !coverageViewState.expandedCells[key] : expanded;
+  coverageViewState.expandedCells[key] = isOpen;
+  button.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  button.setAttribute("aria-label", coverageCellDisclosureLabel(cell, isOpen));
+  button.textContent = isOpen ? "收合詳細內容" : "查看詳細內容";
+  details.hidden = !isOpen;
+  details.setAttribute("aria-hidden", isOpen ? "false" : "true");
+  if (isOpen) {
+    details.textContent = "";
+    details.appendChild(coverageCellDetailsElement(cell, tasks));
+  } else {
+    details.textContent = "";
+  }
+}
+
+function coverageCenterCellElement(cell, tasks) {
+  var row = document.createElement("div");
+  var cellKey = coverageCellKey(cell);
+  row.className = "coverage-cell";
+  row.id = coverageCellId(cell.character_id, cell.requirement_id);
+  row.setAttribute("data-cell-id", cellKey);
+  row.setAttribute("data-scroll-anchor", cellKey);
+  row.setAttribute("data-scope", cell.scope || (cell.character_id ? "character" : "world"));
+  if (cell.character_id) row.setAttribute("data-character-id", cell.character_id);
+  row.setAttribute("data-requirement-id", cell.requirement_id);
+  if (cell.assessment_id) row.setAttribute("data-assessment-id", cell.assessment_id);
+  if (cell.assessment_revision) row.setAttribute("data-assessment-revision", cell.assessment_revision);
+  row.setAttribute("data-status", cell.status);
+
+  var title = document.createElement("div");
+  title.className = "coverage-cell-title";
+  var badge = document.createElement("span");
+  badge.className = "status-badge " + statusClass(cell.status);
+  badge.textContent = cell.status;
+  title.appendChild(badge);
+  var label = document.createElement("span");
+  label.textContent = coverageCellTitle(cell);
+  title.appendChild(label);
+  row.appendChild(title);
+
+  var meta = document.createElement("div");
+  meta.className = "muted coverage-cell-summary";
+  var metaParts = [];
+  if (cell.requirement_label) metaParts.push(cell.requirement_label);
+  if (cell.dimension_path) metaParts.push("維度 " + cell.dimension_path);
+  if (cell.scope) metaParts.push(cell.scope === "world" ? "世界範圍" : "角色範圍");
+  if (cell.reason) metaParts.push(cell.reason);
+  if (cell.missing_prerequisite) metaParts.push("前置需求：" + cell.missing_prerequisite);
+  if (cell.supplement_lifecycle && cell.supplement_lifecycle.requires_attention) metaParts.push("補件需要處理");
+  meta.textContent = metaParts.join(" · ");
+  row.appendChild(meta);
+
+  var counts = document.createElement("div");
+  counts.className = "coverage-cell-counts muted";
+  var countParts = [];
+  if (cell.accepted_fact_ids && cell.accepted_fact_ids.length > 0) countParts.push("採用事實 " + cell.accepted_fact_ids.length);
+  if (cell.candidate_fact_ids && cell.candidate_fact_ids.length > 0) countParts.push("候選事實 " + cell.candidate_fact_ids.length);
+  if (cell.evidence_source_ids && cell.evidence_source_ids.length > 0) countParts.push("證據來源 " + cell.evidence_source_ids.length);
+  if (cell.research_task_ids && cell.research_task_ids.length > 0) countParts.push("研究任務 " + cell.research_task_ids.length);
+  if (cell.history_research_tasks && cell.history_research_tasks.length > 0) countParts.push("歷史任務 " + cell.history_research_tasks.length);
+  counts.textContent = countParts.length > 0 ? countParts.join(" · ") : "目前沒有詳細紀錄";
+  row.appendChild(counts);
+
+  var detailsId = "coverage-details-" + cellKey.replace(/[^a-zA-Z0-9_-]/g, "-");
+  var button = document.createElement("button");
+  button.type = "button";
+  button.className = "disclosure-toggle btn-secondary btn-compact";
+  button.setAttribute("data-coverage-focus-key", "coverage-toggle-" + cellKey);
+  button.setAttribute("aria-controls", detailsId);
+  button.addEventListener("click", function () {
+    toggleCoverageCellDetails(cell, details, button, tasks);
+  });
+  row.appendChild(button);
+
+  var details = document.createElement("div");
+  details.id = detailsId;
+  details.className = "coverage-cell-disclosure";
+  details.hidden = true;
+  details.setAttribute("aria-hidden", "true");
+  row.appendChild(details);
+  toggleCoverageCellDetails(cell, details, button, tasks, coverageViewState.expandedCells[cellKey] === true);
+  return row;
+}
+
 function renderCoverageCenter(payload) {
+  if (typeof captureCoverageViewPosition === "function") captureCoverageViewPosition();
+  var viewState = typeof coverageViewState !== "undefined" ? coverageViewState : {
+    cellFilter: "all",
+    visibleCellCount: 24,
+    expandedCells: {},
+  };
+  var cellPageSize = typeof COVERAGE_CELL_PAGE_SIZE === "number" ? COVERAGE_CELL_PAGE_SIZE : 24;
   currentCoverageCenter = payload;
   var container = byId("coverage-center");
   container.textContent = "";
@@ -1049,14 +1261,14 @@ function renderCoverageCenter(payload) {
   container.appendChild(heading);
 
   var topBar = document.createElement("div");
-  topBar.style.cssText = "margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;";
+  topBar.className = "coverage-toolbar";
   var wideResearch = matrix.assessment_wide_research;
   var allResearchBtn = coverageButton("", function () {
     startCoverageResearch(null, true);
-  });
+  }, "coverage-wide-research");
   if (wideResearch !== null && wideResearch !== undefined && wideResearch.enabled) {
     allResearchBtn.textContent = "啟動全量缺口研究 (" + wideResearch.target_count + " 個缺口)";
-    allResearchBtn.style.cssText = "padding:6px 14px;background:#0066cc;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:bold;";
+    allResearchBtn.style.cssText = "padding:6px 14px;background:var(--color-accent);color:var(--color-on-accent);border:none;border-radius:4px;cursor:pointer;font-weight:bold;";
     allResearchBtn.disabled = false;
     allResearchBtn.removeAttribute("data-domain-disabled");
     allResearchBtn.removeAttribute("aria-disabled");
@@ -1069,7 +1281,7 @@ function renderCoverageCenter(payload) {
     allResearchBtn.title = wideReasonText;
     allResearchBtn.setAttribute("data-disabled-reason", wideReasonText);
     allResearchBtn.setAttribute("aria-describedby", "wide-research-desc");
-    allResearchBtn.style.cssText = "padding:6px 14px;background:#b0b8c0;color:#fff;border:none;border-radius:4px;font-weight:bold;";
+    allResearchBtn.style.cssText = "padding:6px 14px;background:var(--color-disabled-bg);color:var(--color-on-accent);border:none;border-radius:4px;font-weight:bold;";
   }
   topBar.appendChild(allResearchBtn);
   if (wideResearch !== null && wideResearch !== undefined && !wideResearch.enabled && wideResearch.disabled_reason) {
@@ -1079,14 +1291,77 @@ function renderCoverageCenter(payload) {
     wideReason.textContent = wideResearch.disabled_reason;
     topBar.appendChild(wideReason);
   }
+
+  var filterLabel = document.createElement("label");
+  filterLabel.className = "coverage-filter-label";
+  filterLabel.textContent = "覆蓋篩選";
+  var filterSelect = document.createElement("select");
+  filterSelect.id = "coverage-cell-filter";
+  filterSelect.className = "coverage-filter-select";
+  filterSelect.setAttribute("aria-label", "篩選 Coverage cell");
+  filterSelect.setAttribute("data-coverage-focus-key", "coverage-filter");
+  var filterOptions = [
+    { value: "all", label: "全部" },
+    { value: "attention", label: "需要處理" },
+    { value: "active", label: "進行中" },
+    { value: "covered", label: "已覆蓋" },
+  ];
+  for (var f = 0; f < filterOptions.length; f += 1) {
+    var filterOption = document.createElement("option");
+    filterOption.value = filterOptions[f].value;
+    filterOption.textContent = filterOptions[f].label;
+    filterSelect.appendChild(filterOption);
+  }
+  filterSelect.value = viewState.cellFilter;
+  filterSelect.addEventListener("change", function () {
+    if (typeof coverageViewState !== "undefined") {
+      coverageViewState.cellFilter = filterSelect.value;
+      coverageViewState.visibleCellCount = cellPageSize;
+    }
+    renderCoverageCenter(currentCoverageCenter);
+  });
+  filterLabel.appendChild(filterSelect);
+  topBar.appendChild(filterLabel);
   container.appendChild(topBar);
 
   var grid = document.createElement("div");
   grid.className = "coverage-grid";
   var tasks = payload.monitor !== undefined && payload.monitor.tasks !== undefined ? payload.monitor.tasks : [];
-  var cells = matrix.cells || [];
-  for (var i = 0; i < cells.length; i++) {
-    grid.appendChild(coverageCenterCellElement(cells[i], tasks));
+  var allCells = Array.isArray(matrix.cells) ? matrix.cells : [];
+  var filteredCells = allCells.filter(function (cell) { return typeof coverageCellMatchesFilter !== "function" || coverageCellMatchesFilter(cell); });
+  var cells = typeof prioritizeCoverageCells === "function" ? prioritizeCoverageCells(filteredCells) : filteredCells;
+  var visibleCells = cells.slice(0, viewState.visibleCellCount);
+  var countMessage = document.createElement("div");
+  countMessage.className = "coverage-count-message muted";
+  countMessage.setAttribute("aria-live", "polite");
+  countMessage.textContent = "目前顯示 " + visibleCells.length + " / " + cells.length + " 個覆蓋項目（資料總數 " + allCells.length + "）";
+  grid.appendChild(countMessage);
+
+  for (var i = 0; i < visibleCells.length; i++) {
+    grid.appendChild(coverageCenterCellElement(visibleCells[i], tasks));
+  }
+  if (cells.length === 0) {
+    var empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = allCells.length === 0 ? "目前沒有覆蓋項目。" : "目前篩選沒有符合的覆蓋項目。";
+    grid.appendChild(empty);
+  } else if (visibleCells.length < cells.length) {
+    var more = document.createElement("button");
+    more.type = "button";
+    more.className = "btn-secondary coverage-more-button";
+    more.textContent = "載入更多覆蓋項目";
+    more.setAttribute("aria-label", "載入更多覆蓋項目（目前顯示 " + visibleCells.length + " / " + cells.length + "）");
+    more.setAttribute("data-coverage-focus-key", "coverage-more");
+    more.addEventListener("click", function () {
+      if (typeof coverageViewState !== "undefined") coverageViewState.visibleCellCount += cellPageSize;
+      renderCoverageCenter(currentCoverageCenter);
+    });
+    grid.appendChild(more);
+  } else {
+    var allShown = document.createElement("div");
+    allShown.className = "empty-state coverage-all-shown";
+    allShown.textContent = "已顯示全部符合篩選的覆蓋項目。";
+    grid.appendChild(allShown);
   }
   container.appendChild(grid);
 }
@@ -1296,15 +1571,9 @@ function researchTaskElement(task) {
   return row;
 }
 
-function renderResearchLineages(lineages, tasks) {
-  var section = document.createElement("div");
-  section.className = "research-lineages-section";
-
-  var heading = document.createElement("h4");
-  heading.className = "lineages-title";
-  heading.textContent = "需求研究血統圖（Research Lineage Chains）";
-  section.appendChild(heading);
-
+function researchLineageDetailsElement(lin, tasks) {
+  var card = document.createElement("div");
+  card.className = "lineage-card lineage-card-details";
   var taskMap = {};
   if (Array.isArray(tasks)) {
     for (var t = 0; t < tasks.length; t += 1) {
@@ -1312,43 +1581,28 @@ function renderResearchLineages(lineages, tasks) {
     }
   }
 
-  if (!Array.isArray(lineages) || lineages.length === 0) {
-    var empty = document.createElement("div");
-    empty.className = "muted";
-    empty.textContent = "目前無研究血統鏈結。";
-    section.appendChild(empty);
-    return section;
-  }
+  var chains = Array.isArray(lin.chains) ? lin.chains : [];
+  var head = document.createElement("div");
+  head.className = "lineage-card-header";
 
-  for (var i = 0; i < lineages.length; i += 1) {
-    var lin = lineages[i];
-    var card = document.createElement("div");
-    card.className = "lineage-card";
+  var scopeTag = document.createElement("span");
+  scopeTag.className = "scope-tag " + (lin.scope === "character" ? "scope-character" : "scope-world");
+  scopeTag.textContent = lin.scope === "character" ? ("角色：" + (lin.character_id || "")) : "世界";
+  head.appendChild(scopeTag);
 
-    var head = document.createElement("div");
-    head.className = "lineage-card-header";
+  var reqTitle = document.createElement("strong");
+  reqTitle.textContent = " " + lin.requirement_label + " (" + lin.requirement_id + ")";
+  head.appendChild(reqTitle);
 
-    var scopeTag = document.createElement("span");
-    scopeTag.className = "scope-tag " + (lin.scope === "character" ? "scope-character" : "scope-world");
-    scopeTag.textContent = lin.scope === "character" ? ("角色：" + (lin.character_id || "")) : "世界";
-    head.appendChild(scopeTag);
+  var batchSpan = document.createElement("span");
+  batchSpan.className = "muted lineage-batch-info";
+  batchSpan.textContent = " · 批次 " + lin.batch_id;
+  head.appendChild(batchSpan);
+  card.appendChild(head);
 
-    var reqTitle = document.createElement("strong");
-    reqTitle.textContent = " " + lin.requirement_label + " (" + lin.requirement_id + ")";
-    head.appendChild(reqTitle);
-
-    var batchSpan = document.createElement("span");
-    batchSpan.className = "muted lineage-batch-info";
-    batchSpan.textContent = " · 批次 " + lin.batch_id;
-    head.appendChild(batchSpan);
-
-    card.appendChild(head);
-
-    var chainsFlow = document.createElement("div");
-    chainsFlow.className = "lineage-chains-flow";
-
-    var chains = Array.isArray(lin.chains) ? lin.chains : [];
-    for (var c = 0; c < chains.length; c += 1) {
+  var chainsFlow = document.createElement("div");
+  chainsFlow.className = "lineage-chains-flow";
+  for (var c = 0; c < chains.length; c += 1) {
       var chain = chains[c];
       var chainRow = document.createElement("div");
       chainRow.className = "lineage-chain-row";
@@ -1434,26 +1688,213 @@ function renderResearchLineages(lineages, tasks) {
 
         chainRow.appendChild(nodeCard);
       }
-      chainsFlow.appendChild(chainRow);
-    }
-    card.appendChild(chainsFlow);
-    section.appendChild(card);
+    chainsFlow.appendChild(chainRow);
   }
+  card.appendChild(chainsFlow);
+  return card;
+}
+
+function researchLineageKey(lineage) {
+  return (lineage.batch_id || "batch") + "__" + (lineage.character_id || "world") + "__" + lineage.requirement_id;
+}
+
+function researchLineageNeedsAttention(lineage) {
+  var chains = Array.isArray(lineage && lineage.chains) ? lineage.chains : [];
+  for (var i = 0; i < chains.length; i += 1) {
+    var nodes = Array.isArray(chains[i].nodes) ? chains[i].nodes : [];
+    for (var j = 0; j < nodes.length; j += 1) {
+      var status = nodes[j].projected_status || nodes[j].status;
+      if (nodes[j].is_in_flight || status === "failed" || status === "exhausted" || status === "stale" || status === "lease_expired") return true;
+    }
+  }
+  return false;
+}
+
+function researchBatchNeedsAttention(batch) {
+  if (!batch) return false;
+  if (batch.status === "failed" || batch.status === "exhausted" || batch.status === "stale") return true;
+  var summary = batch.task_status_summary || {};
+  return Number(summary.failed || 0) > 0 || Number(summary.exhausted || 0) > 0 || Number(summary.lease_expired || 0) > 0;
+}
+
+function researchTaskNeedsAttention(task) {
+  if (!task) return false;
+  var status = task.projected_status || task.status;
+  return task.is_in_flight || status === "failed" || status === "exhausted" || status === "stale" || status === "lease_expired";
+}
+
+function researchDisclosureButton(label, controlsId, focusKey) {
+  var button = document.createElement("button");
+  button.type = "button";
+  button.className = "disclosure-toggle btn-secondary btn-compact";
+  button.setAttribute("aria-controls", controlsId);
+  button.setAttribute("data-coverage-focus-key", focusKey);
+  button.textContent = label;
+  return button;
+}
+
+function toggleResearchLineage(lineage, details, button, tasks, expanded) {
+  var key = researchLineageKey(lineage);
+  var isOpen = expanded === undefined ? !coverageViewState.expandedLineages[key] : expanded;
+  coverageViewState.expandedLineages[key] = isOpen;
+  button.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  button.setAttribute("aria-label", (isOpen ? "收合" : "查看") + "研究血統詳細內容：" + lineage.requirement_label);
+  button.textContent = isOpen ? "收合血統" : "查看血統";
+  details.hidden = !isOpen;
+  details.setAttribute("aria-hidden", isOpen ? "false" : "true");
+  if (isOpen) {
+    details.textContent = "";
+    details.appendChild(researchLineageDetailsElement(lineage, tasks));
+  } else {
+    details.textContent = "";
+  }
+}
+
+function renderResearchLineages(lineages, tasks) {
+  var section = document.createElement("section");
+  section.className = "research-lineages-section";
+  var heading = document.createElement("h4");
+  heading.className = "lineages-title";
+  heading.textContent = "需求研究血統圖（Research Lineage Chains）";
+  section.appendChild(heading);
+
+  var allLineages = Array.isArray(lineages) ? lineages : [];
+  var prioritized = prioritizeResearchItems(allLineages, researchLineageNeedsAttention);
+  var visible = prioritized.slice(0, coverageViewState.visibleLineageCount);
+  var list = document.createElement("div");
+  list.className = "research-lineage-list";
+  var count = document.createElement("div");
+  count.className = "muted research-count-message";
+  count.setAttribute("aria-live", "polite");
+  count.textContent = "目前顯示 " + visible.length + " / " + allLineages.length + " 條血統鏈";
+  list.appendChild(count);
+
+  for (var i = 0; i < visible.length; i += 1) {
+    var lineage = visible[i];
+    var key = researchLineageKey(lineage);
+    var card = document.createElement("div");
+    card.className = "lineage-card lineage-card-summary";
+    card.setAttribute("data-lineage-key", key);
+    var head = document.createElement("div");
+    head.className = "lineage-card-header";
+    var scopeTag = document.createElement("span");
+    scopeTag.className = "scope-tag " + (lineage.scope === "character" ? "scope-character" : "scope-world");
+    scopeTag.textContent = lineage.scope === "character" ? ("角色：" + (lineage.character_id || "")) : "世界";
+    head.appendChild(scopeTag);
+    var title = document.createElement("strong");
+    title.textContent = lineage.requirement_label + " (" + lineage.requirement_id + ")";
+    head.appendChild(title);
+    var chainCount = 0;
+    var nodeCount = 0;
+    var chains = Array.isArray(lineage.chains) ? lineage.chains : [];
+    for (var c = 0; c < chains.length; c += 1) {
+      chainCount += 1;
+      nodeCount += Array.isArray(chains[c].nodes) ? chains[c].nodes.length : 0;
+    }
+    var summary = document.createElement("span");
+    summary.className = "muted lineage-summary-count";
+    summary.textContent = "批次 " + lineage.batch_id + " · " + chainCount + " 條鏈 · " + nodeCount + " 個節點" + (researchLineageNeedsAttention(lineage) ? " · 需要處理" : "");
+    head.appendChild(summary);
+    card.appendChild(head);
+
+    var detailsId = "lineage-details-" + key.replace(/[^a-zA-Z0-9_-]/g, "-");
+    var button = researchDisclosureButton("查看血統", detailsId, "research-lineage-toggle-" + key);
+    var details = document.createElement("div");
+    details.id = detailsId;
+    details.className = "research-lineage-disclosure";
+    details.hidden = true;
+    details.setAttribute("aria-hidden", "true");
+    card.appendChild(button);
+    card.appendChild(details);
+    button.addEventListener("click", (function (lineageRef, detailsRef, buttonRef) {
+      return function () { toggleResearchLineage(lineageRef, detailsRef, buttonRef, tasks); };
+    })(lineage, details, button));
+    if (coverageViewState.expandedLineages[key] === true) {
+      toggleResearchLineage(lineage, details, button, tasks, true);
+    }
+    list.appendChild(card);
+  }
+
+  if (allLineages.length === 0) {
+    var empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "目前無研究血統鏈結。";
+    list.appendChild(empty);
+  } else if (visible.length < allLineages.length) {
+    var more = document.createElement("button");
+    more.type = "button";
+    more.className = "btn-secondary research-more-button";
+    more.textContent = "載入更多血統鏈";
+    more.setAttribute("aria-label", "載入更多研究血統鏈（目前顯示 " + visible.length + " / " + allLineages.length + "）");
+    more.setAttribute("data-coverage-focus-key", "research-lineage-more");
+    more.addEventListener("click", function () {
+      coverageViewState.visibleLineageCount += RESEARCH_LINEAGE_PAGE_SIZE;
+      renderResearchMonitor(monitorForCoverageView());
+    });
+    list.appendChild(more);
+  } else {
+    var done = document.createElement("div");
+    done.className = "empty-state research-all-shown";
+    done.textContent = "已顯示全部研究血統鏈。";
+    list.appendChild(done);
+  }
+  section.appendChild(list);
   return section;
 }
 
-function renderResearchMonitor(monitor) {
-  var container = byId("research-monitor");
-  container.textContent = "";
-  if (monitor === null || monitor === undefined) return;
-  var batches = monitor.batches || [];
-  var tasks = monitor.tasks || [];
-  var lineages = monitor.lineages || [];
+function monitorForCoverageView() {
+  return currentCoverageCenter && currentCoverageCenter.monitor ? currentCoverageCenter.monitor : { batches: [], tasks: [], lineages: [] };
+}
 
-  for (var i = 0; i < batches.length; i++) {
-    var batch = batches[i];
+function toggleResearchBatch(batch, details, button, tasks, expanded) {
+  var key = batch.id;
+  var isOpen = expanded === undefined ? !coverageViewState.expandedBatches[key] : expanded;
+  coverageViewState.expandedBatches[key] = isOpen;
+  button.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  button.setAttribute("aria-label", (isOpen ? "收合" : "查看") + "研究批次詳細內容：" + batch.id);
+  button.textContent = isOpen ? "收合批次" : "查看批次";
+  details.hidden = !isOpen;
+  details.setAttribute("aria-hidden", isOpen ? "false" : "true");
+  if (isOpen) {
+    details.textContent = "";
+    var detail = document.createElement("div");
+    detail.className = "research-batch-details";
+    var detailText = document.createElement("div");
+    detailText.className = "muted";
+    detailText.textContent = "建立者 " + batch.created_by + " · 時間 " + batch.created_at + " · 任務總數 " + (batch.task_ids || []).length;
+    detail.appendChild(detailText);
+    var ids = document.createElement("div");
+    ids.className = "research-batch-task-ids muted";
+    ids.textContent = batch.task_ids && batch.task_ids.length > 0 ? "任務：" + batch.task_ids.map(function (id) { return id.slice(0, 12); }).join(", ") : "此批次目前沒有任務。";
+    detail.appendChild(ids);
+    details.appendChild(detail);
+  } else {
+    details.textContent = "";
+  }
+}
+
+function renderResearchBatches(batches, tasks) {
+  var section = document.createElement("section");
+  section.className = "research-batches-section";
+  var heading = document.createElement("h4");
+  heading.className = "lineages-title";
+  heading.textContent = "研究批次";
+  section.appendChild(heading);
+  var allBatches = Array.isArray(batches) ? batches : [];
+  var prioritized = prioritizeResearchItems(allBatches, researchBatchNeedsAttention);
+  var visible = prioritized.slice(0, coverageViewState.visibleBatchCount);
+  var list = document.createElement("div");
+  list.className = "research-batch-list";
+  var count = document.createElement("div");
+  count.className = "muted research-count-message";
+  count.setAttribute("aria-live", "polite");
+  count.textContent = "目前顯示 " + visible.length + " / " + allBatches.length + " 個研究批次";
+  list.appendChild(count);
+  for (var i = 0; i < visible.length; i += 1) {
+    var batch = visible[i];
     var box = document.createElement("div");
-    box.className = "workflow-stage";
+    box.className = "workflow-stage research-batch-stage";
+    box.setAttribute("data-batch-id", batch.id);
     var title = document.createElement("div");
     title.className = "workflow-stage-title";
     var badge = document.createElement("span");
@@ -1466,44 +1907,176 @@ function renderResearchMonitor(monitor) {
     box.appendChild(title);
     var meta = document.createElement("div");
     meta.className = "muted";
-    var metaParts = [];
-    metaParts.push("建立者 " + batch.created_by);
-    metaParts.push("時間 " + batch.created_at);
     var summaries = [];
-    for (var key in batch.task_status_summary) {
-      if (Object.prototype.hasOwnProperty.call(batch.task_status_summary, key)) {
-        summaries.push(key + " " + batch.task_status_summary[key]);
-      }
+    for (var key in (batch.task_status_summary || {})) {
+      if (Object.prototype.hasOwnProperty.call(batch.task_status_summary || {}, key)) summaries.push(key + " " + batch.task_status_summary[key]);
     }
-    if (summaries.length > 0) metaParts.push("任務摘要 " + summaries.join(", "));
-    if (batch.task_ids && batch.task_ids.length > 0) metaParts.push("任務 " + batch.task_ids.map(function (id) { return id.slice(0, 8); }).join(", "));
-    meta.textContent = metaParts.join(" · ");
+    meta.textContent = summaries.length > 0 ? "任務摘要 " + summaries.join(", ") : "此批次尚無任務摘要";
     box.appendChild(meta);
-    container.appendChild(box);
+    var detailsId = "research-batch-details-" + batch.id.replace(/[^a-zA-Z0-9_-]/g, "-");
+    var button = researchDisclosureButton("查看批次", detailsId, "research-batch-toggle-" + batch.id);
+    var details = document.createElement("div");
+    details.id = detailsId;
+    details.className = "research-batch-disclosure";
+    details.hidden = true;
+    details.setAttribute("aria-hidden", "true");
+    button.addEventListener("click", (function (batchRef, detailsRef, buttonRef) {
+      return function () { toggleResearchBatch(batchRef, detailsRef, buttonRef, tasks); };
+    })(batch, details, button));
+    box.appendChild(button);
+    box.appendChild(details);
+    if (coverageViewState.expandedBatches[batch.id] === true) toggleResearchBatch(batch, details, button, tasks, true);
+    list.appendChild(box);
   }
-
-  if (lineages.length > 0) {
-    container.appendChild(renderResearchLineages(lineages, tasks));
+  if (allBatches.length === 0) {
+    var empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "目前沒有研究批次。";
+    list.appendChild(empty);
+  } else if (visible.length < allBatches.length) {
+    var more = document.createElement("button");
+    more.type = "button";
+    more.className = "btn-secondary research-more-button";
+    more.textContent = "載入更多研究批次";
+    more.setAttribute("aria-label", "載入更多研究批次（目前顯示 " + visible.length + " / " + allBatches.length + "）");
+    more.setAttribute("data-coverage-focus-key", "research-batch-more");
+    more.addEventListener("click", function () {
+      coverageViewState.visibleBatchCount += RESEARCH_BATCH_PAGE_SIZE;
+      renderResearchMonitor(monitorForCoverageView());
+    });
+    list.appendChild(more);
+  } else {
+    var done = document.createElement("div");
+    done.className = "empty-state research-all-shown";
+    done.textContent = "已顯示全部研究批次。";
+    list.appendChild(done);
   }
+  section.appendChild(list);
+  return section;
+}
 
-  var taskListHeader = document.createElement("h4");
-  taskListHeader.style.cssText = "margin: 16px 0 8px 0;";
-  taskListHeader.textContent = "全部研究任務清單 (" + tasks.length + ")";
-  container.appendChild(taskListHeader);
-
-  for (var j = 0; j < tasks.length; j++) {
-    container.appendChild(researchTaskElement(tasks[j]));
+function renderResearchTasks(tasks, monitor) {
+  var section = document.createElement("section");
+  section.className = "research-tasks-section";
+  var heading = document.createElement("h4");
+  heading.className = "lineages-title";
+  heading.textContent = "全部研究任務清單（" + tasks.length + "）";
+  section.appendChild(heading);
+  var prioritized = prioritizeResearchItems(tasks, researchTaskNeedsAttention);
+  var visible = prioritized.slice(0, coverageViewState.visibleTaskCount);
+  var count = document.createElement("div");
+  count.className = "muted research-count-message";
+  count.setAttribute("aria-live", "polite");
+  count.textContent = "目前顯示 " + visible.length + " / " + tasks.length + " 個研究任務";
+  section.appendChild(count);
+  for (var i = 0; i < visible.length; i += 1) section.appendChild(researchTaskElement(visible[i]));
+  if (tasks.length === 0) {
+    var empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "目前沒有研究任務。";
+    section.appendChild(empty);
+  } else if (visible.length < tasks.length) {
+    var more = document.createElement("button");
+    more.type = "button";
+    more.className = "btn-secondary research-more-button";
+    more.textContent = "載入更多研究任務";
+    more.setAttribute("aria-label", "載入更多研究任務（目前顯示 " + visible.length + " / " + tasks.length + "）");
+    more.setAttribute("data-coverage-focus-key", "research-task-more");
+    more.addEventListener("click", function () {
+      coverageViewState.visibleTaskCount += RESEARCH_TASK_PAGE_SIZE;
+      renderResearchMonitor(monitor);
+    });
+    section.appendChild(more);
+  } else {
+    var done = document.createElement("div");
+    done.className = "empty-state research-all-shown";
+    done.textContent = "已顯示全部研究任務。";
+    section.appendChild(done);
   }
+  return section;
+}
+
+function renderResearchMonitor(monitor) {
+  if (typeof captureCoverageViewPosition === "function") captureCoverageViewPosition();
+  var container = byId("research-monitor");
+  container.textContent = "";
+  if (monitor === null || monitor === undefined) {
+    var missing = document.createElement("div");
+    missing.className = "empty-state";
+    missing.textContent = "尚未取得研究監控資料。";
+    container.appendChild(missing);
+    return;
+  }
+  var batches = Array.isArray(monitor.batches) ? monitor.batches : [];
+  var tasks = Array.isArray(monitor.tasks) ? monitor.tasks : [];
+  var lineages = Array.isArray(monitor.lineages) ? monitor.lineages : [];
+  var summary = document.createElement("div");
+  summary.className = "research-monitor-summary";
+  var title = document.createElement("h3");
+  title.textContent = "Research Monitor 摘要";
+  summary.appendChild(title);
+  var kpis = document.createElement("div");
+  kpis.className = "kpi-list";
+  var kpiItems = [
+    ["研究批次", batches.length],
+    ["研究任務", tasks.length],
+    ["進行中", researchStatusCount(tasks, ["queued", "claimed", "running", "lease_expired"])],
+    ["需要處理", researchStatusCount(tasks, ["failed", "exhausted", "stale"])],
+    ["研究血統", lineages.length],
+  ];
+  for (var k = 0; k < kpiItems.length; k += 1) {
+    var kpi = document.createElement("div");
+    kpi.className = "kpi-item";
+    kpi.textContent = kpiItems[k][0] + "：" + kpiItems[k][1];
+    kpis.appendChild(kpi);
+  }
+  summary.appendChild(kpis);
+  var summaryNote = document.createElement("div");
+  summaryNote.className = "muted research-summary-note";
+  summaryNote.textContent = "優先顯示進行中與需要處理項目；展開批次或血統可查看詳細內容。";
+  summary.appendChild(summaryNote);
+  container.appendChild(summary);
+  container.appendChild(renderResearchBatches(batches, tasks));
+  container.appendChild(renderResearchLineages(lineages, tasks));
+  container.appendChild(renderResearchTasks(tasks, monitor));
 }
 
 async function loadCoverageCenterData() {
+  var generation = typeof state !== "undefined" ? state.projectGeneration : null;
+  var requestGeneration = ++coverageRequestGeneration;
+  setCoverageLoading("載入覆蓋矩陣與研究監控中…");
+  var researchContainer = byId("research-monitor");
+  if (researchContainer) {
+    researchContainer.textContent = "";
+    var loading = document.createElement("div");
+    loading.className = "loading-state";
+    loading.setAttribute("aria-live", "polite");
+    loading.textContent = "載入研究監控中…";
+    researchContainer.appendChild(loading);
+  }
   try {
     var payload = await requestJson("/workspace/dashboard/coverage-center");
+    if (requestGeneration !== coverageRequestGeneration || (generation !== null && typeof state !== "undefined" && generation !== state.projectGeneration)) return payload;
     renderCoverageCenter(payload);
     renderResearchMonitor(payload.monitor);
+    restoreCoverageViewPosition();
     return payload;
   } catch (error) {
+    if (requestGeneration !== coverageRequestGeneration || (generation !== null && typeof state !== "undefined" && generation !== state.projectGeneration)) return null;
     setAreaError("coverage-center-message", error);
+    var coverageError = byId("coverage-center-message");
+    if (coverageError) {
+      coverageError.className = "panel-message error-state";
+      coverageError.setAttribute("role", "alert");
+    }
+    if (researchContainer) {
+      researchContainer.textContent = "";
+      var errorState = document.createElement("div");
+      errorState.className = "empty-state error-state";
+      errorState.setAttribute("role", "alert");
+      errorState.textContent = "研究監控載入失敗，請重新整理。";
+      researchContainer.appendChild(errorState);
+    }
     throw error;
   }
 }

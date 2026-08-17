@@ -1544,8 +1544,8 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
       }
 
       function lineDiff(previous, current) {
-        var oldLines = previous.split("\n");
-        var newLines = current.split("\n");
+        var oldLines = previous.split("\\n");
+        var newLines = current.split("\\n");
         var rows = [];
         for (var i = 0; i < oldLines.length; i += 1) rows.push({ text: oldLines[i], type: "same" });
         var oldSet = {};
@@ -1669,12 +1669,12 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         var modal = modalHandle.modal;
 
         var desc = document.createElement("p");
-        desc.style.cssText = "font-size:0.9em;color:#555;margin-bottom:12px;";
+        desc.style.cssText = "font-size:0.9em;color:var(--color-text-muted);margin-bottom:12px;";
         desc.textContent = "此操作需要附件檔案才能繼續重播。請選取對應的檔案進行補傳（單檔限制 5MB，最多 20 個檔案）：";
         modal.appendChild(desc);
 
         var errBox = document.createElement("div");
-        errBox.style.cssText = "color:#dc3545;font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
+        errBox.style.cssText = "color:var(--color-error-strong);font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
         modal.appendChild(errBox);
 
         var fileInput = document.createElement("input");
