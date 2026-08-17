@@ -4,6 +4,7 @@ import { adaptationDecisionInputSchema, answerSchema, characterIdSchema, coverag
 import { type AgentAdapter, type WorkspaceProjectManager, type WorkspaceRuntime, type WorkspaceWorker } from "@st-workspace/runtime";
 import { structuredError } from "./errors.js";
 import { body, compact, dashboardPathId, dashboardQuery, json, parseRequest, restError } from "./http-utils.js";
+import { assertHighImpactConfirmed } from "./http-security.js";
 import { mcpProtocolVersion, toolDefinitions } from "./mcp-tools.js";
 import { JSONRPC_INTERNAL_ERROR, JSONRPC_INVALID_PARAMS, JSONRPC_INVALID_REQUEST, JSONRPC_METHOD_NOT_FOUND, JSONRPC_PARSE_ERROR, jsonRpcError, parseJsonRpcMessage, type JsonRpcErrorResponse, type JsonRpcId, type JsonRpcSuccessResponse } from "./jsonrpc.js";
 import { WORKSPACE_SERVICE } from "./runtime-revision.js";
@@ -308,6 +309,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         return true;
       }
       if (request.method === "POST" && url.pathname === "/workspace/publish/provenance/confirm") {
+        assertHighImpactConfirmed(request.headers, "publish");
         const parsed = await body(request);
         const input = parseRequest(publishProvenanceConfirmSchema, parsed, "PROVENANCE_CONFIRMATION_REQUIRED");
         const result = await (await deps.getRuntime()).publishProvenanceConfirm({
@@ -591,6 +593,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         return true;
       }
       if (request.method === "POST" && url.pathname === "/workspace/repair/run") {
+        assertHighImpactConfirmed(request.headers, "repair");
         const parsed = await body(request) as { plan_hash?: unknown } | undefined;
         json(response, 200, await (await deps.getRuntime()).repairRun(typeof parsed?.plan_hash === "string" ? parsed.plan_hash : undefined));
         return true;

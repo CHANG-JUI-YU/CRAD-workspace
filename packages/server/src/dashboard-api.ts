@@ -30,6 +30,7 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
         if (dashboardAuthToken !== null && !hasAuthorization) {
           headers.Authorization = "Bearer " + dashboardAuthToken;
         }
+        headers["X-Requested-With"] = "XMLHttpRequest";
         var response;
         try {
           response = await fetch(path, Object.assign({}, opts, { headers: headers }));
@@ -93,10 +94,10 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
           });
       }
 
-      function postJson(path, value) {
+      function postJson(path, value, extraHeaders) {
         return requestJson(path, {
           method: "POST",
-          headers: { "content-type": "application/json", accept: "application/json" },
+          headers: Object.assign({ "content-type": "application/json", accept: "application/json" }, extraHeaders || {}),
           body: JSON.stringify(value)
         });
       }

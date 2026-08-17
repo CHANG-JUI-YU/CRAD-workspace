@@ -195,7 +195,7 @@ describe("Audit 7 Batch 7 - Server Endpoints & Dashboard UI", () => {
 
     const res = await fetch(`${server.url}/workspace/publish/provenance/confirm`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Workspace-Confirm": "publish" },
       body: JSON.stringify({
         fingerprint: preview.fingerprint,
         mode_selection: "zhuji",

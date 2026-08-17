@@ -960,6 +960,12 @@ export const DASHBOARD_CSS = `  <style>
       gap: 0.25rem;
     }
     .amend-impact p { margin: 0; }
+    .external-link-warning {
+      display: inline-block;
+      margin-left: 0.5rem;
+      color: #b45309;
+      font-size: 0.85rem;
+    }
     @media (prefers-reduced-motion: reduce) {
       * {
         animation-duration: 0.01ms !important;

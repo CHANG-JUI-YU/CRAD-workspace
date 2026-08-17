@@ -216,12 +216,20 @@ export const DASHBOARD_PANELS_REVIEW_JS = `      function renderQuality(snapshot
           box.append(body);
         }
         if (source.url) {
-          var link = document.createElement("a");
-          link.href = source.url;
-          link.target = "_blank";
-          link.rel = "noopener";
-          link.textContent = "開啟外部來源";
-          box.append(link);
+          var sourceUrl = dashboardUrlSafe.safeExternalUrl(source.url);
+          if (sourceUrl !== null) {
+            var link = document.createElement("a");
+            link.href = sourceUrl;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = "開啟外部來源";
+            box.append(link);
+          } else {
+            var insecureUrl = document.createElement("span");
+            insecureUrl.className = "external-link-warning";
+            insecureUrl.textContent = "外部來源網址不安全，已停用連結。";
+            box.append(insecureUrl);
+          }
         }
         return box;
       }
@@ -366,12 +374,17 @@ export const DASHBOARD_PANELS_REVIEW_JS = `      function renderQuality(snapshot
           var text = document.createElement("span");
           var candidateLabel = (firstString(candidate, ["title"]) || "?") + (candidate.official ? "（官方）" : "");
           if (candidate.url) {
-            var link = document.createElement("a");
-            link.href = candidate.url;
-            link.target = "_blank";
-            link.rel = "noopener";
-            link.textContent = candidateLabel;
-            text.append(link);
+            var candidateUrl = dashboardUrlSafe.safeExternalUrl(candidate.url);
+            if (candidateUrl !== null) {
+              var link = document.createElement("a");
+              link.href = candidateUrl;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              link.textContent = candidateLabel;
+              text.append(link);
+            } else {
+              text.textContent = candidateLabel + "（不安全網址）";
+            }
           } else {
             text.textContent = candidateLabel;
           }
@@ -416,12 +429,20 @@ export const DASHBOARD_PANELS_REVIEW_JS = `      function renderQuality(snapshot
           if (typeof source.canonical_chars === "number") sourceParts.push("chars " + source.canonical_chars);
           sourceRow.textContent = sourceParts.join(" · ");
           if (source.url) {
-            var sourceLink = document.createElement("a");
-            sourceLink.href = source.url;
-            sourceLink.target = "_blank";
-            sourceLink.rel = "noopener";
-            sourceLink.textContent = "開啟來源";
-            sourceRow.append(sourceLink);
+            var safeSourceUrl = dashboardUrlSafe.safeExternalUrl(source.url);
+            if (safeSourceUrl !== null) {
+              var sourceLink = document.createElement("a");
+              sourceLink.href = safeSourceUrl;
+              sourceLink.target = "_blank";
+              sourceLink.rel = "noopener noreferrer";
+              sourceLink.textContent = "開啟來源";
+              sourceRow.append(sourceLink);
+            } else {
+              var insecureSource = document.createElement("span");
+              insecureSource.className = "external-link-warning";
+              insecureSource.textContent = "（來源網址不安全）";
+              sourceRow.append(insecureSource);
+            }
           }
           sourceTarget.append(sourceRow);
         }

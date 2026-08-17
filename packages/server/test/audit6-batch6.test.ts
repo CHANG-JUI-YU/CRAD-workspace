@@ -332,7 +332,7 @@ describe("Audit 6 batch 6: provenance preview, confirm and dashboard (server)", 
       const preview = await previewRes.json();
       const confirmRes = await fetch(`${url}/workspace/publish/provenance/confirm`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "X-Workspace-Confirm": "publish" },
         body: JSON.stringify({ fingerprint: preview.fingerprint, idempotency_key: "confirm-server-1" }),
       });
       expect(confirmRes.status).toBe(200);
@@ -366,7 +366,7 @@ describe("Audit 6 batch 6: provenance preview, confirm and dashboard (server)", 
       }));
       const confirmRes = await fetch(`${url}/workspace/publish/provenance/confirm`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "X-Workspace-Confirm": "publish" },
         body: JSON.stringify({ fingerprint: preview.fingerprint }),
       });
       expect(confirmRes.status).toBe(400);
@@ -385,8 +385,8 @@ describe("Audit 6 batch 6: provenance preview, confirm and dashboard (server)", 
       const previewRes = await fetch(`${url}/workspace/publish/provenance/preview`);
       const preview = await previewRes.json();
       const body = JSON.stringify({ fingerprint: preview.fingerprint, idempotency_key: "confirm-replay" });
-      const first = await (await fetch(`${url}/workspace/publish/provenance/confirm`, { method: "POST", headers: { "content-type": "application/json" }, body })).json();
-      const second = await (await fetch(`${url}/workspace/publish/provenance/confirm`, { method: "POST", headers: { "content-type": "application/json" }, body })).json();
+      const first = await (await fetch(`${url}/workspace/publish/provenance/confirm`, { method: "POST", headers: { "content-type": "application/json", "X-Workspace-Confirm": "publish" }, body })).json();
+      const second = await (await fetch(`${url}/workspace/publish/provenance/confirm`, { method: "POST", headers: { "content-type": "application/json", "X-Workspace-Confirm": "publish" }, body })).json();
       expect(first.status).toBe("completed");
       expect(second.operation_id).toBe(first.operation_id);
       const state = await repository.read();
@@ -403,7 +403,7 @@ describe("Audit 6 batch 6: provenance preview, confirm and dashboard (server)", 
       const preview = await previewRes.json();
       await fetch(`${url}/workspace/publish/provenance/confirm`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "X-Workspace-Confirm": "publish" },
         body: JSON.stringify({ fingerprint: preview.fingerprint }),
       });
       const res = await fetch(`${url}/workspace/dashboard/provenance`);

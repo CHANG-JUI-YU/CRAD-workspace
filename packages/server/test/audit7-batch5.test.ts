@@ -212,7 +212,7 @@ describe("Audit 7 batch 5 provenance publish REST contract", () => {
 
       const confirmResponse = await fetch(`${server.url}/workspace/publish/provenance/confirm`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "X-Workspace-Confirm": "publish" },
         body: JSON.stringify({ fingerprint: preview.fingerprint, mode_selection: "both", idempotency_key: "both-publish-1" }),
       });
       expect(confirmResponse.status).toBe(200);
@@ -248,7 +248,7 @@ describe("Audit 7 batch 5 provenance publish REST contract", () => {
     try {
       const response = await fetch(`${server.url}/workspace/publish/provenance/confirm`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "X-Workspace-Confirm": "publish" },
         body: JSON.stringify({ mode_selection: "zhuji" }),
       });
       expect(response.status).toBe(400);
@@ -288,7 +288,7 @@ describe("Audit 7 batch 5 provenance publish REST contract", () => {
       const preview = (await previewResponse.json()) as { fingerprint?: string };
       const confirmResponse = await fetch(`${server.url}/workspace/publish/provenance/confirm`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "X-Workspace-Confirm": "publish" },
         body: JSON.stringify({ fingerprint: preview.fingerprint, mode_selection: "zhuji" }),
       });
       expect(confirmResponse.status).toBe(200);

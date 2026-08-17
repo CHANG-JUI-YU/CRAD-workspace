@@ -818,10 +818,35 @@ const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
     impact: "此操作未完成，檔案狀態可能未完全還原。",
     next_actions: ["查看 server log 中的交易識別碼與路徑，確認檔案後重試。"],
   },
+  REQUEST_TARGET_INVALID: {
+    category: "input",
+    message_zh: "請求目標格式無效，無法解析。",
+    impact: "此請求未執行。",
+    next_actions: ["確認請求的網址格式正確後重新送出。"],
+  },
+  AUTH_TOKEN_BLANK: {
+    category: "auth",
+    message_zh: "認證權杖不得為空白。",
+    impact: "server 無法啟動。",
+    next_actions: ["設定非空白的認證權杖後重新啟動。"],
+  },
+  CSRF_DENIED: {
+    category: "security",
+    message_zh: "已拒絕跨站或跨來源的變更請求。",
+    impact: "此操作未執行，未產生任何變更。",
+    next_actions: ["從 Dashboard 頁面重新操作，或確認請求來源符合 server 主機。"],
+  },
+  CSRF_CONFIRMATION_REQUIRED: {
+    category: "security",
+    message_zh: "高影響操作需要明確的確認。",
+    impact: "此操作未執行。",
+    next_actions: ["在確認對話框明確確認後重新送出操作。"],
+  },
 };
 
 const CATEGORY_BY_PREFIX: Array<{ pattern: RegExp; category: string }> = [
   { pattern: /^REQUEST_/u, category: "input" },
+  { pattern: /^CSRF_/u, category: "security" },
   { pattern: /^AGENT_/u, category: "agent" },
   { pattern: /^PROJECT_/u, category: "project" },
   { pattern: /^INTERVIEW_/u, category: "project" },
@@ -904,7 +929,13 @@ export function structuredError(error: unknown): ErrorPayload {
 
 export function httpStatusFor(payload: ErrorPayload): number {
   if (payload.code === "UNAUTHORIZED" || payload.code === "EXTERNAL_HOST_AUTH_REQUIRED") return 401;
-  if (payload.code === "AGENT_CAPABILITY_DENIED" || payload.code === "AGENT_READ_ONLY") return 403;
+  if (
+    payload.code === "AGENT_CAPABILITY_DENIED" ||
+    payload.code === "AGENT_READ_ONLY" ||
+    payload.code === "CSRF_DENIED" ||
+    payload.code === "CSRF_CONFIRMATION_REQUIRED"
+  )
+    return 403;
   if (payload.code === "REQUEST_TOO_LARGE") return 413;
   if (payload.code === "REVISION_CONFLICT" || payload.code === "IDEMPOTENCY_CONFLICT") return 409;
   if (payload.code === "NOT_FOUND" || payload.code.endsWith("_NOT_FOUND")) return 404;

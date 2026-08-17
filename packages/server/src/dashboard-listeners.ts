@@ -21,7 +21,7 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
 
       function runRepair() {
         void runTask("執行修復", async function () {
-          var payload = await postJson("/workspace/repair/run", { plan_hash: repairPlanHash });
+          var payload = await postJson("/workspace/repair/run", { plan_hash: repairPlanHash }, { "X-Workspace-Confirm": "repair" });
           renderRepairReport(payload);
           return payload;
         });
@@ -132,7 +132,7 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
 
         return runTask("確認並發布", async function () {
           try {
-            var payload = await postJson("/workspace/publish/provenance/confirm", body);
+            var payload = await postJson("/workspace/publish/provenance/confirm", body, { "X-Workspace-Confirm": "publish" });
             confirmation.result = payload;
             if (payload && payload.status === "completed") {
               confirmation.completed = true;

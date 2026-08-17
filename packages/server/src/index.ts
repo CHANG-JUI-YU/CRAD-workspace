@@ -5,6 +5,7 @@ import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, W
 import { dashboard } from "./dashboard.js";
 export { toolDefinitions } from "./mcp-tools.js";
 import { json, restError } from "./http-utils.js";
+import { extractBearerToken, normalizeAuthToken, parseRequestTarget, timingSafeTextEqual, assertMutationRequestAllowed } from "./http-security.js";
 import { JSONRPC_INTERNAL_ERROR, jsonRpcError } from "./jsonrpc.js";
 import { handleMcpRequest, handleRestRequest, type WorkspaceRouteDeps } from "./routes.js";
 import { computeRuntimeRevision } from "./runtime-revision.js";
@@ -38,15 +39,26 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
   const getRuntime = async (): Promise<WorkspaceRuntime> => options.projectManager === undefined ? options.runtime! : options.projectManager.ensureRuntime();
   if (options.autoStartWorker ?? true) worker.start();
   const server = createServer(async (request, response) => {
+    let url: URL | null = null;
     try {
-      const url = new URL(request.url ?? "/", "http://localhost");
+      url = parseRequestTarget(request.url, "http://localhost");
+      if (url === null) {
+        restError(response, new CoreError("REQUEST_TARGET_INVALID", "Malformed request target", true));
+        return;
+      }
       if (options.authToken !== undefined) {
-        const headerToken = request.headers.authorization === `Bearer ${options.authToken}`;
-        const queryToken = request.method === "GET" && url.searchParams.get("token") === options.authToken;
-        if (!headerToken && !queryToken) {
+        const headerToken = extractBearerToken(request.headers.authorization);
+        const queryToken = request.method === "GET" ? url.searchParams.get("token") : null;
+        const headerOk = headerToken !== undefined && timingSafeTextEqual(headerToken, options.authToken);
+        const queryOk = queryToken !== null && timingSafeTextEqual(queryToken, options.authToken);
+        if (!headerOk && !queryOk) {
           restError(response, new CoreError("UNAUTHORIZED", "Missing or invalid bearer token", true));
           return;
         }
+      }
+      const isMutation = request.method !== undefined && request.method !== "GET" && request.method !== "HEAD";
+      if (isMutation) {
+        assertMutationRequestAllowed(request.headers, request.headers.host);
       }
       if (request.method === "GET" && url.pathname === "/") {
         response.statusCode = 200;
@@ -67,7 +79,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       if (await handleMcpRequest(request, response, url, deps)) return;
       restError(response, new CoreError("NOT_FOUND", "Not found", false));
     } catch (error) {
-      if (new URL(request.url ?? "/", "http://localhost").pathname === "/mcp") {
+      if (url !== null && url.pathname === "/mcp") {
         json(response, 200, jsonRpcError(null, JSONRPC_INTERNAL_ERROR, "Internal error"));
         return;
       }
@@ -81,7 +93,11 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
 export async function startWorkspaceServer(options: { port?: number; host?: string; projectRoot?: string; projectId?: string; actor?: string; authToken?: string; workspaceRoot?: string; runtimeRevision?: string } = {}): Promise<Server> {
   const host = options.host ?? process.env.ST_WORKSPACE_HOST ?? "127.0.0.1";
   const isLocalHost = host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
-  if (!isLocalHost && options.authToken === undefined) {
+  const configuredAuthToken = normalizeAuthToken(options.authToken);
+  if (options.authToken !== undefined && configuredAuthToken === undefined) {
+    throw new CoreError("AUTH_TOKEN_BLANK", "Auth token must not be blank or whitespace-only", true);
+  }
+  if (!isLocalHost && configuredAuthToken === undefined) {
     throw new CoreError("EXTERNAL_HOST_AUTH_REQUIRED", `Host ${host} exposes every read/write endpoint; refusing to start without an auth token.`, true);
   }
   const runtimeRevision = options.runtimeRevision ?? await computeRuntimeRevision(options.workspaceRoot ?? process.cwd());
@@ -97,8 +113,8 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
     ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true, attachmentStore: new FileAttachmentStore(repository) }) })
     : undefined;
   const serverOptions: WorkspaceServerOptions = manager !== undefined
-    ? { projectManager: manager, actor: options.actor ?? "server", runtimeRevision, ...(options.authToken === undefined ? {} : { authToken: options.authToken }) }
-    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server", runtimeRevision, ...(options.authToken === undefined ? {} : { authToken: options.authToken }) };
+    ? { projectManager: manager, actor: options.actor ?? "server", runtimeRevision, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) }
+    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server", runtimeRevision, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) };
   const server = createWorkspaceServer(serverOptions);
   await new Promise<void>((resolve, reject) => {
     const listening = (): void => {

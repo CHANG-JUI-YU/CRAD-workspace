@@ -3,6 +3,7 @@ import { DASHBOARD_CSS } from "./dashboard-css.js";
 import { DASHBOARD_MARKUP } from "./dashboard-markup.js";
 import { DASHBOARD_STATE_JS } from "./dashboard-state.js";
 import { DASHBOARD_DRAFT_STORE_JS } from "./dashboard-draft-store.js";
+import { DASHBOARD_URL_JS } from "./dashboard-url.js";
 import { DASHBOARD_PANELS_CORE_JS } from "./dashboard-panels-core.js";
 import { DASHBOARD_API_JS } from "./dashboard-api.js";
 import { DASHBOARD_ACTIONS_JS } from "./dashboard-actions.js";
@@ -28,6 +29,7 @@ export function dashboard(): string {
     + DASHBOARD_MARKUP
     + DASHBOARD_STATE_JS
     + DASHBOARD_DRAFT_STORE_JS
+    + DASHBOARD_URL_JS
     + DASHBOARD_PANELS_CORE_JS
     + DASHBOARD_API_JS
     + DASHBOARD_ACTIONS_JS

@@ -175,7 +175,7 @@ describe("Audit 7 Batch 6 - Server Routes & HTTP Idempotency (#77, #92, #100)", 
       const idempotencyKey = "server-key-1";
       const confirmRes = await fetch(`${server.url}/workspace/publish/provenance/confirm`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Workspace-Confirm": "publish" },
         body: JSON.stringify({
           fingerprint: preview.fingerprint,
           idempotency_key: idempotencyKey,
@@ -201,7 +201,7 @@ describe("Audit 7 Batch 6 - Server Routes & HTTP Idempotency (#77, #92, #100)", 
       // Replay request with same body
       const replayRes = await fetch(`${server.url}/workspace/publish/provenance/confirm`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Workspace-Confirm": "publish" },
         body: JSON.stringify({
           fingerprint: preview.fingerprint,
           idempotency_key: idempotencyKey,
@@ -230,7 +230,7 @@ describe("Audit 7 Batch 6 - Server Routes & HTTP Idempotency (#77, #92, #100)", 
       const idempotencyKey = "server-key-2";
       await fetch(`${server.url}/workspace/publish/provenance/confirm`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Workspace-Confirm": "publish" },
         body: JSON.stringify({
           fingerprint: preview.fingerprint,
           idempotency_key: idempotencyKey,
@@ -240,7 +240,7 @@ describe("Audit 7 Batch 6 - Server Routes & HTTP Idempotency (#77, #92, #100)", 
       // Conflict call with different fingerprint
       const conflictRes = await fetch(`${server.url}/workspace/publish/provenance/confirm`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Workspace-Confirm": "publish" },
         body: JSON.stringify({
           fingerprint: "conflicting-fingerprint",
           idempotency_key: idempotencyKey,
