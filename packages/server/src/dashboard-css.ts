@@ -8,8 +8,8 @@ export const DASHBOARD_CSS = `  <style>
     }
     * { box-sizing: border-box; }
     body { margin: 0; min-width: 320px; background: #f2f5f9; }
-    button, select, textarea { font: inherit; }
-    button, select { min-height: 2.5rem; }
+    button, select, textarea, input { font: inherit; }
+    button, select, input[type="text"], input[type="url"], input[type="search"] { min-height: 2.5rem; }
     button {
       border: 1px solid #9bb7d4;
       border-radius: 0.55rem;
@@ -19,14 +19,30 @@ export const DASHBOARD_CSS = `  <style>
       cursor: pointer;
     }
     button:hover:not(:disabled) { border-color: #2d6a9f; background: #eef6ff; }
-    button.primary { border-color: #1f5f91; color: #fff; background: #1f5f91; }
-    button.primary:hover:not(:disabled) { background: #164a73; }
+    button.primary, .btn-primary { border-color: #1f5f91; color: #fff; background: #1f5f91; }
+    button.primary:hover:not(:disabled), .btn-primary:hover:not(:disabled) { background: #164a73; }
+    button.danger, .danger-button { border-color: #b91c1c; color: #fff; background: #dc2626; font-weight: 600; }
+    button.danger:hover:not(:disabled), .danger-button:hover:not(:disabled) { background: #b91c1c; }
+    .btn-secondary { border-color: #cbd5e1; color: #334155; background: #fff; }
+    .btn-secondary:hover:not(:disabled) { border-color: #94a3b8; background: #f8fafc; }
+    .btn-compact, .inline-button { min-height: 1.9rem; padding: 0.25rem 0.6rem; font-size: 0.82rem; }
+    .action-link {
+      background: none;
+      border: none;
+      color: #1f5f91;
+      text-decoration: underline;
+      cursor: pointer;
+      padding: 0.2rem 0.4rem;
+      min-height: auto;
+      font-size: 0.85rem;
+    }
+    .action-link:hover { color: #123e63; }
     button.choice { width: 100%; text-align: left; }
-    button:disabled, select:disabled, textarea:disabled {
+    button:disabled, select:disabled, textarea:disabled, input:disabled {
       cursor: not-allowed;
       opacity: 0.58;
     }
-    select, textarea {
+    select, textarea, input[type="text"], input[type="url"], input[type="search"], input[type="file"] {
       width: 100%;
       border: 1px solid #b7c4d1;
       border-radius: 0.55rem;
@@ -34,7 +50,15 @@ export const DASHBOARD_CSS = `  <style>
       color: #172b3a;
       background: #fff;
     }
+    .inline-actions select, .field-row select, .form-actions select, .publish-controls select {
+      width: auto;
+      max-width: 100%;
+    }
     textarea { min-height: 7rem; resize: vertical; }
+    :focus-visible {
+      outline: 2px solid #005fb8 !important;
+      outline-offset: 2px !important;
+    }
     .app-shell { width: min(1180px, 100%); margin: 0 auto; padding: 1.25rem; }
     .app-header {
       display: flex;
@@ -477,7 +501,8 @@ export const DASHBOARD_CSS = `  <style>
       display: flex;
       flex-wrap: wrap;
       gap: 0.5rem;
-      margin-bottom: 0.9rem;
+      list-style: none;
+      margin: 0 0 0.9rem 0;
       padding: 0.65rem 0.8rem;
       background: #f8fafc;
       border: 1px solid #e2e8f0;
@@ -1021,11 +1046,167 @@ export const DASHBOARD_CSS = `  <style>
       color: #b45309;
       font-size: 0.85rem;
     }
+    .modal-overlay, .dialog-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(15, 23, 42, 0.65);
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.25rem;
+      box-sizing: border-box;
+    }
+    .modal-dialog, .dialog-modal {
+      background: #ffffff;
+      border-radius: 0.75rem;
+      max-width: min(560px, 95vw);
+      width: 100%;
+      max-height: 90vh;
+      overflow-y: auto;
+      padding: 1.5rem;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.2), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+      font-family: inherit;
+      outline: none;
+      box-sizing: border-box;
+    }
+    .modal-title, .dialog-modal h3 {
+      margin: 0 0 1rem 0;
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #1e293b;
+    }
+    .dialog-actions, .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+      margin-top: 1.5rem;
+      flex-wrap: wrap;
+    }
+    .creative-warning-box {
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-left: 4px solid #f59e0b;
+      color: #92400e;
+      padding: 0.75rem 1rem;
+      border-radius: 0.5rem;
+      font-size: 0.88rem;
+      line-height: 1.5;
+      margin-bottom: 1rem;
+    }
+    .creative-meta-dl {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 0.4rem 0.8rem;
+      font-size: 0.88rem;
+      margin: 0 0 1rem 0;
+      background: #f8fafc;
+      padding: 0.8rem 1rem;
+      border-radius: 0.5rem;
+      border: 1px solid #e2e8f0;
+    }
+    .dialog-input, .dialog-textarea {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 0.35rem;
+    }
+    .dialog-error {
+      color: #dc2626;
+      font-weight: 600;
+      font-size: 0.88rem;
+      margin-top: 0.5rem;
+    }
+    .image-thumb, .image-card-thumb {
+      width: 4.5rem;
+      height: 4.5rem;
+      object-fit: cover;
+      border-radius: 0.4rem;
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      flex-shrink: 0;
+    }
+    .image-card {
+      border: 1px solid #e2e8f0;
+      border-radius: 0.55rem;
+      padding: 0.75rem;
+      background: #ffffff;
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+    .image-placeholder {
+      width: 4.5rem;
+      height: 4.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #f1f5f9;
+      border-radius: 0.4rem;
+      color: #94a3b8;
+      font-size: 0.75rem;
+      border: 1px dashed #cbd5e1;
+    }
+    #image-crop-preview canvas {
+      max-width: 100%;
+      height: auto;
+      border-radius: 0.4rem;
+      border: 1px solid #cbd5e1;
+      background: #fff;
+    }
+    .publish-completion-card {
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-radius: 0.75rem;
+      padding: 1.25rem;
+      margin-top: 1rem;
+    }
+    .publish-completion-card .completion-title {
+      color: #166534;
+      font-size: 1.15rem;
+      font-weight: 700;
+      margin-top: 0;
+      margin-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .publish-completion-card .completion-summary {
+      color: #15803d;
+      font-size: 0.92rem;
+      line-height: 1.6;
+      margin-bottom: 1rem;
+    }
+    .publish-completion-card .download-guide {
+      background: #ffffff;
+      border: 1px solid #dcfce7;
+      border-radius: 0.5rem;
+      padding: 0.75rem 1rem;
+      font-size: 0.88rem;
+      color: #1e293b;
+      margin-bottom: 1rem;
+    }
+    .publish-completion-card .completion-actions {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .home-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 0.6rem 1.2rem;
+      font-weight: 600;
+    }
     @media (prefers-reduced-motion: reduce) {
-      * {
-        animation-duration: 0.01ms !important;
+      *, *::before, *::after {
+        animation-duration: 0.001ms !important;
         animation-iteration-count: 1 !important;
-        transition-duration: 0.01ms !important;
+        transition-duration: 0.001ms !important;
         scroll-behavior: auto !important;
       }
     }

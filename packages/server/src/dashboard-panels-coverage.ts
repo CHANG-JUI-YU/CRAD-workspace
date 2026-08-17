@@ -42,20 +42,12 @@ function startCoverageResearch(cell, isAssessmentWide) {
     assessment_revision: assessment.revision,
     scope: scope,
   }).then(function (preview) {
-    var existingModal = byId("research-start-modal-overlay");
-    if (existingModal) existingModal.remove();
-
-    var overlay = document.createElement("div");
-    overlay.id = "research-start-modal-overlay";
-    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;";
-
-    var modal = document.createElement("div");
-    modal.style.cssText = "background:#fff;border-radius:8px;max-width:520px;width:100%;max-height:90vh;overflow-y:auto;padding:24px;box-shadow:0 4px 20px rgba(0,0,0,0.25);font-family:inherit;";
-
-    var title = document.createElement("h3");
-    title.style.cssText = "margin-top:0;margin-bottom:12px;";
-    title.textContent = isAssessmentWide ? "啟動全量缺口研究" : ("啟動研究 — " + coverageCellTitle(cell));
-    modal.appendChild(title);
+    var modalHandle = createAccessibleModal({
+      id: "research-start-modal-overlay",
+      titleText: isAssessmentWide ? "啟動全量缺口研究" : ("啟動研究 — " + coverageCellTitle(cell)),
+      initialFocusSelector: 'button[type="button"].primary, button:not([disabled])'
+    });
+    var modal = modalHandle.modal;
 
     var infoBox = document.createElement("div");
     infoBox.style.cssText = "background:#f8f9fa;border-left:4px solid #0066cc;padding:12px 16px;margin-bottom:16px;font-size:0.9em;color:#333;line-height:1.6;";
@@ -95,11 +87,12 @@ function startCoverageResearch(cell, isAssessmentWide) {
     cancelBtn.type = "button";
     cancelBtn.textContent = "取消";
     cancelBtn.style.cssText = "padding:8px 16px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;";
-    cancelBtn.addEventListener("click", function () { overlay.remove(); });
+    cancelBtn.addEventListener("click", function () { modalHandle.close({ cancelled: true }); });
     actionRow.appendChild(cancelBtn);
 
     var submitBtn = document.createElement("button");
     submitBtn.type = "button";
+    submitBtn.className = "primary";
     submitBtn.textContent = preview.already_covered ? "重用既有研究任務" : "確認啟動研究";
     submitBtn.style.cssText = "padding:8px 16px;border:none;background:#0066cc;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;";
 
@@ -111,7 +104,7 @@ function startCoverageResearch(cell, isAssessmentWide) {
         assessment_revision: assessment.revision,
         scope: scope,
       }).then(function (result) {
-        overlay.remove();
+        modalHandle.close();
         renderMutationInvalidation(result.downstream_invalidation);
         setCoverageNotice(result.summary || (result.reused ? "所請求的研究項目已有進行中的任務。" : "已建立研究批次。"));
         void loadCoverageCenterData();
@@ -126,8 +119,8 @@ function startCoverageResearch(cell, isAssessmentWide) {
 
     actionRow.appendChild(submitBtn);
     modal.appendChild(actionRow);
-    overlay.appendChild(modal);
-    document.body.appendChild(overlay);
+    document.body.appendChild(modalHandle.overlay);
+    modalHandle.focusFirst();
   }).catch(function (error) {
     setCoverageError(error);
   });
@@ -144,16 +137,6 @@ function openRecoveryDialog(cell, action) {
     return;
   }
 
-  var existingModal = byId("recovery-modal-overlay");
-  if (existingModal) existingModal.remove();
-
-  var overlay = document.createElement("div");
-  overlay.id = "recovery-modal-overlay";
-  overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;";
-
-  var modal = document.createElement("div");
-  modal.style.cssText = "background:#fff;border-radius:8px;max-width:550px;width:100%;max-height:90vh;overflow-y:auto;padding:24px;box-shadow:0 4px 20px rgba(0,0,0,0.25);font-family:inherit;";
-
   var actionLabels = {
     revise_query: "修改查詢 (Revise Query)",
     revise_constraints: "修改來源限制 (Revise Constraints)",
@@ -162,10 +145,12 @@ function openRecoveryDialog(cell, action) {
     creative_completion: "授權創作補全 (Creative Completion)",
   };
 
-  var title = document.createElement("h3");
-  title.style.cssText = "margin-top:0;margin-bottom:12px;";
-  title.textContent = "任務恢復 — " + (actionLabels[action] || action) + " — " + coverageCellTitle(cell);
-  modal.appendChild(title);
+  var modalHandle = createAccessibleModal({
+    id: "recovery-modal-overlay",
+    titleText: "任務恢復 — " + (actionLabels[action] || action) + " — " + coverageCellTitle(cell),
+    initialFocusSelector: "select, input, textarea"
+  });
+  var modal = modalHandle.modal;
 
   var errBox = document.createElement("div");
   errBox.style.cssText = "color:#dc3545;font-weight:bold;margin-bottom:12px;display:none;font-size:0.9em;";
@@ -289,11 +274,12 @@ function openRecoveryDialog(cell, action) {
   cancelBtn.type = "button";
   cancelBtn.textContent = "取消";
   cancelBtn.style.cssText = "padding:8px 16px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;";
-  cancelBtn.addEventListener("click", function () { overlay.remove(); });
+  cancelBtn.addEventListener("click", function () { modalHandle.close({ cancelled: true }); });
   actionRow.appendChild(cancelBtn);
 
   var submitBtn = document.createElement("button");
   submitBtn.type = "button";
+  submitBtn.className = "primary";
   submitBtn.textContent = "確認執行恢復";
   submitBtn.style.cssText = "padding:8px 16px;border:none;background:#0066cc;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;";
 
@@ -340,7 +326,7 @@ function openRecoveryDialog(cell, action) {
       }
 
       postJson("/workspace/coverage/research/recover", payload).then(function (result) {
-        overlay.remove();
+        modalHandle.close();
         renderMutationInvalidation(result.downstream_invalidation);
         setCoverageNotice(result.summary || "已完成任務恢復操作。");
         void loadCoverageCenterData();
@@ -380,32 +366,24 @@ function openRecoveryDialog(cell, action) {
 
   actionRow.appendChild(submitBtn);
   modal.appendChild(actionRow);
-  overlay.appendChild(modal);
-  document.body.appendChild(overlay);
+  document.body.appendChild(modalHandle.overlay);
+  modalHandle.focusFirst();
 }
 
 function openSupplementDialog(cell, preview) {
   var assessment = coverageAssessmentRef();
   if (assessment === undefined) return;
 
-  var existingModal = byId("supplement-modal-overlay");
-  if (existingModal) existingModal.remove();
-
   var opId = "op-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
   var lifecycle = cell.supplement_lifecycle;
   var pendingResId = lifecycle ? lifecycle.current_resolution_id : undefined;
 
-  var overlay = document.createElement("div");
-  overlay.id = "supplement-modal-overlay";
-  overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;";
-
-  var modal = document.createElement("div");
-  modal.style.cssText = "background:#fff;border-radius:8px;max-width:550px;width:100%;max-height:90vh;overflow-y:auto;padding:24px;box-shadow:0 4px 20px rgba(0,0,0,0.25);font-family:inherit;";
-
-  var title = document.createElement("h3");
-  title.style.cssText = "margin-top:0;margin-bottom:12px;";
-  title.textContent = (pendingResId ? "繼續補充資料 — " : "提供補充資料 — ") + coverageCellTitle(cell);
-  modal.appendChild(title);
+  var modalHandle = createAccessibleModal({
+    id: "supplement-modal-overlay",
+    titleText: (pendingResId ? "繼續補充資料 — " : "提供補充資料 — ") + coverageCellTitle(cell),
+    initialFocusSelector: "textarea, input, select"
+  });
+  var modal = modalHandle.modal;
 
   var previewBox = document.createElement("div");
   previewBox.style.cssText = "background:#f8f9fa;border-left:4px solid #0066cc;padding:10px 14px;margin-bottom:16px;font-size:0.9em;color:#333;";
@@ -479,11 +457,12 @@ function openSupplementDialog(cell, preview) {
   cancelBtn.type = "button";
   cancelBtn.textContent = "取消";
   cancelBtn.style.cssText = "padding:8px 16px;border:1px solid #ccc;background:#fff;border-radius:4px;cursor:pointer;";
-  cancelBtn.addEventListener("click", function () { overlay.remove(); });
+  cancelBtn.addEventListener("click", function () { modalHandle.close({ cancelled: true }); });
   actionRow.appendChild(cancelBtn);
 
   var submitBtn = document.createElement("button");
   submitBtn.type = "button";
+  submitBtn.className = "primary";
   submitBtn.textContent = pendingResId ? "確認並繼續提交補充資料" : "確認並提交補充資料";
   submitBtn.style.cssText = "padding:8px 16px;border:none;background:#0066cc;color:#fff;border-radius:4px;cursor:pointer;font-weight:bold;";
 
@@ -523,7 +502,7 @@ function openSupplementDialog(cell, preview) {
       };
 
       postJson("/workspace/coverage/supplement", suppBody).then(function (result) {
-        overlay.remove();
+        modalHandle.close();
         renderMutationInvalidation(result.downstream_invalidation);
         setCoverageNotice("已成功提交補充資料（來源 ID: " + (result.source_id || "建立中") + "，分片數: " + (result.chunk_count || 0) + "）。" + (result.next_step ? " " + result.next_step : ""));
         void loadCoverageCenterData();
@@ -563,27 +542,23 @@ function openSupplementDialog(cell, preview) {
 
   actionRow.appendChild(submitBtn);
   modal.appendChild(actionRow);
-  overlay.appendChild(modal);
-  document.body.appendChild(overlay);
+  document.body.appendChild(modalHandle.overlay);
+  modalHandle.focusFirst();
 }
 
 function openCreativeCompletionDialog(cell, preview) {
   var assessment = coverageAssessmentRef();
   if (assessment === undefined) return;
 
-  var activeElementBeforeModal = document.activeElement;
   var operationId = typeof generateIdempotencyKey === "function" ? generateIdempotencyKey() : ("op-creative-" + Date.now());
 
-  var overlay = document.createElement("div");
-  overlay.className = "dialog-overlay";
-  overlay.setAttribute("role", "presentation");
-
-  var modal = document.createElement("div");
-  modal.className = "dialog-modal";
-  modal.setAttribute("role", "dialog");
-  modal.setAttribute("aria-modal", "true");
-  modal.setAttribute("aria-labelledby", "creative-modal-title");
-  modal.setAttribute("aria-describedby", "creative-modal-desc");
+  var modalHandle = createAccessibleModal({
+    id: "creative-modal-overlay",
+    titleId: "creative-modal-title",
+    dialogClass: "dialog-modal",
+    initialFocusSelector: "input.dialog-input, textarea"
+  });
+  var modal = modalHandle.modal;
 
   var title = document.createElement("h3");
   title.id = "creative-modal-title";
@@ -674,24 +649,7 @@ function openCreativeCompletionDialog(cell, preview) {
   cancelBtn.type = "button";
   cancelBtn.textContent = "取消";
   cancelBtn.className = "btn-secondary";
-
-  function closeModal() {
-    overlay.remove();
-    document.removeEventListener("keydown", handleKeyDown);
-    if (activeElementBeforeModal && typeof activeElementBeforeModal.focus === "function") {
-      try { activeElementBeforeModal.focus(); } catch (e) {}
-    }
-  }
-
-  function handleKeyDown(event) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeModal();
-    }
-  }
-
-  cancelBtn.addEventListener("click", closeModal);
-  document.addEventListener("keydown", handleKeyDown);
+  cancelBtn.addEventListener("click", function () { modalHandle.close({ cancelled: true }); });
   actionRow.appendChild(cancelBtn);
 
   var submitBtn = document.createElement("button");
@@ -726,7 +684,7 @@ function openCreativeCompletionDialog(cell, preview) {
         operation_id: operationId,
       });
 
-      closeModal();
+      modalHandle.close();
       setCoverageNotice("已成功確認創作補全授權。");
       renderMutationInvalidation(result.downstream_invalidation);
       await loadCoverageCenterData();
@@ -747,7 +705,7 @@ function openCreativeCompletionDialog(cell, preview) {
         reloadBtn.textContent = "重新載入覆蓋中心";
         reloadBtn.className = "btn-primary";
         reloadBtn.addEventListener("click", function () {
-          closeModal();
+          modalHandle.close();
           void loadCoverageCenterData();
         });
         actionRow.appendChild(reloadBtn);
@@ -760,12 +718,8 @@ function openCreativeCompletionDialog(cell, preview) {
 
   actionRow.appendChild(submitBtn);
   modal.appendChild(actionRow);
-  overlay.appendChild(modal);
-  document.body.appendChild(overlay);
-
-  setTimeout(function () {
-    choiceInput.focus();
-  }, 50);
+  document.body.appendChild(modalHandle.overlay);
+  modalHandle.focusFirst();
 }
 
 function previewCoverageResolution(cell, action) {
@@ -855,7 +809,7 @@ function renderCellActionButton(cell, actionOpt) {
           targetEl = document.querySelector('[data-task-id="' + targetTaskId + '"]');
         }
         if (targetEl && targetEl.scrollIntoView) {
-          targetEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          targetEl.scrollIntoView({ behavior: typeof reducedMotion === "function" && reducedMotion() ? "auto" : "smooth", block: "center" });
           if (targetEl.style) targetEl.style.outline = "2px solid #0066cc";
           setTimeout(function () { if (targetEl && targetEl.style) targetEl.style.outline = ""; }, 2000);
         }
@@ -896,7 +850,7 @@ function renderCellActionButton(cell, actionOpt) {
         (typeof document !== "undefined" && document.querySelector ? document.querySelector('[data-task-id="' + targetId + '"]') : null) ||
         (typeof byId === "function" ? byId(targetId) : null);
       if (el && el.scrollIntoView) {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.scrollIntoView({ behavior: typeof reducedMotion === "function" && reducedMotion() ? "auto" : "smooth", block: "center" });
         if (el.style) el.style.outline = "2px solid #0066cc";
         setTimeout(function () { if (el && el.style) el.style.outline = ""; }, 2000);
       }
@@ -1148,17 +1102,13 @@ function renderCoverageCenter(payload) {
 }
 
 function openTaskContextModal(task) {
-  var activeElementBeforeModal = document.activeElement;
-
-  var overlay = document.createElement("div");
-  overlay.className = "dialog-overlay";
-  overlay.setAttribute("role", "presentation");
-
-  var modal = document.createElement("div");
-  modal.className = "dialog-modal";
-  modal.setAttribute("role", "dialog");
-  modal.setAttribute("aria-modal", "true");
-  modal.setAttribute("aria-labelledby", "task-context-title");
+  var modalHandle = createAccessibleModal({
+    id: "task-context-modal-overlay",
+    titleId: "task-context-title",
+    dialogClass: "dialog-modal",
+    initialFocusSelector: "button"
+  });
+  var modal = modalHandle.modal;
   modal.setAttribute("aria-describedby", "task-context-desc");
 
   var title = document.createElement("h3");
@@ -1245,7 +1195,7 @@ function openTaskContextModal(task) {
       jumpBtn.textContent = "前往 Operations 面板並聚焦";
       jumpBtn.addEventListener("click", (function (targetOpId) {
         return function () {
-          closeModal();
+          modalHandle.close();
           switchPanel("operations");
           void revealDiagnosticTarget({ kind: "operation", id: targetOpId, panel: "operations" });
         };
@@ -1277,30 +1227,11 @@ function openTaskContextModal(task) {
   closeBtn.type = "button";
   closeBtn.textContent = "關閉";
   closeBtn.className = "btn-secondary";
-
-  function closeModal() {
-    overlay.remove();
-    document.removeEventListener("keydown", handleKeyDown);
-    if (activeElementBeforeModal && typeof activeElementBeforeModal.focus === "function") {
-      try { activeElementBeforeModal.focus(); } catch (e) {}
-    }
-  }
-
-  function handleKeyDown(event) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeModal();
-    }
-  }
-
-  closeBtn.addEventListener("click", closeModal);
-  document.addEventListener("keydown", handleKeyDown);
+  closeBtn.addEventListener("click", function () { modalHandle.close(); });
   actionRow.appendChild(closeBtn);
   modal.appendChild(actionRow);
-  overlay.appendChild(modal);
-  document.body.appendChild(overlay);
-
-  setTimeout(function () { closeBtn.focus(); }, 50);
+  document.body.appendChild(modalHandle.overlay);
+  modalHandle.focusFirst();
 }
 
 function researchTaskElement(task) {

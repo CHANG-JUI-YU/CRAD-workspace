@@ -27,7 +27,7 @@ function navigateWorkflowTarget(target) {
   if (anchor.indexOf("#") === 0) anchor = anchor.slice(1);
   var panel = byId(anchor);
   if (panel === null) return;
-  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  panel.scrollIntoView({ behavior: typeof reducedMotion === "function" && reducedMotion() ? "auto" : "smooth", block: "start" });
 }
 
 function workflowStageElement(stage) {

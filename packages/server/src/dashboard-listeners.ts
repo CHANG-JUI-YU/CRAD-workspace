@@ -40,7 +40,7 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
         var panel = byId("project-panel");
         if (panel) {
           panel.hidden = false;
-          panel.scrollIntoView({ behavior: "smooth", block: "start" });
+          panel.scrollIntoView({ behavior: typeof reducedMotion === "function" && reducedMotion() ? "auto" : "smooth", block: "start" });
         }
         var select = byId("project-select");
         if (select) select.focus();

@@ -974,7 +974,171 @@ function renderLatestError(label, error, prefix) {
         syncAllControls();
       }
 
+      var currentActiveModal = null;
+
+      function createAccessibleModal(options) {
+        if (!options || typeof options !== "object") options = {};
+        if (currentActiveModal && typeof currentActiveModal.close === "function") {
+          currentActiveModal.close({ cancelled: true, suppressFocusRestore: true });
+        }
+
+        var previousActiveElement = (typeof document !== "undefined" && document.activeElement) ? document.activeElement : null;
+        var previousBodyOverflow = (typeof document !== "undefined" && document.body && document.body.style) ? document.body.style.overflow : "";
+
+        if (typeof document !== "undefined" && document.body && document.body.style) {
+          document.body.style.overflow = "hidden";
+        }
+
+        var overlay = document.createElement("div");
+        overlay.className = "modal-overlay" + (options.overlayClass ? " " + options.overlayClass : "");
+        if (options.id) overlay.id = options.id;
+        overlay.setAttribute("role", "presentation");
+
+        var modal = document.createElement("div");
+        modal.className = "modal-dialog" + (options.dialogClass ? " " + options.dialogClass : "");
+        modal.setAttribute("role", "dialog");
+        modal.setAttribute("aria-modal", "true");
+        modal.tabIndex = -1;
+
+        var titleId = options.titleId || ("modal-title-" + Math.random().toString(36).slice(2, 9));
+        if (options.titleText) {
+          var titleEl = document.createElement("h3");
+          titleEl.id = titleId;
+          titleEl.className = "modal-title";
+          titleEl.textContent = options.titleText;
+          modal.appendChild(titleEl);
+          modal.setAttribute("aria-labelledby", titleId);
+        } else if (options.titleId) {
+          modal.setAttribute("aria-labelledby", options.titleId);
+        } else if (options.ariaLabel) {
+          modal.setAttribute("aria-label", options.ariaLabel);
+        }
+
+        var isClosed = false;
+
+        function getFocusableElements() {
+          if (!modal || !modal.querySelectorAll) return [];
+          var selector = 'button:not([disabled]):not([aria-hidden="true"]), ' +
+                         '[href]:not([aria-hidden="true"]), ' +
+                         'input:not([disabled]):not([type="hidden"]):not([aria-hidden="true"]), ' +
+                         'select:not([disabled]):not([aria-hidden="true"]), ' +
+                         'textarea:not([disabled]):not([aria-hidden="true"]), ' +
+                         '[tabindex]:not([tabindex="-1"]):not([disabled]):not([aria-hidden="true"])';
+          var list = modal.querySelectorAll(selector);
+          return Array.prototype.slice.call(list);
+        }
+
+        function handleKeyDown(event) {
+          if (isClosed) return;
+          var key = event.key || event.keyCode;
+          var isEscape = key === "Escape" || key === "Esc" || key === 27;
+          var isTab = key === "Tab" || key === 9;
+
+          if (isEscape) {
+            if (options.allowEscape !== false) {
+              if (event.preventDefault) event.preventDefault();
+              if (event.stopPropagation) event.stopPropagation();
+              close({ cancelled: true });
+            }
+            return;
+          }
+
+          if (isTab) {
+            var focusables = getFocusableElements();
+            if (focusables.length === 0) {
+              if (event.preventDefault) event.preventDefault();
+              modal.focus();
+              return;
+            }
+            var first = focusables[0];
+            var last = focusables[focusables.length - 1];
+            var active = document.activeElement;
+
+            if (event.shiftKey) {
+              if (active === first || active === modal) {
+                if (event.preventDefault) event.preventDefault();
+                last.focus();
+              }
+            } else {
+              if (active === last) {
+                if (event.preventDefault) event.preventDefault();
+                first.focus();
+              }
+            }
+          }
+        }
+
+        function close(closeOptions) {
+          if (isClosed) return;
+          isClosed = true;
+          if (currentActiveModal === modalHandle) {
+            currentActiveModal = null;
+          }
+          if (typeof document !== "undefined") {
+            if (document.removeEventListener) {
+              document.removeEventListener("keydown", handleKeyDown, true);
+            }
+            if (document.body && document.body.style) {
+              document.body.style.overflow = previousBodyOverflow;
+            }
+          }
+          if (overlay && overlay.parentNode) {
+            overlay.parentNode.removeChild(overlay);
+          }
+          var suppressRestore = closeOptions && closeOptions.suppressFocusRestore;
+          if (!suppressRestore && previousActiveElement && typeof previousActiveElement.focus === "function") {
+            try {
+              previousActiveElement.focus();
+            } catch (err) {}
+          }
+          if (closeOptions && closeOptions.cancelled && typeof options.onCancel === "function") {
+            try {
+              options.onCancel();
+            } catch (err) {}
+          }
+          if (typeof options.onClose === "function") {
+            try {
+              options.onClose(closeOptions);
+            } catch (err) {}
+          }
+        }
+
+        if (typeof document !== "undefined" && document.addEventListener) {
+          document.addEventListener("keydown", handleKeyDown, true);
+        }
+
+        overlay.appendChild(modal);
+
+        var modalHandle = {
+          overlay: overlay,
+          modal: modal,
+          titleId: titleId,
+          close: close,
+          focusFirst: function () {
+            var target = null;
+            if (options.initialFocusSelector) {
+              target = modal.querySelector(options.initialFocusSelector);
+            }
+            if (!target) {
+              var focusables = getFocusableElements();
+              if (focusables.length > 0) target = focusables[0];
+            }
+            if (!target) target = modal;
+            if (target && typeof target.focus === "function") {
+              try { target.focus(); } catch (e) {}
+            }
+          }
+        };
+
+        currentActiveModal = modalHandle;
+        return modalHandle;
+      }
+
       function resetProjectScopedState() {
+        if (typeof currentActiveModal !== "undefined" && currentActiveModal && typeof currentActiveModal.close === "function") {
+          currentActiveModal.close({ cancelled: true, suppressFocusRestore: true });
+        }
+
         state.status = null;
         state.interviewQuestion = null;
         state.interviewRevision = 0;

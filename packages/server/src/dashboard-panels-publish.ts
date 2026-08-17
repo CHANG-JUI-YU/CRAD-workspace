@@ -108,6 +108,14 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         staleDiff: null
       };
 
+      var STEPPER_STATUS_LABELS = {
+        waiting: "等待中",
+        current: "進行中",
+        pass: "已完成",
+        stale: "已過期",
+        blocked: "已阻擋"
+      };
+
       function updatePublishStepper(stage, status, details) {
         publishStepperState.stage = stage;
         publishStepperState.status = status;
@@ -126,13 +134,25 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
             el.className = "stepper-step";
             if (stepIdx < currentIdx) {
               el.classList.add("pass");
-              if (badge) badge.textContent = "pass";
+              el.removeAttribute("aria-current");
+              if (badge) {
+                badge.textContent = STEPPER_STATUS_LABELS.pass;
+                badge.setAttribute("data-status", "pass");
+              }
             } else if (stepIdx === currentIdx) {
               var cls = status === "stale" ? "stale" : (status === "blocked" ? "blocked" : (status === "pass" ? "pass" : "current"));
               el.classList.add(cls);
-              if (badge) badge.textContent = status;
+              el.setAttribute("aria-current", "step");
+              if (badge) {
+                badge.textContent = STEPPER_STATUS_LABELS[status] || status;
+                badge.setAttribute("data-status", status);
+              }
             } else {
-              if (badge) badge.textContent = "waiting";
+              el.removeAttribute("aria-current");
+              if (badge) {
+                badge.textContent = STEPPER_STATUS_LABELS.waiting;
+                badge.setAttribute("data-status", "waiting");
+              }
             }
           }
         }
@@ -1164,8 +1184,10 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
             var a = document.createElement("a");
             a.href = url;
             a.download = firstString(result, ["filename"]) || ("card." + kind);
+            document.body.appendChild(a);
             a.click();
-            URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
             return result;
           }).catch(function (error) {
             setAreaError("publish-completion", error);
@@ -1588,7 +1610,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        URL.revokeObjectURL(url);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
       }
 
       var cachedOperations = [];
@@ -1639,17 +1661,12 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
       }
 
       function openReuploadModal(operation) {
-        var overlay = document.createElement("div");
-        overlay.id = "reupload-modal-overlay";
-        overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;";
-
-        var modal = document.createElement("div");
-        modal.style.cssText = "background:#fff;border-radius:8px;max-width:500px;width:100%;padding:24px;box-shadow:0 4px 20px rgba(0,0,0,0.25);font-family:inherit;";
-
-        var title = document.createElement("h3");
-        title.style.cssText = "margin-top:0;margin-bottom:12px;";
-        title.textContent = "重新上傳附件 — Operation " + operation.id;
-        modal.appendChild(title);
+        var modalHandle = createAccessibleModal({
+          id: "reupload-modal-overlay",
+          titleText: "重新上傳附件 — Operation " + operation.id,
+          initialFocusSelector: 'input[type="file"]'
+        });
+        var modal = modalHandle.modal;
 
         var desc = document.createElement("p");
         desc.style.cssText = "font-size:0.9em;color:#555;margin-bottom:12px;";
@@ -1672,7 +1689,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
         var cancelBtn = document.createElement("button");
         cancelBtn.type = "button";
         cancelBtn.textContent = "取消";
-        cancelBtn.addEventListener("click", function () { overlay.remove(); });
+        cancelBtn.addEventListener("click", function () { modalHandle.close({ cancelled: true }); });
         actionRow.appendChild(cancelBtn);
 
         var submitBtn = document.createElement("button");
@@ -1710,7 +1727,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
               operation_id: operation.id,
               replacements: replacements,
             });
-            overlay.remove();
+            modalHandle.close();
             await loadOperationData();
             if (res && res.summary) setNotice("success", res.summary);
           } catch (e) {
@@ -1723,8 +1740,8 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
 
         actionRow.appendChild(submitBtn);
         modal.appendChild(actionRow);
-        overlay.appendChild(modal);
-        document.body.appendChild(overlay);
+        document.body.appendChild(modalHandle.overlay);
+        modalHandle.focusFirst();
       }
 
       function renderOperationList(operations) {
@@ -1886,7 +1903,7 @@ export const DASHBOARD_PANELS_PUBLISH_JS = `      function renderPrecheckMatrix(
               var inputEl = byId("request-input");
               if (inputEl) {
                 inputEl.focus();
-                inputEl.scrollIntoView({ behavior: "smooth" });
+                inputEl.scrollIntoView({ behavior: typeof reducedMotion === "function" && reducedMotion() ? "auto" : "smooth" });
               }
             });
             actions.append(newReq);

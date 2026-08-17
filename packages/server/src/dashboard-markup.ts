@@ -178,13 +178,13 @@ export const DASHBOARD_MARKUP = `<body>
           <p class="muted">嚴格遵循五階段發布狀態機，以可追溯的 Provenance 快照完成不可變確認與發布。</p>
         </div>
       </div>
-      <div id="publish-stepper" class="publish-stepper" aria-label="發布流程階段">
-        <div class="stepper-step current" data-step="readiness"><span class="step-num">1</span><span class="step-label">發布就緒</span><span class="step-badge">waiting</span></div>
-        <div class="stepper-step" data-step="inputs_frozen"><span class="step-num">2</span><span class="step-label">輸入凍結</span><span class="step-badge">waiting</span></div>
-        <div class="stepper-step" data-step="provenance_reviewed"><span class="step-num">3</span><span class="step-label">Provenance 審查</span><span class="step-badge">waiting</span></div>
-        <div class="stepper-step" data-step="confirmed"><span class="step-num">4</span><span class="step-label">發布確認</span><span class="step-badge">waiting</span></div>
-        <div class="stepper-step" data-step="published"><span class="step-num">5</span><span class="step-label">發布完成</span><span class="step-badge">waiting</span></div>
-      </div>
+      <ol id="publish-stepper" class="publish-stepper" aria-label="發布流程階段">
+        <li class="stepper-step current" data-step="readiness" aria-current="step"><span class="step-num">1</span><span class="step-label">發布就緒</span><span class="step-badge">進行中</span></li>
+        <li class="stepper-step" data-step="inputs_frozen"><span class="step-num">2</span><span class="step-label">輸入凍結</span><span class="step-badge">等待中</span></li>
+        <li class="stepper-step" data-step="provenance_reviewed"><span class="step-num">3</span><span class="step-label">Provenance 審查</span><span class="step-badge">等待中</span></li>
+        <li class="stepper-step" data-step="confirmed"><span class="step-num">4</span><span class="step-label">發布確認</span><span class="step-badge">等待中</span></li>
+        <li class="stepper-step" data-step="published"><span class="step-num">5</span><span class="step-label">發布完成</span><span class="step-badge">等待中</span></li>
+      </ol>
       <div class="form-actions publish-controls">
         <select id="readiness-mode" aria-label="就緒檢查打包模式">
           <option value="">依專案自動判斷</option>
