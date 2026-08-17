@@ -128,75 +128,93 @@ export const DASHBOARD_LISTENERS_JS = `      function postOperation(action, oper
         if (primaryCta) {
           primaryCta.disabled = true;
           primaryCta.textContent = "發布中...";
+          primaryCta.setAttribute("aria-busy", "true");
         }
 
-        return runTask("確認並發布", async function () {
-          try {
-            var payload = await postJson("/workspace/publish/provenance/confirm", body, { "X-Workspace-Confirm": "publish" });
-            confirmation.result = payload;
-            if (payload && payload.status === "completed") {
-              confirmation.completed = true;
-              var parts = [];
-              var executionKind = payload.execution_kind;
-              if (executionKind === "replayed") {
-                parts.push("此發布先前已完成，已回傳既有結果（idempotent replay），未建立新輸出。");
-              } else if (executionKind === "resumed") {
-                parts.push("此發布正在進行中；已恢復既有操作。");
-              } else if (executionKind === "republished") {
-                parts.push("已再次發布；新的 Publish Record 已建立。");
-              } else if (payload.idempotent_replay === true) {
-                parts.push("此發布先前已完成，本次為安全重試，未建立重複發布。");
+        try {
+          var outcome = await runTask("確認並發布", async function () {
+            try {
+              var payload = await postJson("/workspace/publish/provenance/confirm", body, { "X-Workspace-Confirm": "publish" });
+              confirmation.result = payload;
+              if (payload && payload.status === "completed") {
+                confirmation.completed = true;
+                var parts = [];
+                var executionKind = payload.execution_kind;
+                if (executionKind === "replayed") {
+                  parts.push("此發布先前已完成，已回傳既有結果（idempotent replay），未建立新輸出。");
+                } else if (executionKind === "resumed") {
+                  parts.push("此發布正在進行中；已恢復既有操作。");
+                } else if (executionKind === "republished") {
+                  parts.push("已再次發布；新的 Publish Record 已建立。");
+                } else if (payload.idempotent_replay === true) {
+                  parts.push("此發布先前已完成，本次為安全重試，未建立重複發布。");
+                } else {
+                  parts.push("發布完成；Publish Record 已保存同一份確認的 provenance refs。");
+                }
+                if (payload.build_id) parts.push("Build ID: " + payload.build_id);
+                if (payload.publish_id) parts.push("Publish ID: " + payload.publish_id);
+                if (payload.published_at) parts.push("發布時間: " + payload.published_at);
+                if (messageEl) messageEl.textContent = parts.join(" · ");
+                updatePublishStepper("published", "pass");
+                if (confirmButton) confirmButton.textContent = executionKind === "replayed" ? "已完成（可安全重試）" : "發布完成";
+                if (payload.publish_id) {
+                  loadPublishCompletion(payload.publish_id);
+                }
+              } else if (payload && (payload.status === "running" || payload.status === "resolving" || payload.status === "created")) {
+                if (messageEl) messageEl.textContent = "發布操作正在背景進行中（狀態：" + payload.status + "）…";
+                if (primaryCta) primaryCta.textContent = "處理中...";
               } else {
-                parts.push("發布完成；Publish Record 已保存同一份確認的 provenance refs。");
+                if (messageEl) messageEl.textContent = "發布未完成：" + ((payload && payload.summary) || (payload && payload.status) || "請重新準備確認。");
+                updatePublishStepper("provenance_reviewed", "blocked");
               }
-              if (payload.build_id) parts.push("Build ID: " + payload.build_id);
-              if (payload.publish_id) parts.push("Publish ID: " + payload.publish_id);
-              if (payload.published_at) parts.push("發布時間: " + payload.published_at);
-              messageEl.textContent = parts.join(" · ");
-              updatePublishStepper("published", "pass");
-              if (confirmButton) confirmButton.textContent = executionKind === "replayed" ? "已完成（可安全重試）" : "發布完成";
-              if (payload.publish_id) {
-                loadPublishCompletion(payload.publish_id);
-              }
-            } else if (payload && (payload.status === "running" || payload.status === "resolving" || payload.status === "created")) {
-              messageEl.textContent = "發布操作正在背景進行中（狀態：" + payload.status + "）…";
-              if (primaryCta) primaryCta.textContent = "處理中...";
-            } else {
-              messageEl.textContent = "發布未完成：" + ((payload && payload.summary) || (payload && payload.status) || "請重新準備確認。");
-              updatePublishStepper("provenance_reviewed", "blocked");
-            }
-            await Promise.allSettled([loadDashboardData(), loadProvenanceHistory()]);
-            return payload;
-          } catch (error) {
-            var errorMsg = (error && error.message) ? error.message : String(error);
-            var isStale = errorMsg.indexOf("PROVENANCE_CONFIRMATION_STALE") !== -1 || (error && error.code === "PROVENANCE_CONFIRMATION_STALE");
-            var isConflict = errorMsg.indexOf("IDEMPOTENCY_CONFLICT") !== -1 || (error && error.code === "IDEMPOTENCY_CONFLICT");
+              await Promise.allSettled([loadDashboardData(), loadProvenanceHistory()]);
+              return payload;
+            } catch (error) {
+              var errorMsg = (error && error.message) ? error.message : String(error);
+              var isStale = errorMsg.indexOf("PROVENANCE_CONFIRMATION_STALE") !== -1 || (error && error.code === "PROVENANCE_CONFIRMATION_STALE");
+              var isConflict = errorMsg.indexOf("IDEMPOTENCY_CONFLICT") !== -1 || (error && error.code === "IDEMPOTENCY_CONFLICT");
 
-            if (isStale) {
-              var details = error && error.details;
-              if (details && Array.isArray(details.changed_inputs)) {
-                renderStaleDiff(details.changed_inputs);
+              if (isStale) {
+                var details = error && error.details;
+                if (details && Array.isArray(details.changed_inputs)) {
+                  renderStaleDiff(details.changed_inputs);
+                }
+                if (messageEl) messageEl.textContent = "發布確認已過期失效（輸入狀態已變更），請檢視差異並重新準備確認。";
+                var provCard = document.querySelector(".provenance-card");
+                if (provCard) provCard.classList.add("stale-border");
+                updatePublishStepper("inputs_frozen", "stale");
+              } else if (isConflict) {
+                if (messageEl) messageEl.textContent = "衝突錯誤：此確認識別已用於不同的發布內容，請重新準備發布確認。";
+                updatePublishStepper("provenance_reviewed", "blocked");
+              } else {
+                if (messageEl) messageEl.textContent = "發布請求失敗：" + errorMsg + "（可再次點擊重試）";
+                updatePublishStepper("provenance_reviewed", "blocked");
               }
-              messageEl.textContent = "發布確認已過期失效（輸入狀態已變更），請檢視差異並重新準備確認。";
-              var provCard = document.querySelector(".provenance-card");
-              if (provCard) provCard.classList.add("stale-border");
-              updatePublishStepper("inputs_frozen", "stale");
-            } else if (isConflict) {
-              messageEl.textContent = "衝突錯誤：此確認識別已用於不同的發布內容，請重新準備發布確認。";
-              updatePublishStepper("provenance_reviewed", "blocked");
-            } else {
-              messageEl.textContent = "發布請求失敗：" + errorMsg + "（可再次點擊重試）";
+              throw error;
             }
-            throw error;
-          } finally {
+          }, "confirm-publish");
+
+          if (outcome && outcome.status === "busy_rejected") {
             confirmation.in_flight = false;
-            if (confirmButton && !confirmation.completed) {
-              confirmButton.disabled = confirmation.fingerprint === "";
-            } else if (confirmButton && confirmation.completed) {
-              confirmButton.disabled = false;
-            }
+            if (messageEl) messageEl.textContent = "系統正在執行其他操作，發布請求未送出。請等待前一項操作完成後再試。";
+            updatePublishStepper(publishStepperState.stage || "provenance_reviewed", publishStepperState.status || "pass");
           }
-        });
+          return outcome;
+        } finally {
+          confirmation.in_flight = false;
+          if (primaryCta) {
+            primaryCta.removeAttribute("aria-busy");
+          }
+          if (confirmButton && !confirmation.completed) {
+            confirmButton.disabled = confirmation.fingerprint === "";
+          } else if (confirmButton && confirmation.completed) {
+            confirmButton.disabled = false;
+          }
+          if (!confirmation.completed) {
+            updatePublishStepper(publishStepperState.stage, publishStepperState.status);
+          }
+          if (typeof syncAllControls === "function") syncAllControls();
+        }
       }
 
       byId("check-readiness").addEventListener("click", function () { void triggerCheckReadiness(); });

@@ -800,44 +800,178 @@ export const DASHBOARD_PANELS_CORE_JS = `      function byId(value) {
 
 function renderLatestError(label, error, prefix) {
         var target = byId("latest-summary");
-        target.className = "notice error";
-        target.textContent = (prefix ? prefix + "；" : label + "；") + errorText(error);
-        byId("latest-json").textContent = jsonText(errorSnapshot(error));
-        byId("latest-details").open = true;
+        if (target) {
+          target.className = "notice error";
+          target.textContent = (prefix ? prefix + "；" : label + "；") + errorText(error);
+        }
+        var jsonEl = byId("latest-json");
+        if (jsonEl) jsonEl.textContent = jsonText(errorSnapshot(error));
+        var detailsEl = byId("latest-details");
+        if (detailsEl) detailsEl.open = true;
         renderRecoveryCards(byId("latest-recovery"), error, { projectId: currentProjectId(), onRetry: refresh });
       }
 
       function setNotice(kind, text) {
-        var target = byId("latest-summary");
-        target.className = "notice " + kind;
+        var target = byId("transient-notice");
+        if (!target) {
+          target = byId("latest-summary");
+        }
+        if (!target) return;
+        if (!text || text.trim() === "") {
+          target.hidden = true;
+          target.textContent = "";
+          return;
+        }
+        target.hidden = false;
+        target.className = "transient-notice " + (kind || "info");
         target.textContent = text;
       }
 
+      function updateLastUpdated(timeIso) {
+        state.lastUpdated = timeIso || new Date().toISOString();
+        var indicator = byId("last-updated-indicator");
+        if (indicator) {
+          try {
+            var dateObj = new Date(state.lastUpdated);
+            var hours = String(dateObj.getHours()).padStart(2, "0");
+            var minutes = String(dateObj.getMinutes()).padStart(2, "0");
+            var seconds = String(dateObj.getSeconds()).padStart(2, "0");
+            indicator.textContent = "最後更新：" + hours + ":" + minutes + ":" + seconds;
+          } catch (e) {
+            indicator.textContent = "最後更新：" + state.lastUpdated;
+          }
+        }
+      }
+
+      function setControlDomainDisabled(control, disabled, reason) {
+        if (!control) return;
+        if (disabled) {
+          control.setAttribute("data-domain-disabled", "true");
+          if (reason) {
+            control.setAttribute("data-disabled-reason", reason);
+            control.title = reason;
+          }
+        } else {
+          control.removeAttribute("data-domain-disabled");
+          control.removeAttribute("data-disabled-reason");
+        }
+        syncControlDisabledState(control);
+      }
+
+      function isReadOnlySafeControl(control) {
+        if (!control) return false;
+        var tag = control.tagName ? control.tagName.toLowerCase() : "";
+        if (tag === "nav" || (typeof control.className === "string" && (control.className.indexOf("nav-button") !== -1 || control.className.indexOf("section-nav-link") !== -1))) return true;
+        var ariaRole = control.getAttribute("role");
+        if (ariaRole === "tab" || ariaRole === "navigation") return true;
+        if (typeof control.className === "string" && (control.className.indexOf("prerequisite-nav-btn") !== -1 || control.className.indexOf("action-link") !== -1)) return true;
+        return false;
+      }
+
+      function syncControlDisabledState(control) {
+        if (!control) return;
+        var isDomainDisabled = control.getAttribute("data-domain-disabled") === "true";
+        var isActionBusy = control.getAttribute("data-action-busy") === "true";
+        var isGlobalBusy = state.busy === true;
+
+        if (isDomainDisabled) {
+          control.disabled = true;
+          return;
+        }
+        if (isActionBusy) {
+          control.disabled = true;
+          return;
+        }
+        if (isGlobalBusy) {
+          if (isReadOnlySafeControl(control)) {
+            control.disabled = false;
+          } else {
+            control.disabled = true;
+          }
+          return;
+        }
+        control.disabled = false;
+      }
+
+      function syncAllControls() {
+        var projSelect = byId("project-select");
+        if (projSelect) {
+          setControlDomainDisabled(projSelect, state.projects.length === 0);
+        }
+        var selectProjBtn = byId("select-project");
+        if (selectProjBtn) {
+          setControlDomainDisabled(selectProjBtn, state.projects.length === 0 || !(projSelect && projSelect.value));
+        }
+        var agentSelect = byId("agent-select");
+        if (agentSelect) {
+          setControlDomainDisabled(agentSelect, state.agents.length === 0);
+        }
+        var submitInterviewBtn = byId("submit-interview");
+        if (submitInterviewBtn) {
+          setControlDomainDisabled(submitInterviewBtn, !state.interviewQuestion);
+        }
+        var interviewAnswerInput = byId("interview-answer-input");
+        if (interviewAnswerInput) {
+          setControlDomainDisabled(interviewAnswerInput, !state.interviewQuestion);
+        }
+        var interviewChoices = document.querySelectorAll("#interview-choices button");
+        for (var i = 0; i < interviewChoices.length; i += 1) {
+          setControlDomainDisabled(interviewChoices[i], !state.interviewQuestion);
+        }
+
+        var allControls = document.querySelectorAll("button, select, textarea, input");
+        for (var j = 0; j < allControls.length; j += 1) {
+          syncControlDisabledState(allControls[j]);
+        }
+      }
+
       function setBusy(value) {
-        state.busy = value;
-        byId("busy-indicator").textContent = value ? "執行中，操作按鈕暫時停用…" : "";
-        document.querySelectorAll("button, select, textarea").forEach(function (control) {
-          control.disabled = value;
-        });
-        updateControls();
-        document.body.setAttribute("aria-busy", value ? "true" : "false");
+        state.busy = !!value;
+        var busyIndicator = byId("busy-indicator");
+        if (busyIndicator) {
+          busyIndicator.textContent = value ? "執行中，操作按鈕暫時停用…" : "";
+        }
+        if (document.body) {
+          document.body.setAttribute("aria-busy", value ? "true" : "false");
+        }
+        syncAllControls();
       }
 
       function setActionBusy(controlId, busy) {
-        var control = byId(controlId);
-        if (control) control.disabled = busy;
+        if (!controlId) return;
+        if (typeof state !== "undefined" && state && state.actionBusy) {
+          state.actionBusy[controlId] = !!busy;
+        }
+        var byIdEl = typeof byId === "function" ? byId(controlId) : null;
+        if (byIdEl) {
+          if (typeof byIdEl.setAttribute === "function") {
+            if (busy) byIdEl.setAttribute("data-action-busy", "true");
+            else byIdEl.removeAttribute("data-action-busy");
+          }
+          if (typeof syncControlDisabledState === "function") {
+            syncControlDisabledState(byIdEl);
+          } else {
+            byIdEl.disabled = busy;
+          }
+        }
+        if (typeof document !== "undefined" && document.querySelectorAll) {
+          var matched = document.querySelectorAll('[data-action-key="' + controlId + '"], [data-action="' + controlId + '"]');
+          for (var i = 0; i < matched.length; i += 1) {
+            if (typeof matched[i].setAttribute === "function") {
+              if (busy) matched[i].setAttribute("data-action-busy", "true");
+              else matched[i].removeAttribute("data-action-busy");
+            }
+            if (typeof syncControlDisabledState === "function") {
+              syncControlDisabledState(matched[i]);
+            } else {
+              matched[i].disabled = busy;
+            }
+          }
+        }
       }
 
       function updateControls() {
-        if (state.busy) return;
-        byId("project-select").disabled = state.projects.length === 0;
-        byId("select-project").disabled = state.projects.length === 0 || !byId("project-select").value;
-        byId("agent-select").disabled = state.agents.length === 0;
-        byId("submit-interview").disabled = !state.interviewQuestion;
-        byId("interview-answer-input").disabled = !state.interviewQuestion;
-        document.querySelectorAll("#interview-choices button").forEach(function (button) {
-          button.disabled = !state.interviewQuestion;
-        });
+        syncAllControls();
       }
 
 `;

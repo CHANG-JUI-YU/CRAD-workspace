@@ -804,7 +804,8 @@ function renderCellActionButton(cell, actionOpt) {
   var button = document.createElement("button");
   button.type = "button";
   button.textContent = actionOpt.label;
-  button.setAttribute("data-cell-id", (cell.character_id || "world") + "__" + cell.requirement_id);
+  var cellId = (cell.character_id || "world") + "__" + cell.requirement_id;
+  button.setAttribute("data-cell-id", cellId);
   button.setAttribute("data-scope", cell.scope || (cell.character_id ? "character" : "world"));
   if (cell.character_id) button.setAttribute("data-character-id", cell.character_id);
   button.setAttribute("data-requirement-id", cell.requirement_id);
@@ -814,16 +815,19 @@ function renderCellActionButton(cell, actionOpt) {
 
   if (!actionOpt.enabled) {
     button.disabled = true;
-    if (actionOpt.disabled_reason) {
-      button.title = actionOpt.disabled_reason;
+    button.setAttribute("aria-disabled", "true");
+    button.setAttribute("data-domain-disabled", "true");
+    var descId = "desc-" + cellId + "-" + actionOpt.action;
+    var reason = actionOpt.disabled_reason || (cell.missing_prerequisite ? "前置需求：" + cell.missing_prerequisite : "");
+    if (reason) {
+      button.title = reason;
+      button.setAttribute("data-disabled-reason", reason);
+      button.setAttribute("aria-describedby", descId);
     }
   }
 
   button.addEventListener("click", function () {
     if (!actionOpt.enabled) {
-      if (actionOpt.prerequisite && actionOpt.prerequisite.target_panel) {
-        switchPanel(actionOpt.prerequisite.target_panel);
-      }
       return;
     }
     if (actionOpt.action === "research") {
@@ -846,11 +850,14 @@ function renderCellActionButton(cell, actionOpt) {
         switchPanel(actionOpt.prerequisite.target_panel);
       }
       if (targetTaskId) {
-        var targetEl = byId("research-task-" + targetTaskId) || document.querySelector('[data-task-id="' + targetTaskId + '"]');
-        if (targetEl) {
+        var targetEl = typeof byId === "function" ? byId("research-task-" + targetTaskId) : null;
+        if (!targetEl && typeof document !== "undefined" && document.querySelector) {
+          targetEl = document.querySelector('[data-task-id="' + targetTaskId + '"]');
+        }
+        if (targetEl && targetEl.scrollIntoView) {
           targetEl.scrollIntoView({ behavior: "smooth", block: "center" });
-          targetEl.style.outline = "2px solid #0066cc";
-          setTimeout(function () { targetEl.style.outline = ""; }, 2000);
+          if (targetEl.style) targetEl.style.outline = "2px solid #0066cc";
+          setTimeout(function () { if (targetEl && targetEl.style) targetEl.style.outline = ""; }, 2000);
         }
       }
     } else if (actionOpt.action === "view_details") {
@@ -860,7 +867,51 @@ function renderCellActionButton(cell, actionOpt) {
     }
   });
 
-  return button;
+  if (actionOpt.enabled) {
+    return button;
+  }
+
+  var container = document.createElement("span");
+  container.className = "cell-action-item";
+  container.appendChild(button);
+
+  var targetPanel = (actionOpt.prerequisite && actionOpt.prerequisite.target_panel) || (actionOpt.action === "reassess" ? "coverage" : "coverage");
+  var prereqLabel = (actionOpt.prerequisite && actionOpt.prerequisite.label) || (actionOpt.prerequisite && actionOpt.prerequisite.reason) || actionOpt.disabled_reason || "前置需求未達成";
+
+  var remedyBtn = document.createElement("button");
+  remedyBtn.type = "button";
+  remedyBtn.className = "action-link prerequisite-nav-btn";
+  remedyBtn.setAttribute("data-target-panel", targetPanel);
+  remedyBtn.setAttribute("aria-label", "前往處理前置需求：" + prereqLabel);
+  remedyBtn.textContent = "解決前置：" + (actionOpt.prerequisite && actionOpt.prerequisite.label ? actionOpt.prerequisite.label : (actionOpt.disabled_reason ? actionOpt.disabled_reason.slice(0, 20) : "前置需求"));
+  remedyBtn.addEventListener("click", function () {
+    if (actionOpt.prerequisite && actionOpt.prerequisite.target_panel) {
+      switchPanel(actionOpt.prerequisite.target_panel);
+    } else {
+      switchPanel(targetPanel);
+    }
+    var targetId = actionOpt.target_task_id || (actionOpt.prerequisite ? actionOpt.prerequisite.target_id : null);
+    if (targetId) {
+      var el = (typeof byId === "function" ? byId("research-task-" + targetId) : null) ||
+        (typeof document !== "undefined" && document.querySelector ? document.querySelector('[data-task-id="' + targetId + '"]') : null) ||
+        (typeof byId === "function" ? byId(targetId) : null);
+      if (el && el.scrollIntoView) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        if (el.style) el.style.outline = "2px solid #0066cc";
+        setTimeout(function () { if (el && el.style) el.style.outline = ""; }, 2000);
+      }
+    }
+  });
+
+  var descSpan = document.createElement("span");
+  descSpan.id = "desc-" + cellId + "-" + actionOpt.action;
+  descSpan.className = "prerequisite-desc sr-only";
+  descSpan.textContent = "此操作目前已停用。原因：" + (actionOpt.disabled_reason || prereqLabel);
+
+  container.appendChild(remedyBtn);
+  container.appendChild(descSpan);
+
+  return container;
 }
 
 function coverageCenterCellElement(cell, tasks) {
@@ -1062,15 +1113,24 @@ function renderCoverageCenter(payload) {
   if (wideResearch !== null && wideResearch !== undefined && wideResearch.enabled) {
     allResearchBtn.textContent = "啟動全量缺口研究 (" + wideResearch.target_count + " 個缺口)";
     allResearchBtn.style.cssText = "padding:6px 14px;background:#0066cc;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:bold;";
+    allResearchBtn.disabled = false;
+    allResearchBtn.removeAttribute("data-domain-disabled");
+    allResearchBtn.removeAttribute("aria-disabled");
   } else {
     allResearchBtn.textContent = "全量缺口研究";
     allResearchBtn.disabled = true;
-    allResearchBtn.title = wideResearch !== null && wideResearch !== undefined && wideResearch.disabled_reason ? wideResearch.disabled_reason : "目前不具備全量研究資格";
+    allResearchBtn.setAttribute("data-domain-disabled", "true");
+    allResearchBtn.setAttribute("aria-disabled", "true");
+    var wideReasonText = wideResearch !== null && wideResearch !== undefined && wideResearch.disabled_reason ? wideResearch.disabled_reason : "目前不具備全量研究資格";
+    allResearchBtn.title = wideReasonText;
+    allResearchBtn.setAttribute("data-disabled-reason", wideReasonText);
+    allResearchBtn.setAttribute("aria-describedby", "wide-research-desc");
     allResearchBtn.style.cssText = "padding:6px 14px;background:#b0b8c0;color:#fff;border:none;border-radius:4px;font-weight:bold;";
   }
   topBar.appendChild(allResearchBtn);
   if (wideResearch !== null && wideResearch !== undefined && !wideResearch.enabled && wideResearch.disabled_reason) {
     var wideReason = document.createElement("span");
+    wideReason.id = "wide-research-desc";
     wideReason.className = "muted";
     wideReason.textContent = wideResearch.disabled_reason;
     topBar.appendChild(wideReason);

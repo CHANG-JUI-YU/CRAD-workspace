@@ -3,7 +3,11 @@ export const DASHBOARD_MARKUP = `<body>
     <div>
       <h1>ST Workspace 本機工作台</h1>
       <p class="subtitle">用自然語言與單題訪談操作目前工作區；內部 workflow 參數由既有 runtime 管理。</p>
-      <div id="busy-indicator" class="busy-indicator" aria-live="polite"></div>
+      <div class="header-status-line">
+        <div id="busy-indicator" class="busy-indicator" aria-live="polite"></div>
+        <div id="last-updated-indicator" class="last-updated-indicator" aria-live="polite"></div>
+      </div>
+      <div id="transient-notice" class="transient-notice" aria-live="polite" hidden></div>
     </div>
     <button id="refresh" type="button">重新整理</button>
   </header>

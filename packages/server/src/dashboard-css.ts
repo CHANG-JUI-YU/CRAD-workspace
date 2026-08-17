@@ -92,6 +92,58 @@ export const DASHBOARD_CSS = `  <style>
     .notice.success { color: #1d6240; background: #eaf7ef; }
     .notice.error { color: #8c3030; background: #fff0ef; }
     .notice.info { color: #2c5772; background: #edf4fb; }
+    .header-status-line {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    .last-updated-indicator {
+      font-size: 0.85rem;
+      color: #64748b;
+    }
+    .transient-notice {
+      margin-top: 0.5rem;
+      border-radius: 0.55rem;
+      padding: 0.5rem 0.8rem;
+      font-size: 0.88rem;
+      color: #1e3a8a;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+    }
+    .transient-notice.success { color: #065f46; background: #ecfdf5; border-color: #a7f3d0; }
+    .transient-notice.error { color: #991b1b; background: #fef2f2; border-color: #fecaca; }
+    .transient-notice.warning { color: #92400e; background: #fffbeb; border-color: #fde68a; }
+    .cell-action-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      flex-wrap: wrap;
+    }
+    .prerequisite-nav-btn {
+      font-size: 0.82rem;
+      padding: 0.25rem 0.55rem;
+      border: 1px dashed #2563eb;
+      background: #f8fafc;
+      color: #1d4ed8;
+      border-radius: 0.4rem;
+      cursor: pointer;
+    }
+    .prerequisite-nav-btn:hover:not(:disabled) {
+      background: #eff6ff;
+      border-style: solid;
+    }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border-width: 0;
+    }
     .status-line {
       display: flex;
       align-items: center;

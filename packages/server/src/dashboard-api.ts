@@ -166,12 +166,16 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
         } else {
           renderLatest("重新整理", { status: "completed", summary: "專案、狀態、Agent 與訪談資料已更新。" });
           setNotice("success", "資料已更新。");
+          if (typeof updateLastUpdated === "function") updateLastUpdated();
         }
         setBusy(false);
       }
 
       async function runTask(label, task, busyKey) {
-        if (state.busy) return undefined;
+        if (state.busy) {
+          setNotice("warning", "系統忙碌中，請等待前一項操作完成。");
+          return { ok: false, status: "busy_rejected", reason: "系統忙碌中" };
+        }
         var scopedBusy = busyKey !== undefined && busyKey !== null;
         if (scopedBusy) {
           setActionBusy(busyKey, true);
@@ -183,11 +187,12 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
           var payload = await task();
           renderLatest(label, payload);
           setNotice("success", label + "完成。");
+          if (typeof updateLastUpdated === "function") updateLastUpdated();
           return payload;
         } catch (error) {
           renderLatestError(label, error);
           setNotice("error", label + "失敗；請查看最近回應/診斷區。");
-          return undefined;
+          return { ok: false, status: "failed", error: error };
         } finally {
           if (scopedBusy) {
             setActionBusy(busyKey, false);
@@ -237,6 +242,7 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
           renderOperationList(items);
           var updated = byId("operation-last-updated");
           if (updated) updated.textContent = "最後更新：" + new Date().toLocaleTimeString();
+          if (typeof updateLastUpdated === "function") updateLastUpdated();
         }).catch(function () {});
       }
 
