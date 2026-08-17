@@ -189,7 +189,10 @@ OpenCode 的可見 Agent 另外由專案級設定提供：
 請從此專案根目錄重新啟動 OpenCode；若 OpenCode 已經開啟，需重開工作區或重啟
 TUI 才會重新載入 Agent 清單。
 
-## 使用方式
+## 環境需求與使用方式
+
+- **Node.js**：`>= 20.0.0`
+- **套件管理**：`pnpm >= 10.34.5`
 
 ```text
 pnpm install

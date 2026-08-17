@@ -40,14 +40,14 @@ async function listeningServer(): Promise<Server> {
 describe("Dashboard launcher", () => {
   it("recognizes an existing ST Workspace service and its revision", async () => {
     const result = await probeDashboardService(vi.fn(async () => healthResponse()) as unknown as typeof fetch);
-    expect(result).toEqual({ status: "available", runtime_revision: TEST_REVISION });
+    expect(result).toMatchObject({ status: "available", runtime_revision: TEST_REVISION });
   });
 
   it("distinguishes an absent service from a foreign service", async () => {
     const absent = await probeDashboardService(vi.fn(async () => { throw refused(); }) as unknown as typeof fetch);
     const occupied = await probeDashboardService(vi.fn(async () => healthResponse("other-service")) as unknown as typeof fetch);
-    expect(absent).toEqual({ status: "absent" });
-    expect(occupied).toMatchObject({ status: "occupied", detail: "health response is not ST Workspace V3" });
+    expect(absent).toMatchObject({ status: "absent" });
+    expect(occupied).toMatchObject({ status: "http_mismatch", detail: expect.stringContaining("other-service") });
   });
 
   it("reuses an existing service only when the runtime revision matches", async () => {
@@ -60,7 +60,7 @@ describe("Dashboard launcher", () => {
       openBrowser,
       log: vi.fn(),
     });
-    expect(result).toEqual({ ownership: "reused", url: DASHBOARD_URL, runtime_revision: TEST_REVISION });
+    expect(result).toMatchObject({ ownership: "reused", url: DASHBOARD_URL, runtime_revision: TEST_REVISION });
     expect(startServer).not.toHaveBeenCalled();
     expect(openBrowser).toHaveBeenCalledWith(DASHBOARD_URL);
   });

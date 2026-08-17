@@ -9,6 +9,13 @@ if errorlevel 1 (
   exit /b 1
 )
 
+for /f "tokens=1 delims=v." %%v in ('node -v 2^>nul') do set "NODE_MAJOR=%%v"
+if %NODE_MAJOR% lss 20 (
+  echo DASHBOARD_NODE_UNSUPPORTED: ST Workspace requires Node.js >= 20.0.0. Current version is %NODE_MAJOR%.
+  pause
+  exit /b 1
+)
+
 where pnpm >nul 2>nul
 if errorlevel 1 (
   echo DASHBOARD_PNPM_MISSING: pnpm was not found. Install pnpm and add it to PATH.
