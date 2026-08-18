@@ -84,10 +84,14 @@ export async function body(request: IncomingMessage): Promise<unknown> {
   if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) throw new RequestTooLargeError();
   const chunks: Buffer[] = [];
   let total = 0;
-  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
+  const iterator = request[Symbol.asyncIterator]();
+  while (true) {
+    const next = await iterator.next();
+    if (next.done) break;
+    const chunk = next.value;
     total += chunk.length;
     if (total > MAX_BODY_BYTES) {
-      request.pause();
+      if (typeof request.pause === "function") request.pause();
       throw new RequestTooLargeError();
     }
     chunks.push(Buffer.from(chunk));
