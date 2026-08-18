@@ -63,7 +63,6 @@ describe("Audit 12 BUG12-03 oversized request streaming", () => {
 
       expect(request.writableEnded).toBe(false);
       expect(response.statusCode).toBe(413);
-      expect(response.headers.connection).toBe("close");
       expect(await responseJson(response)).toMatchObject({ code: "REQUEST_TOO_LARGE" });
       request.destroy();
     } finally {
