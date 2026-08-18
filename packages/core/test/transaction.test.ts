@@ -356,8 +356,9 @@ describe("file repository transaction and CAS", () => {
   it("refreshes a live lease so a transaction longer than thirty seconds is not stolen", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-lock-heartbeat-"));
     try {
+      const bootstrap = new FileProjectRepository(root, "demo");
+      const initial = await bootstrap.read();
       const first = new FileProjectRepository(root, "demo", { lock: { lease_ms: 80, heartbeat_ms: 20, timeout_ms: 500 } });
-      const initial = await first.read();
       const second = new FileProjectRepository(root, "demo", { lock: { lease_ms: 80, heartbeat_ms: 20, timeout_ms: 100 } });
       const longCommit = first.transaction(initial.revision, async (state) => {
         await wait(220);
@@ -416,8 +417,9 @@ describe("file repository transaction and CAS", () => {
   it("uses the cross-instance lock when relocating a project", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-relocate-lock-"));
     try {
+      const bootstrap = new FileProjectRepository(root, "demo");
+      const initial = await bootstrap.read();
       const first = new FileProjectRepository(root, "demo", { lock: { lease_ms: 80, heartbeat_ms: 20, timeout_ms: 500 } });
-      const initial = await first.read();
       const second = new FileProjectRepository(root, "demo", { lock: { lease_ms: 80, heartbeat_ms: 20, timeout_ms: 100 } });
       const longCommit = first.transaction(initial.revision, async (state) => {
         await wait(180);
