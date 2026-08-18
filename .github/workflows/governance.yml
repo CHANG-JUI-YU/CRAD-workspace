@@ -1,0 +1,145 @@
+name: Governance
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  pr-governance:
+    name: PR governance
+    if: github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prevent Audit issues from closing at merge time
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.parse
+          import urllib.request
+
+          repo = os.environ["REPOSITORY"]
+          token = os.environ["GH_TOKEN"]
+          pr_number = os.environ["PR_NUMBER"]
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def get_json(url):
+              request = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(request) as response:
+                  return json.load(response)
+
+          sources = [
+              ("PR body", os.environ.get("PR_BODY", "") or ""),
+              ("PR title", os.environ.get("PR_TITLE", "") or ""),
+          ]
+          page = 1
+          while True:
+              query = urllib.parse.urlencode({"per_page": 100, "page": page})
+              commits = get_json(
+                  f"https://api.github.com/repos/{repo}/pulls/{pr_number}/commits?{query}"
+              )
+              for commit in commits:
+                  sha = commit.get("sha", "")[:12]
+                  message = commit.get("commit", {}).get("message", "")
+                  sources.append((f"commit {sha}", message))
+              if len(commits) < 100:
+                  break
+              page += 1
+
+          closing = re.compile(
+              r"(?im)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+"
+              r"(?:(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#)(\d+)\b"
+          )
+          references = {}
+          for source, text in sources:
+              for value in closing.findall(text):
+                  references.setdefault(int(value), set()).add(source)
+
+          if not references:
+              print("No issue-closing keywords found in the PR body, title, or commit messages.")
+              raise SystemExit(0)
+
+          audit_closures = []
+          for number, found_in in sorted(references.items()):
+              issue = get_json(f"https://api.github.com/repos/{repo}/issues/{number}")
+              title = issue.get("title", "")
+              if title.startswith("[AUDIT"):
+                  audit_closures.append((number, title, sorted(found_in)))
+
+          if audit_closures:
+              for number, title, found_in in audit_closures:
+                  print(
+                      f"::error::Audit issue #{number} ({title}) would be auto-closed from "
+                      f"{', '.join(found_in)}. Use 'Refs #<number>' instead; Audit issues close only "
+                      "after merged-main CI, Security, and Governance push evidence succeeds."
+                  )
+              raise SystemExit(1)
+
+          print("Closing keywords only target non-Audit issues; governance check passed.")
+          PY
+
+  main-provenance:
+    name: Main provenance
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify main head came through a merged pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          repo = os.environ["REPOSITORY"]
+          sha = os.environ["MAIN_SHA"]
+          token = os.environ["GH_TOKEN"]
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/commits/{sha}/pulls",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          with urllib.request.urlopen(request) as response:
+              pull_requests = json.load(response)
+
+          merged_to_main = [
+              pr
+              for pr in pull_requests
+              if pr.get("merged_at") and pr.get("base", {}).get("ref") == "main"
+          ]
+          if not merged_to_main:
+              print(
+                  f"::error::main@{sha} is not associated with a pull request merged into main. "
+                  "Direct main pushes violate the normal green-main policy."
+              )
+              raise SystemExit(1)
+
+          numbers = ", ".join(f"#{pr['number']}" for pr in merged_to_main)
+          print(f"Verified main@{sha} originated from merged pull request(s): {numbers}")
+          PY
