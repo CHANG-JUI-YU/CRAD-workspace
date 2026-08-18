@@ -45,13 +45,13 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
   const server = createServer(async (request, response) => {
     let url: URL | null = null;
     try {
-      if (trustedHostnames !== undefined) {
-        assertRequestHostAllowed(request.headers.host, trustedHostnames, request.socket.localPort);
-      }
       url = parseRequestTarget(request.url, "http://localhost");
       if (url === null) {
         restError(response, new CoreError("REQUEST_TARGET_INVALID", "Malformed request target", true));
         return;
+      }
+      if (trustedHostnames !== undefined) {
+        assertRequestHostAllowed(request.headers.host, trustedHostnames, request.socket.localPort);
       }
       if (options.authToken !== undefined) {
         const headerToken = extractBearerToken(request.headers.authorization);
