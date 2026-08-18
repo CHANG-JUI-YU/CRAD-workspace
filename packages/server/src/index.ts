@@ -4,7 +4,7 @@ import { CoreError, FileAttachmentStore, FileProjectRepository } from "@st-works
 import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
 import { dashboard } from "./dashboard.js";
 export { toolDefinitions } from "./mcp-tools.js";
-import { json, restError } from "./http-utils.js";
+import { applyBrowserSecurityHeaders, json, restError } from "./http-utils.js";
 import { extractBearerToken, normalizeAuthToken, parseRequestTarget, timingSafeTextEqual, assertMutationRequestAllowed, assertRequestHostAllowed } from "./http-security.js";
 import { JSONRPC_INTERNAL_ERROR, jsonRpcError } from "./jsonrpc.js";
 import { handleMcpRequest, handleRestRequest, type WorkspaceRouteDeps } from "./routes.js";
@@ -43,6 +43,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
   const trustedHostnames = options.trustedHostnames ?? (options.authToken === undefined ? LOOPBACK_TRUSTED_HOSTNAMES : undefined);
   if (options.autoStartWorker ?? true) worker.start();
   const server = createServer(async (request, response) => {
+    applyBrowserSecurityHeaders(response);
     let url: URL | null = null;
     try {
       url = parseRequestTarget(request.url, "http://localhost");
@@ -55,9 +56,14 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       }
       if (options.authToken !== undefined) {
         const headerToken = extractBearerToken(request.headers.authorization);
-        const queryToken = request.method === "GET" ? url.searchParams.get("token") : null;
+        const queryToken = url.searchParams.get("token");
+        const isDashboardBootstrap = request.method === "GET" && url.pathname === "/";
+        if (queryToken !== null && !isDashboardBootstrap) {
+          restError(response, new CoreError("UNAUTHORIZED", "Query token is only allowed on the Dashboard bootstrap route", true));
+          return;
+        }
         const headerOk = headerToken !== undefined && timingSafeTextEqual(headerToken, options.authToken);
-        const queryOk = queryToken !== null && timingSafeTextEqual(queryToken, options.authToken);
+        const queryOk = isDashboardBootstrap && queryToken !== null && timingSafeTextEqual(queryToken, options.authToken);
         if (!headerOk && !queryOk) {
           restError(response, new CoreError("UNAUTHORIZED", "Missing or invalid bearer token", true));
           return;
