@@ -185,6 +185,26 @@ describe("PNG card adapter", () => {
     expect(() => cropPngCover(invalidFilterPng, "1:1")).toThrow(/filter: 5/u);
   });
 
+  it("rejects zero-sized IHDR dimensions before image processing", () => {
+    for (const png of [makePng(0, 4), makePng(4, 0)]) {
+      let validationError: unknown;
+      try {
+        validatePngImage(png);
+      } catch (error) {
+        validationError = error;
+      }
+      expect(validationError).toMatchObject({ name: "PngFormatError", code: "PNG_IHDR_DIMENSIONS_INVALID" });
+
+      let cropError: unknown;
+      try {
+        cropPngCover(png, "1:1");
+      } catch (error) {
+        cropError = error;
+      }
+      expect(cropError).toMatchObject({ name: "PngFormatError", code: "PNG_IHDR_DIMENSIONS_INVALID" });
+    }
+  });
+
   it("enforces max dimension limits in validatePngImage and cropPngCover (BUG2-18)", () => {
     const oversizedPng = makePng(2049, 100);
     expect(() => validatePngImage(oversizedPng)).toThrow(/2049×100/u);

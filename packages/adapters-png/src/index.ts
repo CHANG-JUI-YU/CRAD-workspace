@@ -254,6 +254,9 @@ export function validatePngImage(input: Uint8Array, options: { maxDimension?: nu
   const maxDimension = options.maxDimension ?? CARD_IMAGE_MAX_DIMENSION;
   const info = readPngImageInfo(input);
   if (info === undefined) throw new PngFormatError("PNG_SIGNATURE_INVALID", "角色圖必須是 PNG 檔案");
+  if (info.width === 0 || info.height === 0) {
+    throw new PngFormatError("PNG_IHDR_DIMENSIONS_INVALID", `PNG IHDR dimensions must be positive; received ${info.width}×${info.height}`);
+  }
   if (info.width > maxDimension || info.height > maxDimension) {
     throw new PngFormatError("CARD_IMAGE_TOO_LARGE", `角色圖尺寸 ${info.width}×${info.height} 超過上限 ${maxDimension}×${maxDimension}`);
   }
