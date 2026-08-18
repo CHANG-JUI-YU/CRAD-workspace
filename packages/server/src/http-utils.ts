@@ -31,6 +31,10 @@ export function json(response: ServerResponse, status: number, value: unknown): 
 export function restError(response: ServerResponse, error: unknown): void {
   const payload = structuredError(error);
   console.error(`[rest-error] code=${payload.code}${payload.uncatalogued_code !== undefined ? ` uncatalogued=${payload.uncatalogued_code}` : ""} message=${payload.error}`);
+  if (error instanceof RequestTooLargeError) {
+    response.shouldKeepAlive = false;
+    response.setHeader("connection", "close");
+  }
   json(response, httpStatusFor(payload), {
     code: payload.code,
     category: payload.category,
@@ -80,16 +84,14 @@ export async function body(request: IncomingMessage): Promise<unknown> {
   if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) throw new RequestTooLargeError();
   const chunks: Buffer[] = [];
   let total = 0;
-  let tooLarge = false;
-  for await (const chunk of request) {
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     total += chunk.length;
     if (total > MAX_BODY_BYTES) {
-      tooLarge = true;
-      continue;
+      request.pause();
+      throw new RequestTooLargeError();
     }
     chunks.push(Buffer.from(chunk));
   }
-  if (tooLarge) throw new RequestTooLargeError();
   if (chunks.length === 0) return {};
   let text: string;
   try {
