@@ -123,6 +123,7 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
           var payload = await requestJson("/workspace/status");
           if (gen !== state.projectGeneration) return payload;
           renderStatus(payload);
+          if (typeof operationMonitorWake === "function") operationMonitorWake();
           return payload;
         } catch (error) {
           if (gen === state.projectGeneration) {
@@ -276,48 +277,74 @@ export const DASHBOARD_API_JS = `      var dashboardAuthToken = null;
       }
 
       var operationMonitorTimer = null;
-      var operationMonitorGeneration = 0;
       var operationMonitorRunning = false;
       var operationMonitorActive = false;
+      var operationMonitorInFlight = false;
+
+      function operationMonitorClearTimer() {
+        if (operationMonitorTimer !== null) {
+          clearTimeout(operationMonitorTimer);
+          operationMonitorTimer = null;
+        }
+      }
 
       function operationMonitorSchedule() {
-        if (operationMonitorTimer) clearInterval(operationMonitorTimer);
-        operationMonitorTimer = setInterval(operationMonitorTick, operationMonitorRunning ? 3000 : 12000);
+        operationMonitorClearTimer();
+        if (!operationMonitorActive) return;
+        operationMonitorTimer = setTimeout(function () {
+          operationMonitorTimer = null;
+          operationMonitorTick();
+        }, operationMonitorRunning ? 3000 : 12000);
+      }
+
+      function operationMonitorWake() {
+        operationMonitorClearTimer();
+        operationMonitorTick();
       }
 
       function operationMonitorTick() {
-        if (document.hidden || (typeof navigator !== "undefined" && navigator.onLine === false)) return;
-        var generation = ++operationMonitorGeneration;
+        if (!operationMonitorActive || operationMonitorInFlight) return;
+        if (state.sessionUnselected !== false) {
+          operationMonitorRunning = false;
+          operationMonitorSchedule();
+          return;
+        }
+        if (document.hidden || (typeof navigator !== "undefined" && navigator.onLine === false)) {
+          operationMonitorSchedule();
+          return;
+        }
+        var projectGeneration = state.projectGeneration;
+        operationMonitorInFlight = true;
         requestJson("/workspace/dashboard/operations?limit=50").then(function (page) {
-          if (generation !== operationMonitorGeneration) return;
+          if (projectGeneration !== state.projectGeneration) return;
           var items = page && Array.isArray(page.items) ? page.items : [];
           var runningCount = 0;
           for (var i = 0; i < items.length; i++) {
             var status = items[i] && items[i].status;
             if (status === "running" || status === "resolving" || status === "created") runningCount += 1;
           }
-          var wasRunning = operationMonitorRunning;
           operationMonitorRunning = runningCount > 0;
-          if (operationMonitorRunning !== wasRunning) operationMonitorSchedule();
           renderOperationList(items);
           var updated = byId("operation-last-updated");
           if (updated) updated.textContent = "最後更新：" + new Date().toLocaleTimeString();
           if (typeof updateLastUpdated === "function") updateLastUpdated();
-        }).catch(function () {});
+        }).catch(function () {}).finally(function () {
+          operationMonitorInFlight = false;
+          operationMonitorSchedule();
+        });
       }
 
       function startOperationMonitoring() {
         if (operationMonitorActive) return;
         operationMonitorActive = true;
         document.addEventListener("visibilitychange", function () {
-          if (!document.hidden) operationMonitorTick();
+          if (!document.hidden) operationMonitorWake();
         });
         if (typeof window !== "undefined") {
           window.addEventListener("online", function () {
-            operationMonitorTick();
+            operationMonitorWake();
           });
         }
-        operationMonitorSchedule();
         operationMonitorTick();
       }
 
