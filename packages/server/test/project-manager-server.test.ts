@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FileProjectRepository } from "@st-workspace/core";
-import { startWorkspaceServer } from "../src/index.js";
+import { startWorkspaceServer, type WorkspaceServer } from "../src/index.js";
 
 const roots: string[] = [];
 
@@ -25,7 +25,10 @@ describe("project manager HTTP and MCP boundary", () => {
   it("runs the high-level interview and exposes project selection", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-server-manager-"));
     roots.push(root);
-    const server = await startWorkspaceServer({ port: 0, projectRoot: root, actor: "user" });
+    const server = await startWorkspaceServer({ port: 0, projectRoot: root, actor: "user" }) as WorkspaceServer;
+    // Keep this boundary test focused on foreground HTTP/MCP Project Manager behavior.
+    // WorkspaceWorker recovery/lifecycle is covered by dedicated worker/server tests.
+    await server.workspaceWorker.stop();
     const address = server.address();
     if (address === null || typeof address === "string") throw new Error("server did not bind");
     const base = `http://127.0.0.1:${address.port}`;
