@@ -135,7 +135,7 @@ describe("runRepairExport", () => {
     expect(result.backup_path).toBeUndefined();
     expect(result.content_hash).toBe("hash-abc");
     expect(await readText(output)).toBe(`${JSON.stringify({ card: "測試" })}\n`);
-    const png = await readFile(`${directory}\\out.png`);
+    const png = await readFile(join(directory, "out.png"));
     expect([...png]).toEqual([...compiled().png]);
     expect(await readText(input)).toBe(JSON.stringify({ original: true }));
     expect(await stagedResiduals(directory)).toEqual([]);
@@ -151,7 +151,7 @@ describe("runRepairExport", () => {
     expect(result.backup_path).toBe(`${input}.bundle-backup.json`);
     expect(await readText(result.backup_path)).toBe(original);
     expect(await readText(input)).toBe(`${JSON.stringify({ card: "測試" })}\n`);
-    expect(await readFile(`${directory}\\in.png`)).toBeDefined();
+    expect(await readFile(join(directory, "in.png"))).toBeDefined();
     expect(await stagedResiduals(directory)).toEqual([]);
     await rm(directory, { recursive: true, force: true });
   });
