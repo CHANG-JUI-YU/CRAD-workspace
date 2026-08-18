@@ -31,7 +31,7 @@ export function json(response: ServerResponse, status: number, value: unknown): 
 export function restError(response: ServerResponse, error: unknown): void {
   const payload = structuredError(error);
   console.error(`[rest-error] code=${payload.code}${payload.uncatalogued_code !== undefined ? ` uncatalogued=${payload.uncatalogued_code}` : ""} message=${payload.error}`);
-  if (error instanceof RequestTooLargeError) {
+  if (error instanceof RequestTooLargeError && error.closeConnection) {
     response.shouldKeepAlive = false;
     response.setHeader("connection", "close");
   }
@@ -70,10 +70,12 @@ export class RequestJsonError extends Error {
 export class RequestTooLargeError extends Error {
   readonly code = "REQUEST_TOO_LARGE";
   readonly recoverable = true;
+  readonly closeConnection: boolean;
 
-  constructor() {
+  constructor(closeConnection = false) {
     super("Request body exceeds the 10 MiB limit");
     this.name = "RequestTooLargeError";
+    this.closeConnection = closeConnection;
   }
 }
 
@@ -92,7 +94,7 @@ export async function body(request: IncomingMessage): Promise<unknown> {
     total += chunk.length;
     if (total > MAX_BODY_BYTES) {
       if (typeof request.pause === "function") request.pause();
-      throw new RequestTooLargeError();
+      throw new RequestTooLargeError(true);
     }
     chunks.push(Buffer.from(chunk));
   }
