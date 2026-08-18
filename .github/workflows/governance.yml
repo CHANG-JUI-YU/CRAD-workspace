@@ -112,27 +112,59 @@ jobs:
           python - <<'PY'
           import json
           import os
+          import urllib.parse
           import urllib.request
 
           repo = os.environ["REPOSITORY"]
           sha = os.environ["MAIN_SHA"]
           token = os.environ["GH_TOKEN"]
-          request = urllib.request.Request(
-              f"https://api.github.com/repos/{repo}/commits/{sha}/pulls",
-              headers={
-                  "Accept": "application/vnd.github+json",
-                  "Authorization": f"Bearer {token}",
-                  "X-GitHub-Api-Version": "2022-11-28",
-              },
-          )
-          with urllib.request.urlopen(request) as response:
-              pull_requests = json.load(response)
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
 
+          def get_json(url):
+              request = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(request) as response:
+                  return json.load(response)
+
+          pull_requests = get_json(f"https://api.github.com/repos/{repo}/commits/{sha}/pulls")
           merged_to_main = [
               pr
               for pr in pull_requests
               if pr.get("merged_at") and pr.get("base", {}).get("ref") == "main"
           ]
+
+          # GitHub's commit-to-PR association endpoint can omit a merge commit even
+          # when that SHA is the PR's recorded merge_commit_sha. Fall back to an
+          # exact merge SHA match over recently closed PRs; this remains fail-closed
+          # for direct pushes because no commit-message heuristic is involved.
+          if not merged_to_main:
+              page = 1
+              while page <= 10:
+                  query = urllib.parse.urlencode(
+                      {
+                          "state": "closed",
+                          "base": "main",
+                          "sort": "updated",
+                          "direction": "desc",
+                          "per_page": 100,
+                          "page": page,
+                      }
+                  )
+                  closed_prs = get_json(f"https://api.github.com/repos/{repo}/pulls?{query}")
+                  merged_to_main.extend(
+                      pr
+                      for pr in closed_prs
+                      if pr.get("merged_at")
+                      and pr.get("base", {}).get("ref") == "main"
+                      and pr.get("merge_commit_sha") == sha
+                  )
+                  if merged_to_main or len(closed_prs) < 100:
+                      break
+                  page += 1
+
           if not merged_to_main:
               print(
                   f"::error::main@{sha} is not associated with a pull request merged into main. "
@@ -140,6 +172,6 @@ jobs:
               )
               raise SystemExit(1)
 
-          numbers = ", ".join(f"#{pr['number']}" for pr in merged_to_main)
+          numbers = ", ".join(f"#{number}" for number in sorted({pr["number"] for pr in merged_to_main}))
           print(f"Verified main@{sha} originated from merged pull request(s): {numbers}")
           PY
