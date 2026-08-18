@@ -28,8 +28,13 @@ jobs:
         run: pnpm build
       - name: Typecheck
         run: pnpm typecheck:only
-      - name: Full test suite
-        run: pnpm test:only
+      # The suite contains fsync/rename-heavy repository integration tests.
+      # Parallel test files can saturate hosted-runner filesystems (especially
+      # Windows), starving lock heartbeats and causing recovery/cleanup races.
+      # Keep local Vitest parallelism, but make required CI correctness
+      # deterministic while still executing the complete non-coverage suite.
+      - name: Full test suite (serial files)
+        run: pnpm exec vitest run --no-file-parallelism
 
   # #153 requires the full non-coverage suite on both supported CI operating
   # systems. Coverage therefore remains a separate Ubuntu gate, but it uses the
