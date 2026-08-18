@@ -356,14 +356,14 @@ describe("file repository transaction and CAS", () => {
   it("refreshes a live lease so a transaction longer than thirty seconds is not stolen", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-lock-heartbeat-"));
     try {
-      const first = new FileProjectRepository(root, "demo", { lock: { lease_ms: 80, heartbeat_ms: 20, timeout_ms: 500 } });
+      const first = new FileProjectRepository(root, "demo", { lock: { lease_ms: 1000, heartbeat_ms: 100, timeout_ms: 3000 } });
       const initial = await first.read();
-      const second = new FileProjectRepository(root, "demo", { lock: { lease_ms: 80, heartbeat_ms: 20, timeout_ms: 100 } });
+      const second = new FileProjectRepository(root, "demo", { lock: { lease_ms: 1000, heartbeat_ms: 100, timeout_ms: 400 } });
       const longCommit = first.transaction(initial.revision, async (state) => {
-        await wait(220);
+        await wait(2500);
         return { state: { ...state, project_name: "first" }, value: undefined };
       });
-      await wait(110);
+      await wait(1300);
       await expect(second.commit(initial.revision, (state) => ({ ...state, project_name: "second" }))).rejects.toMatchObject({ code: "REPOSITORY_LOCK_TIMEOUT" });
       await longCommit;
       expect((await first.read()).project_name).toBe("first");
@@ -416,14 +416,14 @@ describe("file repository transaction and CAS", () => {
   it("uses the cross-instance lock when relocating a project", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-relocate-lock-"));
     try {
-      const first = new FileProjectRepository(root, "demo", { lock: { lease_ms: 80, heartbeat_ms: 20, timeout_ms: 500 } });
+      const first = new FileProjectRepository(root, "demo", { lock: { lease_ms: 1000, heartbeat_ms: 100, timeout_ms: 3000 } });
       const initial = await first.read();
-      const second = new FileProjectRepository(root, "demo", { lock: { lease_ms: 80, heartbeat_ms: 20, timeout_ms: 100 } });
+      const second = new FileProjectRepository(root, "demo", { lock: { lease_ms: 1000, heartbeat_ms: 100, timeout_ms: 1200 } });
       const longCommit = first.transaction(initial.revision, async (state) => {
-        await wait(180);
+        await wait(2500);
         return { state: { ...state, project_name: "held" }, value: undefined };
       });
-      await wait(30);
+      await wait(200);
       await expect(second.relocate("renamed")).rejects.toMatchObject({ code: "REPOSITORY_LOCK_TIMEOUT" });
       await longCommit;
       await second.relocate("renamed");
