@@ -1040,6 +1040,18 @@ describe("natural language runtime boundary", () => {
     expect((await repository.read()).images).toHaveLength(0);
   });
 
+  it("rejects zero-sized PNG uploads through the stable shared validation code", async () => {
+    const repository = new MemoryProjectRepository("runtime-images-zero-size");
+    const runtime = new WorkspaceRuntime(repository);
+    for (const png of [makeTestPng(0, 4, 0), makeTestPng(4, 0, 0)]) {
+      await expect(runtime.setProjectImage(
+        { actor: "user", attachments: [{ name: "cover.png", content: png, media_type: "image/png" }] },
+        { aspect_ratio: "1:1" },
+      )).rejects.toMatchObject({ code: "PNG_IHDR_DIMENSIONS_INVALID", recoverable: true });
+    }
+    expect((await repository.read()).images).toHaveLength(0);
+  });
+
   it("requires exactly one PNG attachment when setting a project cover image", async () => {
     const runtime = new WorkspaceRuntime(new MemoryProjectRepository("runtime-images-required"));
     await expect(runtime.setProjectImage({ actor: "user", attachments: [] }, {})).rejects.toMatchObject({ code: "CARD_IMAGE_REQUIRED" });
