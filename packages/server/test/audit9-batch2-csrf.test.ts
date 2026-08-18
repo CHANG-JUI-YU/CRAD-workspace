@@ -1,20 +1,64 @@
 import { describe, expect, it, afterAll } from "vitest";
 import { MemoryProjectRepository } from "@st-workspace/core";
 import { WorkspaceRuntime } from "@st-workspace/runtime";
-import type { Server } from "node:http";
+import { request as httpRequest, type Server } from "node:http";
 import { createWorkspaceServer } from "../src/index.js";
 
 const servers: Array<Server> = [];
+const LOOPBACK_TRUSTED_HOSTNAMES = ["127.0.0.1", "localhost", "::1"] as const;
 
 async function startServer(): Promise<string> {
   const repository = new MemoryProjectRepository("batch2-csrf");
   const runtime = new WorkspaceRuntime(repository);
-  const server = createWorkspaceServer({ runtime, actor: "batch9-batch2-csrf", autoStartWorker: false });
+  const server = createWorkspaceServer({
+    runtime,
+    actor: "batch9-batch2-csrf",
+    autoStartWorker: false,
+    trustedHostnames: LOOPBACK_TRUSTED_HOSTNAMES,
+  });
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("server address unavailable");
   return `http://127.0.0.1:${address.port}`;
+}
+
+async function rawRequest(
+  urlString: string,
+  options: { method?: string; host: string; headers?: Record<string, string>; body?: string },
+): Promise<{ status: number; body: string }> {
+  const target = new URL(urlString);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      {
+        hostname: target.hostname,
+        port: Number(target.port),
+        path: `${target.pathname}${target.search}`,
+        method: options.method ?? "GET",
+        headers: { host: options.host, ...options.headers },
+      },
+      (response) => {
+        response.setEncoding("utf8");
+        let body = "";
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => resolve({ status: response.statusCode ?? 0, body }));
+      },
+    );
+    request.on("error", reject);
+    if (options.body !== undefined) request.write(options.body);
+    request.end();
+  });
+}
+
+function responseCode(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as { code?: unknown };
+    return typeof parsed.code === "string" ? parsed.code : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 afterAll(async () => {
@@ -99,6 +143,48 @@ describe("audit9-batch2 CSRF protection (#129)", () => {
       body: JSON.stringify({}),
     });
     expect(response.status).not.toBe(403);
+  });
+
+  it("rejects DNS-rebinding mutations even when Origin and Host match the attacker name", async () => {
+    const url = await startServer();
+    const port = Number(new URL(url).port);
+    const attackerHost = `attacker.example:${port}`;
+    const response = await rawRequest(`${url}/workspace/request`, {
+      method: "POST",
+      host: attackerHost,
+      headers: {
+        "content-type": "application/json",
+        origin: `http://${attackerHost}`,
+        "sec-fetch-site": "same-origin",
+        "x-requested-with": "XMLHttpRequest",
+      },
+      body: JSON.stringify({}),
+    });
+    expect(response.status).toBe(403);
+    expect(responseCode(response.body)).toBe("CSRF_DENIED");
+  });
+
+  it("rejects untrusted Host values for read-only Dashboard requests", async () => {
+    const url = await startServer();
+    const port = Number(new URL(url).port);
+    const response = await rawRequest(`${url}/`, { host: `attacker.example:${port}` });
+    expect(response.status).toBe(403);
+    expect(responseCode(response.body)).toBe("CSRF_DENIED");
+  });
+
+  it("accepts trusted loopback aliases on the actual listening port", async () => {
+    const url = await startServer();
+    const port = Number(new URL(url).port);
+    const response = await rawRequest(`${url}/`, { host: `localhost:${port}` });
+    expect(response.status).toBe(200);
+  });
+
+  it("rejects a trusted hostname carrying the wrong port", async () => {
+    const url = await startServer();
+    const port = Number(new URL(url).port);
+    const response = await rawRequest(`${url}/`, { host: `127.0.0.1:${port + 1}` });
+    expect(response.status).toBe(403);
+    expect(responseCode(response.body)).toBe("CSRF_DENIED");
   });
 
   it("applies the CSRF policy to every mutation endpoint (repair/run)", async () => {

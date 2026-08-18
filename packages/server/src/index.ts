@@ -5,10 +5,12 @@ import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, W
 import { dashboard } from "./dashboard.js";
 export { toolDefinitions } from "./mcp-tools.js";
 import { json, restError } from "./http-utils.js";
-import { extractBearerToken, normalizeAuthToken, parseRequestTarget, timingSafeTextEqual, assertMutationRequestAllowed } from "./http-security.js";
+import { extractBearerToken, normalizeAuthToken, parseRequestTarget, timingSafeTextEqual, assertMutationRequestAllowed, assertRequestHostAllowed } from "./http-security.js";
 import { JSONRPC_INTERNAL_ERROR, jsonRpcError } from "./jsonrpc.js";
 import { handleMcpRequest, handleRestRequest, type WorkspaceRouteDeps } from "./routes.js";
 import { computeRuntimeRevision } from "./runtime-revision.js";
+
+const LOOPBACK_TRUSTED_HOSTNAMES = ["127.0.0.1", "localhost", "::1"] as const;
 
 export interface WorkspaceServerOptions {
   runtime?: WorkspaceRuntime;
@@ -19,6 +21,7 @@ export interface WorkspaceServerOptions {
   autoStartWorker?: boolean;
   authToken?: string;
   runtimeRevision?: string;
+  trustedHostnames?: readonly string[];
 }
 
 export interface WorkspaceServer extends Server {
@@ -37,10 +40,14 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
   if (runtimeForWorker === undefined) throw new Error("workspace server could not initialize a runtime");
   const worker = options.worker ?? new WorkspaceWorker(runtimeForWorker, { actor: `${actor}-worker`, ...options.workerOptions });
   const getRuntime = async (): Promise<WorkspaceRuntime> => options.projectManager === undefined ? options.runtime! : options.projectManager.ensureRuntime();
+  const trustedHostnames = options.trustedHostnames ?? (options.authToken === undefined ? LOOPBACK_TRUSTED_HOSTNAMES : undefined);
   if (options.autoStartWorker ?? true) worker.start();
   const server = createServer(async (request, response) => {
     let url: URL | null = null;
     try {
+      if (trustedHostnames !== undefined) {
+        assertRequestHostAllowed(request.headers.host, trustedHostnames, request.socket.localPort);
+      }
       url = parseRequestTarget(request.url, "http://localhost");
       if (url === null) {
         restError(response, new CoreError("REQUEST_TARGET_INVALID", "Malformed request target", true));
@@ -109,12 +116,15 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
   // and for callers that pass projectId explicitly.
   const requestedProject = options.projectId ?? (options.projectRoot === undefined ? process.env.ST_WORKSPACE_PROJECT : undefined);
   const selectedProject = typeof requestedProject === "string" && requestedProject.trim().length > 0 ? requestedProject.trim() : undefined;
+  // Loopback mode uses an explicit Host allowlist to resist browser DNS rebinding.
+  // Non-loopback mode keeps the mandatory auth-token boundary and does not infer DNS/reverse-proxy hostnames.
+  const hostPolicy = isLocalHost ? { trustedHostnames: LOOPBACK_TRUSTED_HOSTNAMES } : {};
   const manager = selectedProject === undefined
     ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true, attachmentStore: new FileAttachmentStore(repository) }) })
     : undefined;
   const serverOptions: WorkspaceServerOptions = manager !== undefined
-    ? { projectManager: manager, actor: options.actor ?? "server", runtimeRevision, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) }
-    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server", runtimeRevision, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) };
+    ? { projectManager: manager, actor: options.actor ?? "server", runtimeRevision, ...hostPolicy, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) }
+    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server", runtimeRevision, ...hostPolicy, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) };
   const server = createWorkspaceServer(serverOptions);
   await new Promise<void>((resolve, reject) => {
     const listening = (): void => {

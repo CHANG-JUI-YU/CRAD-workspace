@@ -12,9 +12,9 @@ export function parseRequestTarget(raw: string | undefined, base: string): URL |
 }
 
 export function timingSafeTextEqual(left: string, right: string): boolean {
-  if (left.length !== right.length) return false;
   const leftBytes = Buffer.from(left, "utf8");
   const rightBytes = Buffer.from(right, "utf8");
+  if (leftBytes.length !== rightBytes.length) return false;
   return timingSafeEqual(leftBytes, rightBytes);
 }
 
@@ -33,6 +33,39 @@ export function normalizeAuthToken(token: string | undefined): string | undefine
 function headerValue(headers: IncomingHttpHeaders, name: string): string | undefined {
   const value = headers[name];
   return typeof value === "string" ? value : undefined;
+}
+
+function normalizeHostname(hostname: string): string {
+  const normalized = hostname.trim().toLowerCase();
+  if (normalized.startsWith("[") && normalized.endsWith("]")) return normalized.slice(1, -1);
+  return normalized;
+}
+
+function parseHostHeader(hostHeader: string | undefined): { hostname: string; port: string } | null {
+  if (hostHeader === undefined || hostHeader.trim().length === 0) return null;
+  try {
+    const parsed = new URL(`http://${hostHeader.trim()}`);
+    if (parsed.username !== "" || parsed.password !== "" || parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") return null;
+    return { hostname: normalizeHostname(parsed.hostname), port: parsed.port };
+  } catch {
+    return null;
+  }
+}
+
+export function assertRequestHostAllowed(
+  hostHeader: string | undefined,
+  allowedHostnames: readonly string[],
+  expectedPort: number | undefined,
+): void {
+  const parsed = parseHostHeader(hostHeader);
+  if (parsed === null || expectedPort === undefined) {
+    throw new CoreError("CSRF_DENIED", "Untrusted Host header denied", false);
+  }
+  const port = parsed.port === "" ? 80 : Number(parsed.port);
+  const allowed = new Set(allowedHostnames.map(normalizeHostname));
+  if (!Number.isInteger(port) || port !== expectedPort || !allowed.has(parsed.hostname)) {
+    throw new CoreError("CSRF_DENIED", "Untrusted Host header denied", false);
+  }
 }
 
 export function assertMutationRequestAllowed(headers: IncomingHttpHeaders, hostHeader: string | undefined): void {
