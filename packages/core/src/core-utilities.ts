@@ -1,7 +1,10 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import type { InterviewFlow, InterviewState } from "./interview.js";
 import type { ArtifactKind } from "./project-state.js";
 import type { OperationRecord } from "./operations.js";
+
+const workspaceAbortSignalStorage = new AsyncLocalStorage<AbortSignal>();
 
 export interface SourceAttachment {
   name: string;
@@ -13,6 +16,15 @@ export interface WorkspaceContext {
   actor: string;
   attachments: SourceAttachment[];
   research_results?: Array<{ title: string; url: string; snippet?: string; content?: string; media_type?: string; domain?: string; official?: boolean }>;
+  signal?: AbortSignal;
+}
+
+export function withWorkspaceAbortSignal<T>(signal: AbortSignal, run: () => T): T {
+  return workspaceAbortSignalStorage.run(signal, run);
+}
+
+export function currentWorkspaceAbortSignal(): AbortSignal | undefined {
+  return workspaceAbortSignalStorage.getStore();
 }
 
 export interface ExecutionContextTarget {
@@ -33,6 +45,7 @@ export interface ExecutionContext {
   auditActor: string;
   target?: ExecutionContextTarget;
   lease?: ExecutionLeaseContext;
+  signal?: AbortSignal;
   capabilities: readonly string[];
 }
 
@@ -42,6 +55,7 @@ export interface ExecutionContextInput {
   initiatedBy?: string;
   target?: ExecutionContextTarget;
   lease?: ExecutionLeaseContext;
+  signal?: AbortSignal;
   capabilities?: readonly string[];
 }
 
@@ -69,6 +83,7 @@ export function executionContextFromOperation(operation: OperationRecord, input:
     auditActor: input.auditActor,
     ...(target === undefined ? {} : { target }),
     ...(input.lease === undefined ? {} : { lease: input.lease }),
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
     capabilities: [...capabilities],
   };
 }
