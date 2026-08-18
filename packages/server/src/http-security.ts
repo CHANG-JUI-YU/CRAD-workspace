@@ -30,6 +30,14 @@ export function normalizeAuthToken(token: string | undefined): string | undefine
   return trimmed.length === 0 ? undefined : trimmed;
 }
 
+export function normalizeConfiguredAuthToken(token: string | undefined): string | undefined {
+  const normalized = normalizeAuthToken(token);
+  if (token !== undefined && normalized === undefined) {
+    throw new CoreError("AUTH_TOKEN_BLANK", "Auth token must not be blank or whitespace-only", true);
+  }
+  return normalized;
+}
+
 function headerValue(headers: IncomingHttpHeaders, name: string): string | undefined {
   const value = headers[name];
   return typeof value === "string" ? value : undefined;

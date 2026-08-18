@@ -5,7 +5,7 @@ import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, W
 import { dashboard } from "./dashboard.js";
 export { toolDefinitions } from "./mcp-tools.js";
 import { applyBrowserSecurityHeaders, dashboardQuery, json, restError } from "./http-utils.js";
-import { extractBearerToken, normalizeAuthToken, parseRequestTarget, timingSafeTextEqual, assertMutationRequestAllowed, assertRequestHostAllowed } from "./http-security.js";
+import { extractBearerToken, normalizeConfiguredAuthToken, parseRequestTarget, timingSafeTextEqual, assertMutationRequestAllowed, assertRequestHostAllowed } from "./http-security.js";
 import { JSONRPC_INTERNAL_ERROR, jsonRpcError } from "./jsonrpc.js";
 import { handleMcpRequest, handleRestRequest, type WorkspaceRouteDeps } from "./routes.js";
 import { computeRuntimeRevision } from "./runtime-revision.js";
@@ -33,6 +33,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
   const actor = options.actor ?? "agent";
   const runtimeRevision = options.runtimeRevision ?? "manual";
   if (options.runtime === undefined && options.projectManager === undefined) throw new Error("workspace server requires a runtime or project manager");
+  const authToken = normalizeConfiguredAuthToken(options.authToken);
   const router = new AgentRouter();
   const runtimeForWorker = options.projectManager === undefined
     ? options.runtime
@@ -40,7 +41,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
   if (runtimeForWorker === undefined) throw new Error("workspace server could not initialize a runtime");
   const worker = options.worker ?? new WorkspaceWorker(runtimeForWorker, { actor: `${actor}-worker`, ...options.workerOptions });
   const getRuntime = async (): Promise<WorkspaceRuntime> => options.projectManager === undefined ? options.runtime! : options.projectManager.ensureRuntime();
-  const trustedHostnames = options.trustedHostnames ?? (options.authToken === undefined ? LOOPBACK_TRUSTED_HOSTNAMES : undefined);
+  const trustedHostnames = options.trustedHostnames ?? (authToken === undefined ? LOOPBACK_TRUSTED_HOSTNAMES : undefined);
   if (options.autoStartWorker ?? true) worker.start();
   const server = createServer(async (request, response) => {
     applyBrowserSecurityHeaders(response);
@@ -54,7 +55,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       if (trustedHostnames !== undefined) {
         assertRequestHostAllowed(request.headers.host, trustedHostnames, request.socket.localPort);
       }
-      if (options.authToken !== undefined) {
+      if (authToken !== undefined) {
         const headerToken = extractBearerToken(request.headers.authorization);
         const queryToken = url.searchParams.get("token");
         const isDashboardBootstrap = request.method === "GET" && url.pathname === "/";
@@ -62,8 +63,8 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
           restError(response, new CoreError("UNAUTHORIZED", "Query token is only allowed on the Dashboard bootstrap route", true));
           return;
         }
-        const headerOk = headerToken !== undefined && timingSafeTextEqual(headerToken, options.authToken);
-        const queryOk = isDashboardBootstrap && queryToken !== null && timingSafeTextEqual(queryToken, options.authToken);
+        const headerOk = headerToken !== undefined && timingSafeTextEqual(headerToken, authToken);
+        const queryOk = isDashboardBootstrap && queryToken !== null && timingSafeTextEqual(queryToken, authToken);
         if (!headerOk && !queryOk) {
           restError(response, new CoreError("UNAUTHORIZED", "Missing or invalid bearer token", true));
           return;
@@ -117,10 +118,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
 export async function startWorkspaceServer(options: { port?: number; host?: string; projectRoot?: string; projectId?: string; actor?: string; authToken?: string; workspaceRoot?: string; runtimeRevision?: string } = {}): Promise<Server> {
   const host = options.host ?? process.env.ST_WORKSPACE_HOST ?? "127.0.0.1";
   const isLocalHost = host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
-  const configuredAuthToken = normalizeAuthToken(options.authToken);
-  if (options.authToken !== undefined && configuredAuthToken === undefined) {
-    throw new CoreError("AUTH_TOKEN_BLANK", "Auth token must not be blank or whitespace-only", true);
-  }
+  const configuredAuthToken = normalizeConfiguredAuthToken(options.authToken);
   if (!isLocalHost && configuredAuthToken === undefined) {
     throw new CoreError("EXTERNAL_HOST_AUTH_REQUIRED", `Host ${host} exposes every read/write endpoint; refusing to start without an auth token.`, true);
   }
