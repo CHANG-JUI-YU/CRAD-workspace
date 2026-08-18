@@ -4,7 +4,7 @@ import { CoreError, FileAttachmentStore, FileProjectRepository } from "@st-works
 import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
 import { dashboard } from "./dashboard.js";
 export { toolDefinitions } from "./mcp-tools.js";
-import { applyBrowserSecurityHeaders, json, restError } from "./http-utils.js";
+import { applyBrowserSecurityHeaders, dashboardQuery, json, restError } from "./http-utils.js";
 import { extractBearerToken, normalizeAuthToken, parseRequestTarget, timingSafeTextEqual, assertMutationRequestAllowed, assertRequestHostAllowed } from "./http-security.js";
 import { JSONRPC_INTERNAL_ERROR, jsonRpcError } from "./jsonrpc.js";
 import { handleMcpRequest, handleRestRequest, type WorkspaceRouteDeps } from "./routes.js";
@@ -77,6 +77,17 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         response.statusCode = 200;
         response.setHeader("content-type", "text/html; charset=utf-8");
         response.end(dashboard());
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/dashboard/operations" && options.projectManager !== undefined && !options.projectManager.sessionSelected()) {
+        const query = dashboardQuery(url);
+        json(response, 200, {
+          selected: false,
+          items: [],
+          total: 0,
+          limit: query.limit,
+          ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+        });
         return;
       }
       const deps: WorkspaceRouteDeps = {
