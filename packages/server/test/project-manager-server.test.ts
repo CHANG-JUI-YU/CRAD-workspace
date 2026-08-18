@@ -26,8 +26,8 @@ describe("project manager HTTP and MCP boundary", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-server-manager-"));
     roots.push(root);
     const server = await startWorkspaceServer({ port: 0, projectRoot: root, actor: "user" }) as WorkspaceServer;
-    // This test owns the foreground Project Manager boundary. Background worker
-    // recovery is covered separately and must not race the rename/final commit.
+    // Keep this boundary test focused on foreground HTTP/MCP Project Manager behavior.
+    // WorkspaceWorker recovery/lifecycle is covered by dedicated worker/server tests.
     await server.workspaceWorker.stop();
     const address = server.address();
     if (address === null || typeof address === "string") throw new Error("server did not bind");
