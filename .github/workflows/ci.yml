@@ -6,7 +6,36 @@ on:
   pull_request:
 
 jobs:
+  correctness:
+    name: Correctness (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build workspace
+        run: pnpm build
+      - name: Typecheck
+        run: pnpm typecheck:only
+      - name: Full test suite
+        run: pnpm test:only
+
+  # #153 requires the full non-coverage suite on both supported CI operating
+  # systems. Coverage therefore remains a separate Ubuntu gate, but it uses the
+  # :only command so this job does not rebuild the workspace a second time.
   coverage:
+    name: Coverage (ubuntu-latest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +48,7 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Typecheck and build
-        run: pnpm check
+      - name: Build workspace
+        run: pnpm build
       - name: Coverage gate
-        run: pnpm test:coverage
+        run: pnpm test:coverage:only
