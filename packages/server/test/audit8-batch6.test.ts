@@ -47,14 +47,20 @@ describe("Audit 8 Batch 6 - Dashboard per-action busy and operation monitor", ()
     expect(DASHBOARD_PANELS_CORE_JS).toContain("function setActionBusy(controlId, busy)");
   });
 
-  it("includes the adaptive operation monitor with visibility and online handling", () => {
+  it("includes the adaptive single-flight operation monitor with visibility and online handling", () => {
     expect(DASHBOARD_API_JS).toContain("function operationMonitorSchedule()");
     expect(DASHBOARD_API_JS).toContain("function operationMonitorTick()");
     expect(DASHBOARD_API_JS).toContain("function startOperationMonitoring()");
     expect(DASHBOARD_API_JS).toContain("operationMonitorRunning ? 3000 : 12000");
     expect(DASHBOARD_API_JS).toContain("visibilitychange");
     expect(DASHBOARD_API_JS).toContain('addEventListener("online"');
-    expect(DASHBOARD_API_JS).toContain("operationMonitorGeneration");
+    expect(DASHBOARD_API_JS).toContain("var operationMonitorInFlight = false");
+    expect(DASHBOARD_API_JS).toContain("if (!operationMonitorActive || operationMonitorInFlight) return");
+    expect(DASHBOARD_API_JS).toContain("if (state.sessionUnselected !== false)");
+    expect(DASHBOARD_API_JS).toContain("operationMonitorTimer = setTimeout(function ()");
+    expect(DASHBOARD_API_JS).toContain("if (projectGeneration !== state.projectGeneration) return");
+    expect(DASHBOARD_API_JS).toContain(".finally(function ()");
+    expect(DASHBOARD_API_JS).not.toContain("setInterval(operationMonitorTick");
     expect(DASHBOARD_API_JS).toContain("renderOperationList(items)");
     expect(DASHBOARD_API_JS).toContain("startOperationMonitoring();");
   });
