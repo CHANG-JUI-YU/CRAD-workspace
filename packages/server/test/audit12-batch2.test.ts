@@ -7,6 +7,20 @@ function createRuntime(): WorkspaceRuntime {
   return new WorkspaceRuntime(new MemoryProjectRepository("audit12-auth-factory"));
 }
 
+function expectFactoryTokenRejected(token: string): void {
+  let error: unknown;
+  try {
+    createWorkspaceServer({
+      runtime: createRuntime(),
+      authToken: token,
+      autoStartWorker: false,
+    });
+  } catch (caught) {
+    error = caught;
+  }
+  expect(error).toMatchObject({ code: "AUTH_TOKEN_BLANK" });
+}
+
 async function listen(server: WorkspaceServer): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -35,17 +49,8 @@ describe("Audit 12 BUG12-04 server factory auth token policy", () => {
   });
 
   it("rejects explicitly blank and whitespace-only tokens at construction", () => {
-    expect(() => createWorkspaceServer({
-      runtime: createRuntime(),
-      authToken: "",
-      autoStartWorker: false,
-    })).toThrowError(expect.objectContaining({ code: "AUTH_TOKEN_BLANK" }));
-
-    expect(() => createWorkspaceServer({
-      runtime: createRuntime(),
-      authToken: " \t\n ",
-      autoStartWorker: false,
-    })).toThrowError(expect.objectContaining({ code: "AUTH_TOKEN_BLANK" }));
+    expectFactoryTokenRejected("");
+    expectFactoryTokenRejected(" \t\n ");
   });
 
   it("normalizes a configured token once and rejects blank bootstrap tokens", async () => {
