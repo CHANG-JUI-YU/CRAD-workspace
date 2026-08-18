@@ -4,6 +4,24 @@ import { CoreError, z } from "@st-workspace/core";
 import { parseDashboardQuery } from "@st-workspace/runtime";
 import { httpStatusFor, structuredError } from "./errors.js";
 
+export const BROWSER_SECURITY_CSP = [
+  "default-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  "img-src 'self' blob: data:",
+  "connect-src 'self'",
+].join("; ");
+
+export function applyBrowserSecurityHeaders(response: ServerResponse): void {
+  response.setHeader("cache-control", "no-store");
+  response.setHeader("referrer-policy", "no-referrer");
+  response.setHeader("x-content-type-options", "nosniff");
+  response.setHeader("content-security-policy", BROWSER_SECURITY_CSP);
+}
+
 export function json(response: ServerResponse, status: number, value: unknown): void {
   response.statusCode = status;
   response.setHeader("content-type", "application/json; charset=utf-8");

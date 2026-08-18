@@ -1037,19 +1037,28 @@ export class FileProjectRepository implements ProjectRepository {
     const context = this.activeLock;
     if (context === undefined) return;
     if (context.lost !== undefined) throw context.lost;
-    for (const lockFile of context.lock_files) {
-      let record: LockRecord;
-      try {
-        record = await readLockRecord(lockFile);
-      } catch (error) {
-        context.lost = new CoreError("REPOSITORY_LOCK_LOST", `Project lock is no longer readable for ${this.projectIdValue}`, true, { cause: error });
-        throw context.lost;
+    context.heartbeat_tail = context.heartbeat_tail.then(async () => {
+      if (context.lost !== undefined) return;
+      for (const lockFile of context.lock_files) {
+        let record: LockRecord;
+        try {
+          record = await readLockRecord(lockFile);
+        } catch (error) {
+          context.lost = new CoreError("REPOSITORY_LOCK_LOST", `Project lock is no longer readable for ${this.projectIdValue}`, true, { cause: error });
+          return;
+        }
+        if (record.owner !== context.owner || Date.parse(record.lease_expires_at) <= Date.now()) {
+          context.lost = new CoreError("REPOSITORY_LOCK_LOST", `Project lock ownership changed for ${this.projectIdValue}`, true, {
+            owner: context.owner,
+            current_owner: record.owner,
+            lease_expires_at: record.lease_expires_at,
+          });
+          return;
+        }
       }
-      if (record.owner !== context.owner || Date.parse(record.lease_expires_at) <= Date.now()) {
-        context.lost = new CoreError("REPOSITORY_LOCK_LOST", `Project lock ownership changed for ${this.projectIdValue}`, true, { owner: context.owner, current_owner: record.owner });
-        throw context.lost;
-      }
-    }
+    });
+    await context.heartbeat_tail;
+    if (context.lost !== undefined) throw context.lost;
   }
 
   private injectFailure(point: RepositoryFailureInjectionPoint, relativePath?: string): void {

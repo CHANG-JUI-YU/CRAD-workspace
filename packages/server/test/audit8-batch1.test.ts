@@ -65,9 +65,19 @@ describe("Audit 8 batch 1: #105 authenticated dashboard writes and image credent
     await withServer(VALID_TOKEN, async ({ url }) => {
       const ok = await fetch(`${url}/?token=${VALID_TOKEN}`);
       expect(ok.status).toBe(200);
+      expect(ok.headers.get("cache-control")).toBe("no-store");
+      expect(ok.headers.get("referrer-policy")).toBe("no-referrer");
+      expect(ok.headers.get("x-content-type-options")).toBe("nosniff");
+      const csp = ok.headers.get("content-security-policy") ?? "";
+      expect(csp).toContain("default-src 'none'");
+      expect(csp).toContain("frame-ancestors 'none'");
+      expect(csp).toContain("connect-src 'self'");
+      expect(csp).toContain("script-src 'unsafe-inline'");
+      expect(csp).toContain("style-src 'unsafe-inline'");
       const html = await ok.text();
       expect(html).toContain("來源適配工作流程");
       expect(html).not.toContain(VALID_TOKEN);
+      expect(html).toContain("window.history.replaceState(null, \"\", window.location.pathname + window.location.hash)");
 
       const missing = await fetch(`${url}/`);
       expect(missing.status).toBe(401);
@@ -77,15 +87,24 @@ describe("Audit 8 batch 1: #105 authenticated dashboard writes and image credent
     });
   });
 
-  it("accepts bearer header credentials for GET endpoints and keeps the query fallback", async () => {
+  it("requires bearer credentials for protected GET endpoints and rejects query-token reuse", async () => {
     await withServer(VALID_TOKEN, async ({ url }) => {
       const headerResponse = await fetch(`${url}/workspace/dashboard/data`, {
         headers: { authorization: `Bearer ${VALID_TOKEN}` },
       });
       expect(headerResponse.status).toBe(200);
+      expect(headerResponse.headers.get("cache-control")).toBe("no-store");
+      expect(headerResponse.headers.get("referrer-policy")).toBe("no-referrer");
+      expect(headerResponse.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(headerResponse.headers.get("content-security-policy")).toContain("default-src 'none'");
 
       const queryResponse = await fetch(`${url}/workspace/dashboard/data?token=${VALID_TOKEN}`);
-      expect(queryResponse.status).toBe(200);
+      expect(queryResponse.status).toBe(401);
+
+      const queryWithBearer = await fetch(`${url}/workspace/dashboard/data?token=${VALID_TOKEN}`, {
+        headers: { authorization: `Bearer ${VALID_TOKEN}` },
+      });
+      expect(queryWithBearer.status).toBe(401);
     });
   });
 
@@ -136,6 +155,7 @@ describe("Audit 8 batch 1: #105 authenticated dashboard writes and image credent
       });
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toBe("image/png");
+      expect(response.headers.get("cache-control")).toBe("no-store");
       const bytes = Buffer.from(await response.arrayBuffer());
       expect(bytes.toString()).toBe("fake-png-bytes-for-cover");
 
@@ -144,13 +164,15 @@ describe("Audit 8 batch 1: #105 authenticated dashboard writes and image credent
     });
   });
 
-  it("keeps the dashboard html free of the token and preserves the legacy tokenQuery-free api surface", async () => {
+  it("keeps the dashboard html free of the token and preserves immediate URL sanitization", async () => {
     await withServer(VALID_TOKEN, async ({ url }) => {
       const response = await fetch(`${url}/?token=${VALID_TOKEN}`);
       const html = await response.text();
       expect(html).not.toContain(VALID_TOKEN);
       expect(html).not.toContain("tokenQuery()");
       expect(html).toContain("setProtectedImageSource");
+      expect(html).toContain("window.history.replaceState");
+      expect(html).toContain("window.location.pathname + window.location.hash");
     });
   });
 });
