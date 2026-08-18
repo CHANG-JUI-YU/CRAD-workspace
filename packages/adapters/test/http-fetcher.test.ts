@@ -3,10 +3,19 @@ import { HttpSourceFetcher } from "../src/index.js";
 
 const publicLookup = async (): Promise<string[]> => ["93.184.216.34"];
 
+function defaultRemoteAddress(url: URL): string {
+  const hostname = url.hostname;
+  if (hostname.startsWith("[") && hostname.endsWith("]")) return hostname.slice(1, -1);
+  if (/^[0-9]+(?:\.[0-9]+){3}$/u.test(hostname)) return hostname;
+  return "93.184.216.34";
+}
+
 function fetchStub(handler: (url: URL, init?: RequestInit) => Response | Promise<Response>): typeof fetch {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? new URL(input) : input;
-    return await handler(url, init);
+    const response = await handler(url, init);
+    if (!Object.hasOwn(response, "remoteAddress")) withRemoteAddress(response, defaultRemoteAddress(url));
+    return response;
   }) as unknown as typeof fetch;
 }
 
@@ -120,6 +129,13 @@ describe("controlled HTTP source adapter", () => {
     await expect(fetcher.fetch("https://example.test/x")).rejects.toMatchObject({ code: "SOURCE_NETWORK_DENIED" });
   });
 
+  it("rejects non-IP DNS results before the transport can resolve them again", async () => {
+    const transport = vi.fn(async () => ({ status: 200, headers: new Headers(), body: null, remoteAddress: "93.184.216.34" }));
+    const fetcher = new HttpSourceFetcher({ lookup: async () => ["rebind.example"], transport });
+    await expect(fetcher.fetch("https://example.test/x")).rejects.toMatchObject({ code: "SOURCE_FETCH_FAILED" });
+    expect(transport).not.toHaveBeenCalled();
+  });
+
   it("reports a failed DNS lookup as a fetch failure", async () => {
     const fetcher = new HttpSourceFetcher({
       lookup: async () => {
@@ -209,6 +225,35 @@ describe("controlled HTTP source adapter", () => {
     });
     const result = await fetcher.fetch("https://example.test/medium");
     expect(result.content.byteLength).toBe(50);
+  });
+
+  it("passes only a validated address to the transport and rejects a different actual peer", async () => {
+    const transport = vi.fn(async (_url: URL, pinnedAddress: string) => {
+      expect(pinnedAddress).toBe("93.184.216.34");
+      return { status: 200, headers: new Headers(), body: null, remoteAddress: "10.0.0.5" };
+    });
+    const fetcher = new HttpSourceFetcher({ lookup: publicLookup, transport });
+    await expect(fetcher.fetch("https://example.test/x")).rejects.toMatchObject({ code: "SOURCE_NETWORK_DENIED" });
+    expect(transport).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when an injected fetch cannot report the connected peer", async () => {
+    const fetcher = new HttpSourceFetcher({
+      lookup: publicLookup,
+      fetchImpl: (() => Promise.resolve(okResponse("unverified"))) as unknown as typeof fetch,
+    });
+    await expect(fetcher.fetch("https://example.test/x")).rejects.toMatchObject({ code: "SOURCE_NETWORK_DENIED" });
+  });
+
+  it("tries the next already-validated address when a pinned connection fails", async () => {
+    const transport = vi.fn(async (_url: URL, pinnedAddress: string) => {
+      if (pinnedAddress === "93.184.216.34") throw new Error("connect failed");
+      return { status: 200, headers: new Headers(), body: null, remoteAddress: pinnedAddress };
+    });
+    const fetcher = new HttpSourceFetcher({ lookup: async () => ["93.184.216.34", "1.1.1.1"], transport });
+    const result = await fetcher.fetch("https://example.test/x");
+    expect(result.content.byteLength).toBe(0);
+    expect(transport).toHaveBeenCalledTimes(2);
   });
 
   it("rejects a connection whose actual remote address is private (DNS rebinding / TOCTOU)", async () => {
