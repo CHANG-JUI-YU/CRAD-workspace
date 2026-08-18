@@ -81,10 +81,34 @@ describe("#128 dashboard authentication", () => {
     });
   });
 
-  it("compares tokens in constant time and tolerates length differences without throwing", () => {
+  it("returns 401 for a Unicode token with equal JS length but a different UTF-8 byte length", async () => {
+    await withTempDir(async (projectRoot) => {
+      const server = await startWorkspaceServer({
+        host: "127.0.0.1",
+        port: 0,
+        projectRoot,
+        authToken: "a",
+      });
+      try {
+        const address = server.address();
+        if (address === null || typeof address === "string") throw new Error("no port");
+        const base = `http://127.0.0.1:${address.port}`;
+        const response = await fetch(`${base}/?token=${encodeURIComponent("é")}`);
+        expect(response.status).toBe(401);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+  });
+
+  it("compares tokens in constant time and tolerates byte-length differences without throwing", () => {
     expect(timingSafeTextEqual("same-token", "same-token")).toBe(true);
     expect(timingSafeTextEqual("same-token", "different")).toBe(false);
     expect(timingSafeTextEqual("abc", "abcdef")).toBe(false);
+    expect("é".length).toBe("a".length);
+    expect(Buffer.byteLength("é", "utf8")).not.toBe(Buffer.byteLength("a", "utf8"));
+    expect(() => timingSafeTextEqual("é", "a")).not.toThrow();
+    expect(timingSafeTextEqual("é", "a")).toBe(false);
     expect(timingSafeTextEqual("", "")).toBe(true);
   });
 });
