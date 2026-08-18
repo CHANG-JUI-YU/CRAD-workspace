@@ -38,8 +38,9 @@ export function resolveExecutionActors(input: ExecutionActorInput | Record<strin
   return { executionAgent: "director", auditActor: legacyAuditActor || "director" };
 }
 
-/** Fence a durable domain side effect against the operation's current lease. */
+/** Fence a durable domain side effect against cancellation and the operation's current lease. */
 export function assertExecutionLeaseForOperation(operation: OperationRecord | undefined, execution?: ExecutionContext): void {
+  execution?.signal?.throwIfAborted();
   if (execution?.lease === undefined) return;
   if (operation === undefined
     || operation.lease_owner !== execution.lease.owner
@@ -51,6 +52,7 @@ export function assertExecutionLeaseForOperation(operation: OperationRecord | un
 }
 
 export async function assertExecutionLease(repository: ProjectRepository, execution?: ExecutionContext): Promise<void> {
+  execution?.signal?.throwIfAborted();
   if (execution?.lease === undefined) return;
   const state = await repository.read();
   assertExecutionLeaseForOperation(state.operations.find((item) => item.id === execution.operationId), execution);
