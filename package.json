@@ -22,11 +22,11 @@
   },
   "devDependencies": {
     "@types/node": "20.19.9",
-    "@vitest/coverage-v8": "3.2.4",
+    "@vitest/coverage-v8": "3.2.7",
     "jsonc-parser": "3.3.1",
     "tsx": "4.20.3",
     "typescript": "5.8.3",
-    "vitest": "3.2.4",
+    "vitest": "3.2.7",
     "yaml": "2.8.1"
   }
 }
