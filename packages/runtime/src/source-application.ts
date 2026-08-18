@@ -57,6 +57,7 @@ export function executionContextFor(
     auditActor,
     executionAgent: resolved,
     ...(options.lease === undefined ? {} : { lease: options.lease }),
+    ...(workspace.signal === undefined ? {} : { signal: workspace.signal }),
     ...(options.target === undefined ? {} : { target: options.target }),
     ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
   });
