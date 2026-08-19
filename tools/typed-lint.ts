@@ -23,7 +23,7 @@ export interface TypedLintIo {
 }
 
 const DEFAULT_CONFIG_PATH = "tsconfig.lint.json";
-const UNUSED_DIAGNOSTICS = new Set([6133, 6192, 6196]);
+const UNUSED_DIAGNOSTICS = new Set([6133, 6196]);
 const FALLTHROUGH_DIAGNOSTIC = 7029;
 
 function diagnosticLocation(diagnostic: ts.Diagnostic): { file: string; line: number; column: number } | undefined {
@@ -36,13 +36,33 @@ function diagnosticLocation(diagnostic: ts.Diagnostic): { file: string; line: nu
   };
 }
 
+function hasFunctionLikeAncestor(node: ts.Node): boolean {
+  let current: ts.Node | undefined = node.parent;
+  while (current !== undefined && !ts.isSourceFile(current)) {
+    if (ts.isFunctionLike(current)) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
+function isFunctionLocalUnused(diagnostic: ts.Diagnostic): boolean {
+  if (diagnostic.file === undefined || diagnostic.start === undefined) return false;
+  let current: ts.Node | undefined = ts.getTokenAtPosition(diagnostic.file, diagnostic.start);
+  while (current !== undefined && current !== diagnostic.file) {
+    if (ts.isParameter(current)) return false;
+    if (ts.isVariableDeclaration(current)) return hasFunctionLikeAncestor(current);
+    current = current.parent;
+  }
+  return false;
+}
+
 function compilerFinding(diagnostic: ts.Diagnostic): TypedLintFinding | undefined {
   const location = diagnosticLocation(diagnostic);
   if (location === undefined) return undefined;
-  const rule = UNUSED_DIAGNOSTICS.has(diagnostic.code)
-    ? "no-unused"
-    : diagnostic.code === FALLTHROUGH_DIAGNOSTIC
-      ? "no-fallthrough"
+  const rule = diagnostic.code === FALLTHROUGH_DIAGNOSTIC
+    ? "no-fallthrough"
+    : UNUSED_DIAGNOSTICS.has(diagnostic.code) && isFunctionLocalUnused(diagnostic)
+      ? "no-unused"
       : undefined;
   if (rule === undefined) return undefined;
   return {
@@ -58,9 +78,23 @@ function unwrapParentheses(expression: ts.Expression): ts.Expression {
   return current;
 }
 
+function isHandledPromiseChain(expression: ts.Expression): boolean {
+  if (!ts.isCallExpression(expression)) return false;
+  const callee = unwrapParentheses(expression.expression);
+  if (!ts.isPropertyAccessExpression(callee)) return false;
+  if (callee.name.text === "catch") return expression.arguments.length >= 1;
+  if (callee.name.text === "then") return expression.arguments.length >= 2;
+  return false;
+}
+
 function isExplicitlyHandledPromise(expression: ts.Expression): boolean {
   const current = unwrapParentheses(expression);
-  return ts.isAwaitExpression(current) || ts.isVoidExpression(current);
+  return (
+    ts.isAwaitExpression(current) ||
+    ts.isVoidExpression(current) ||
+    ts.isAssignmentExpression(current, false) ||
+    isHandledPromiseChain(current)
+  );
 }
 
 function isPromiseLike(checker: ts.TypeChecker, expression: ts.Expression): boolean {
@@ -114,7 +148,7 @@ function inspectNode(checker: ts.TypeChecker, sourceFile: ts.SourceFile, node: t
         "no-floating-promises",
         sourceFile,
         expression,
-        "Promise-like expression is ignored; await it or explicitly discard it with void.",
+        "Promise-like expression is ignored; await it, handle rejection, store it, or explicitly discard it with void.",
       ));
     }
   }
