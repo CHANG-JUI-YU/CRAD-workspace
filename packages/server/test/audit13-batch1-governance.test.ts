@@ -2,6 +2,7 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 const repositoryRoot = path.resolve(process.cwd());
 
@@ -39,6 +40,8 @@ describe("Audit 13 #211 governance identity", () => {
       path.join(repositoryRoot, ".github", "workflows", "close-audit-issue.yml"),
       "utf8",
     );
+    const governanceYaml = parse(governance) as { permissions: Record<string, string> };
+    const closeYaml = parse(closeWorkflow) as { permissions: Record<string, string> };
 
     for (const workflow of [governance, closeWorkflow]) {
       expect(workflow).toContain("from audit_issue_identity import is_audit_issue_title");
@@ -46,6 +49,16 @@ describe("Audit 13 #211 governance identity", () => {
     }
     expect(governance).toContain("ref: ${{ github.event.pull_request.base.sha }}");
     expect(closeWorkflow).toContain("ref: main");
+    expect(governanceYaml.permissions).toEqual({
+      contents: "read",
+      issues: "read",
+      "pull-requests": "read",
+    });
+    expect(closeYaml.permissions).toEqual({
+      actions: "read",
+      contents: "read",
+      issues: "write",
+    });
   });
 
   it("documents one canonical title format and legacy read compatibility", async () => {
