@@ -28,6 +28,11 @@ jobs:
         run: pnpm build
       - name: Typecheck
         run: pnpm typecheck:only
+      # Typed lint intentionally uses the already-built workspace. The public
+      # `pnpm lint` command remains convenient for standalone use, while CI
+      # avoids a second build by calling the :only form directly.
+      - name: Typed lint
+        run: pnpm lint:only
       # The suite contains fsync/rename-heavy repository integration tests.
       # Parallel test files can saturate hosted-runner filesystems (especially
       # Windows), starving lock heartbeats and causing recovery/cleanup races.
@@ -38,7 +43,7 @@ jobs:
 
   # #153 requires the full non-coverage suite on both supported CI operating
   # systems. Coverage therefore remains a separate Ubuntu gate, but it uses the
-  # :only command so this job does not rebuild the workspace a second time.
+  # :only commands so this job does not rebuild the workspace a second time.
   coverage:
     name: Coverage (ubuntu-latest)
     runs-on: ubuntu-latest
@@ -55,5 +60,9 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build workspace
         run: pnpm build
-      - name: Coverage gate
+      - name: Package coverage gate
         run: pnpm test:coverage:only
+      # Maintenance analyzers live outside packages/*/src, so keep their
+      # coverage ownership explicit instead of diluting the package thresholds.
+      - name: Maintenance tool coverage gate
+        run: pnpm test:tools:coverage:only
