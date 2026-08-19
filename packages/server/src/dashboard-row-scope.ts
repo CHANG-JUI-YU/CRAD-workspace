@@ -2,7 +2,7 @@ import { DASHBOARD_PANELS_MEDIA_JS } from "./dashboard-panels-media.js";
 import { DASHBOARD_PANELS_PUBLISH_JS } from "./dashboard-panels-publish.js";
 import { DASHBOARD_PANELS_REVIEW_JS } from "./dashboard-panels-review.js";
 
-type RowScopeRule = {
+export type RowScopeRule = {
   functionName: string;
   bindings: readonly string[];
 };
