@@ -55,7 +55,7 @@ const GATES: Record<QualityGateId, QualityGate> = {
   "dependency-audit": {
     id: "dependency-audit",
     label: "Dependency audit (high+)",
-    args: ["audit", "--audit-level=high"],
+    args: ["audit:dependencies"],
   },
 };
 
