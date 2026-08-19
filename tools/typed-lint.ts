@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import ts from "typescript";
@@ -15,6 +16,7 @@ export interface TypedLintFinding {
 export interface TypedLintReport {
   readonly files: number;
   readonly findings: readonly TypedLintFinding[];
+  readonly baselined: number;
 }
 
 export interface TypedLintIo {
@@ -22,9 +24,23 @@ export interface TypedLintIo {
   readonly err: (message: string) => void;
 }
 
+interface TypedLintBaselineEntry {
+  readonly rule: TypedLintRule;
+  readonly file: string;
+  readonly message: string;
+  readonly reason: string;
+}
+
 const DEFAULT_CONFIG_PATH = "tsconfig.lint.json";
+const DEFAULT_BASELINE_PATH = "typed-lint-baseline.json";
 const UNUSED_DIAGNOSTICS = new Set([6133, 6196]);
 const FALLTHROUGH_DIAGNOSTIC = 7029;
+const TYPED_LINT_RULES = new Set<TypedLintRule>([
+  "no-floating-promises",
+  "no-promise-condition",
+  "no-fallthrough",
+  "no-unused",
+]);
 
 function diagnosticLocation(diagnostic: ts.Diagnostic): { file: string; line: number; column: number } | undefined {
   if (diagnostic.file === undefined || diagnostic.start === undefined) return undefined;
@@ -180,6 +196,69 @@ function parseProject(configPath: string): ts.ParsedCommandLine {
   return parsed;
 }
 
+function normalizedRelativePath(root: string, file: string): string {
+  return path.relative(root, file).split(path.sep).join("/");
+}
+
+function baselineKey(rule: TypedLintRule, file: string, message: string): string {
+  return `${rule}\n${file}\n${message}`;
+}
+
+function readBaseline(root: string): readonly TypedLintBaselineEntry[] {
+  const baselinePath = path.join(root, DEFAULT_BASELINE_PATH);
+  if (!existsSync(baselinePath)) return [];
+  const parsed = JSON.parse(readFileSync(baselinePath, "utf8")) as unknown;
+  if (!Array.isArray(parsed)) throw new Error(`${DEFAULT_BASELINE_PATH} must contain an array.`);
+  return parsed.map((value, index) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error(`${DEFAULT_BASELINE_PATH}[${index}] must be an object.`);
+    }
+    const entry = value as Record<string, unknown>;
+    if (typeof entry.rule !== "string" || !TYPED_LINT_RULES.has(entry.rule as TypedLintRule)) {
+      throw new Error(`${DEFAULT_BASELINE_PATH}[${index}].rule is invalid.`);
+    }
+    if (typeof entry.file !== "string" || entry.file.length === 0) {
+      throw new Error(`${DEFAULT_BASELINE_PATH}[${index}].file is required.`);
+    }
+    if (typeof entry.message !== "string" || entry.message.length === 0) {
+      throw new Error(`${DEFAULT_BASELINE_PATH}[${index}].message is required.`);
+    }
+    if (typeof entry.reason !== "string" || entry.reason.length === 0) {
+      throw new Error(`${DEFAULT_BASELINE_PATH}[${index}].reason is required.`);
+    }
+    return {
+      rule: entry.rule as TypedLintRule,
+      file: entry.file.split("\\").join("/"),
+      message: entry.message,
+      reason: entry.reason,
+    };
+  });
+}
+
+function applyBaseline(
+  findings: readonly TypedLintFinding[],
+  root: string,
+): { findings: TypedLintFinding[]; baselined: number } {
+  const baseline = readBaseline(root);
+  if (baseline.length === 0) return { findings: [...findings], baselined: 0 };
+  const remaining = [...findings];
+  let baselined = 0;
+  for (const entry of baseline) {
+    const expected = baselineKey(entry.rule, entry.file, entry.message);
+    const index = remaining.findIndex((finding) => baselineKey(
+      finding.rule,
+      normalizedRelativePath(root, finding.file),
+      finding.message,
+    ) === expected);
+    if (index < 0) {
+      throw new Error(`Typed lint baseline entry is stale: ${entry.file} [${entry.rule}] ${entry.message}`);
+    }
+    remaining.splice(index, 1);
+    baselined += 1;
+  }
+  return { findings: remaining, baselined };
+}
+
 export function lintTypeScriptProject(configPath = DEFAULT_CONFIG_PATH): TypedLintReport {
   const resolvedConfig = path.resolve(configPath);
   const parsed = parseProject(resolvedConfig);
@@ -209,7 +288,8 @@ export function lintTypeScriptProject(configPath = DEFAULT_CONFIG_PATH): TypedLi
       left.column - right.column ||
       left.rule.localeCompare(right.rule),
   );
-  return { files: sourceFiles.length, findings };
+  const baselineResult = applyBaseline(findings, path.dirname(resolvedConfig));
+  return { files: sourceFiles.length, findings: baselineResult.findings, baselined: baselineResult.baselined };
 }
 
 function formatFinding(finding: TypedLintFinding, root: string): string {
@@ -227,10 +307,10 @@ export function runTypedLint(
     const root = path.dirname(configPath);
     if (report.findings.length > 0) {
       for (const finding of report.findings) io.err(formatFinding(finding, root));
-      io.err(`Typed lint failed with ${report.findings.length} finding(s) across ${report.files} file(s).`);
+      io.err(`Typed lint failed with ${report.findings.length} finding(s) across ${report.files} file(s); ${report.baselined} exact baseline finding(s) retained.`);
       return 1;
     }
-    io.out(`Typed lint passed across ${report.files} file(s).`);
+    io.out(`Typed lint passed across ${report.files} file(s); ${report.baselined} exact baseline finding(s) retained.`);
     return 0;
   } catch (error) {
     io.err(error instanceof Error ? error.message : String(error));
