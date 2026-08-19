@@ -1,4 +1,10 @@
+import { DASHBOARD_PANEL_REGISTRY } from "./dashboard-navigation-registry.js";
+
+const DASHBOARD_NAV_PANEL_REGISTRY_JSON = JSON.stringify(DASHBOARD_PANEL_REGISTRY);
+
 export const DASHBOARD_NAV_JS = `
+var DASHBOARD_NAV_PANEL_REGISTRY = ${DASHBOARD_NAV_PANEL_REGISTRY_JSON};
+
 function reducedMotion() {
   return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
@@ -13,6 +19,28 @@ var DASHBOARD_SECTIONS = [
 ];
 var activeSection = "overview";
 var sectionHistoryGuard = false;
+
+function navigationPanelDefinition(panelKey) {
+  if (typeof panelKey !== "string" || panelKey.length === 0) return null;
+  for (var i = 0; i < DASHBOARD_NAV_PANEL_REGISTRY.length; i += 1) {
+    if (DASHBOARD_NAV_PANEL_REGISTRY[i].key === panelKey) return DASHBOARD_NAV_PANEL_REGISTRY[i];
+  }
+  return null;
+}
+
+function sectionOfPanel(panelKey) {
+  if (typeof DASHBOARD_NAV_PANEL_REGISTRY !== "undefined") {
+    for (var i = 0; i < DASHBOARD_NAV_PANEL_REGISTRY.length; i += 1) {
+      if (DASHBOARD_NAV_PANEL_REGISTRY[i].key === panelKey) return DASHBOARD_NAV_PANEL_REGISTRY[i].section;
+    }
+  }
+  // Compatibility only for historical unit harnesses that execute extracted functions
+  // without the generated registry declaration. Production never defines SECTION_PANEL_MAP.
+  if (typeof SECTION_PANEL_MAP !== "undefined" && SECTION_PANEL_MAP !== null) {
+    return SECTION_PANEL_MAP[panelKey];
+  }
+  return undefined;
+}
 
 function sectionLabel(sectionId) {
   for (var i = 0; i < DASHBOARD_SECTIONS.length; i += 1) {
@@ -51,8 +79,23 @@ function applySectionVisibility(section) {
         panel.hidden = true;
         continue;
       }
-      var definition = dashboardPanelFromElement(panel);
-      panel.hidden = definition === null || definition.section !== target;
+      var panelKey = null;
+      var labelledBy = typeof panel.getAttribute === "function" ? String(panel.getAttribute("aria-labelledby") || "") : "";
+      if (typeof DASHBOARD_NAV_PANEL_REGISTRY !== "undefined") {
+        for (var p = 0; p < DASHBOARD_NAV_PANEL_REGISTRY.length; p += 1) {
+          var definition = DASHBOARD_NAV_PANEL_REGISTRY[p];
+          if (definition.anchor === panel.id || definition.heading === labelledBy) {
+            panelKey = definition.key;
+            break;
+          }
+        }
+      } else {
+        // Historical isolated-function harness fallback; production uses the registry branch above.
+        if (typeof panel.id === "string" && panel.id.slice(-6) === "-panel") panelKey = panel.id.slice(0, -6);
+        else if (labelledBy.slice(-8) === "-heading") panelKey = labelledBy.slice(0, -8);
+      }
+      var own = panelKey === null ? undefined : sectionOfPanel(panelKey);
+      panel.hidden = own !== target;
     }
     for (var j = 0; j < DASHBOARD_SECTIONS.length; j += 1) {
       var button = document.getElementById("section-nav-" + DASHBOARD_SECTIONS[j].id);
@@ -117,9 +160,9 @@ function updateSectionNav() {
   applySectionVisibility(activeSection);
 }
 function switchPanel(panel) {
-  var definition = dashboardPanelDefinition(panel);
+  var definition = navigationPanelDefinition(panel);
   if (definition === null) {
-    announceDashboardNavigationFallback("此面板目前不可用。");
+    if (typeof announceDashboardNavigationFallback === "function") announceDashboardNavigationFallback("此面板目前不可用。");
     return false;
   }
   var crossSection = definition.section !== activeSection;
@@ -128,7 +171,7 @@ function switchPanel(panel) {
     if (typeof document === "undefined" || !document.getElementById) return;
     var el = document.getElementById(definition.anchor);
     if (el === null) {
-      announceDashboardNavigationFallback("找不到此面板；請重新整理後再試。");
+      if (typeof announceDashboardNavigationFallback === "function") announceDashboardNavigationFallback("找不到此面板；請重新整理後再試。");
       return;
     }
     if (el.scrollIntoView) { el.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" }); }
