@@ -13,13 +13,13 @@
   },
   {
     "rule": "no-unused",
-    "file": "packages/runtime/src/index.ts",
+    "file": "packages/runtime/src/workspace-runtime.ts",
     "message": "'actor' is declared but its value is never read.",
     "reason": "Pre-existing dead local retained outside the focused #157 rollout; any new unused local still fails typed lint."
   },
   {
     "rule": "no-unused",
-    "file": "packages/runtime/src/index.ts",
+    "file": "packages/runtime/src/workspace-runtime.ts",
     "message": "'buildRecord' is declared but its value is never read.",
     "reason": "Pre-existing dead local retained outside the focused #157 rollout; any new unused local still fails typed lint."
   }
