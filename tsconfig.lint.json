@@ -6,7 +6,6 @@
     "declarationMap": false,
     "sourceMap": false,
     "noUnusedLocals": true,
-    "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
   "include": ["packages/*/src/**/*.ts", "tools/**/*.ts"],
