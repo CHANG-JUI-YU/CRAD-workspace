@@ -8,13 +8,16 @@ import { FileProjectRepository as RepositoryImplementation } from "./repository-
  * same canonical check before relocation changes identity.
  */
 export class FileProjectRepository extends RepositoryImplementation {
+  private readonly projectRootBoundary: string;
+
   constructor(projectRoot: string, projectId: string, options: FileProjectRepositoryOptions = {}) {
     resolveProjectDirectory(projectRoot, projectId);
     super(projectRoot, projectId, options);
+    this.projectRootBoundary = projectRoot;
   }
 
   override async relocate(newProjectId: string): Promise<void> {
-    resolveProjectDirectory(this.projectDirectory === undefined ? "." : this.projectDirectory, newProjectId);
+    resolveProjectDirectory(this.projectRootBoundary, newProjectId);
     await super.relocate(newProjectId);
   }
 }
