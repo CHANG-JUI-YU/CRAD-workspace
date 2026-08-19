@@ -48,7 +48,7 @@ describe("Audit 11 #157 typed lint", () => {
       }
     `);
     try {
-      expect(lintTypeScriptProject(fixture.configPath)).toMatchObject({ findings: [] });
+      expect(lintTypeScriptProject(fixture.configPath)).toMatchObject({ findings: [], baselined: 0 });
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
     }
@@ -81,12 +81,55 @@ describe("Audit 11 #157 typed lint", () => {
     }
   });
 
+  it("suppresses only exact baseline findings and rejects stale baseline debt", async () => {
+    const fixture = await lintFixture(`
+      export function legacy(): void {
+        const legacyUnused = 1;
+      }
+    `);
+    try {
+      const initial = lintTypeScriptProject(fixture.configPath);
+      expect(initial.findings).toHaveLength(1);
+      const finding = initial.findings[0]!;
+      const baselinePath = path.join(fixture.root, "typed-lint-baseline.json");
+      await writeFile(
+        baselinePath,
+        JSON.stringify([{
+          rule: finding.rule,
+          file: "src/fixture.ts",
+          message: finding.message,
+          reason: "Known pre-existing debt",
+        }]),
+        "utf8",
+      );
+      expect(lintTypeScriptProject(fixture.configPath)).toMatchObject({ findings: [], baselined: 1 });
+
+      await writeFile(
+        baselinePath,
+        JSON.stringify([{
+          rule: finding.rule,
+          file: "src/fixture.ts",
+          message: `${finding.message} changed`,
+          reason: "Known pre-existing debt",
+        }]),
+        "utf8",
+      );
+      expect(() => lintTypeScriptProject(fixture.configPath)).toThrow(/baseline entry is stale/u);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("keeps lint and maintenance coverage in the required CI path without another build", async () => {
     const packageJson = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8")) as {
       scripts: Record<string, string>;
     };
     const ci = await readFile(path.join(repositoryRoot, ".github", "workflows", "ci.yml"), "utf8");
     const toolsCoverage = await readFile(path.join(repositoryRoot, "vitest.tools.config.ts"), "utf8");
+    const baseline = JSON.parse(await readFile(path.join(repositoryRoot, "typed-lint-baseline.json"), "utf8")) as Array<{
+      rule: string;
+      reason: string;
+    }>;
 
     expect(packageJson.scripts.lint).toBe("pnpm build && pnpm lint:only");
     expect(packageJson.scripts["lint:only"]).toBe("tsx tools/typed-lint.ts");
@@ -113,5 +156,7 @@ describe("Audit 11 #157 typed lint", () => {
     ]) {
       expect(toolsCoverage).toContain(coverageFloor);
     }
+    expect(baseline).toHaveLength(4);
+    expect(baseline.every((entry) => entry.rule === "no-unused" && entry.reason.length > 0)).toBe(true);
   });
 });
