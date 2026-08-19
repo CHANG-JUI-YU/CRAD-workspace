@@ -80,12 +80,14 @@ export function qualityPipelineGateIds(name: QualityPipelineName): readonly Qual
   return PIPELINES[name];
 }
 
-function pnpmExecutable(): string {
-  return process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-}
-
 export function executeQualityGate(gate: QualityGate): number {
-  const result = spawnSync(pnpmExecutable(), [...gate.args], {
+  const pnpmEntrypoint = process.env.npm_execpath;
+  if (!pnpmEntrypoint) {
+    console.error(`Failed to start ${gate.label}: npm_execpath is unavailable; run this pipeline through pnpm.`);
+    return 1;
+  }
+
+  const result = spawnSync(process.execPath, [pnpmEntrypoint, ...gate.args], {
     cwd: process.cwd(),
     env: process.env,
     stdio: "inherit",
