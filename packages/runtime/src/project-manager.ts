@@ -1,12 +1,14 @@
 import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { CoreError, FileProjectRepository, PROJECT_RELOCATION_INTENT_PATH, internalId, type ProjectState, type RequestResult, type WorkspaceContext } from "@st-workspace/core";
+import { CoreError, FileProjectRepository, PROJECT_RELOCATION_INTENT_PATH, type ProjectState, type RequestResult, type WorkspaceContext } from "@st-workspace/core";
 import type { WorkspaceRuntime } from "./index.js";
+import {
+  cleanupInterviewMigrationSource,
+  commitInterviewMigrationTarget,
+  listInterviewMigrationIntents,
+  prepareInterviewMigrationIntent,
+} from "./interview-migration.js";
 import { RecoverableProjectRepository } from "./project-relocation.js";
-
-function now(): string {
-  return new Date().toISOString();
-}
 
 export interface WorkspaceProjectSummary {
   readonly project_id: string;
@@ -14,6 +16,14 @@ export interface WorkspaceProjectSummary {
   readonly status: ProjectState["project_status"];
   readonly path: string;
   readonly revision?: number;
+}
+
+export type InterviewMigrationFailurePoint = "after_target_selection" | "after_target_commit";
+
+export interface InterviewMigrationFailureInjection {
+  readonly point: InterviewMigrationFailurePoint;
+  readonly mode: "error" | "crash";
+  readonly once?: boolean;
 }
 
 export interface WorkspaceProjectManagerOptions {
@@ -25,6 +35,8 @@ export interface WorkspaceProjectManagerOptions {
    * reopening the conventional project-001 directory.
    */
   readonly freshByDefault?: boolean;
+  /** Failure injection for the cross-repository targeted-interview protocol. */
+  readonly interviewMigrationFailureInjection?: InterviewMigrationFailureInjection;
 }
 
 function safeSegment(value: string): string {
@@ -40,6 +52,13 @@ async function exists(filePath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+class InterviewMigrationCrashInjection extends Error {
+  constructor(point: InterviewMigrationFailurePoint) {
+    super(`Injected interview migration crash at ${point}`);
+    this.name = "InterviewMigrationCrashInjection";
   }
 }
 
@@ -79,6 +98,8 @@ export class WorkspaceProjectManager {
   private readonly freshByDefault: boolean;
   private sessionPrepared: boolean;
   private preparePromise: Promise<WorkspaceRuntime> | undefined;
+  private interviewMigrationFailureInjection: InterviewMigrationFailureInjection | undefined;
+  private recoveringInterviewMigration = false;
 
   constructor(private readonly options: WorkspaceProjectManagerOptions) {
     const initialProjectId = options.initialProjectId ?? "project-001";
@@ -86,6 +107,7 @@ export class WorkspaceProjectManager {
     this.runtimeValue = options.createRuntime(this.repositoryValue);
     this.freshByDefault = options.freshByDefault ?? true;
     this.sessionPrepared = options.initialProjectId !== undefined;
+    this.interviewMigrationFailureInjection = options.interviewMigrationFailureInjection;
   }
 
   get root(): string {
@@ -101,6 +123,7 @@ export class WorkspaceProjectManager {
   }
 
   async ensureRuntime(): Promise<WorkspaceRuntime> {
+    await this.recoverPendingInterviewMigrationForSession();
     if (this.sessionPrepared || !this.freshByDefault) {
       await this.repositoryValue.read();
       return this.runtimeValue;
@@ -121,6 +144,53 @@ export class WorkspaceProjectManager {
    */
   sessionSelected(): boolean {
     return this.sessionPrepared;
+  }
+
+  private activateProject(projectId: string, placeholderReuseAllowed: boolean): void {
+    this.repositoryValue = new RecoverableProjectRepository(this.options.root, projectId, { layout: "project", materialize: true });
+    this.runtimeValue = this.options.createRuntime(this.repositoryValue);
+    this.placeholderReuseAllowed = placeholderReuseAllowed;
+    this.sessionPrepared = true;
+  }
+
+  private async recoverPendingInterviewMigrationForSession(): Promise<void> {
+    if (this.recoveringInterviewMigration) return;
+    this.recoveringInterviewMigration = true;
+    try {
+      const intents = await listInterviewMigrationIntents(this.options.root);
+      if (intents.length === 0) return;
+      const currentProjectId = this.repositoryValue.projectId;
+      const candidates = this.sessionPrepared
+        ? intents.filter((intent) => intent.source_project_id === currentProjectId || intent.target_project_id === currentProjectId)
+        : intents;
+      if (candidates.length === 0) return;
+      if (candidates.length > 1) {
+        throw new CoreError("INTERVIEW_MIGRATION_RECOVERY_AMBIGUOUS", "Multiple pending interview migrations match this session", true, {
+          migration_ids: candidates.map((intent) => intent.migration_id),
+        });
+      }
+
+      const intent = candidates[0]!;
+      const sourceRepository = new RecoverableProjectRepository(this.options.root, intent.source_project_id, { layout: "project", materialize: true });
+      const targetRepository = new RecoverableProjectRepository(this.options.root, intent.target_project_id, { layout: "project", materialize: true });
+      let migrated: ProjectState;
+      try {
+        migrated = await commitInterviewMigrationTarget(intent, sourceRepository, targetRepository);
+      } catch (error) {
+        this.activateProject(intent.source_project_id, true);
+        throw error;
+      }
+
+      try {
+        await cleanupInterviewMigrationSource(this.options.root, intent, sourceRepository);
+      } catch {
+        // Target ownership is durable once its migration audit exists. Leaving
+        // the source intent in place keeps cleanup retryable on the next call.
+      }
+      this.activateProject(migrated.project_id, false);
+    } finally {
+      this.recoveringInterviewMigration = false;
+    }
   }
 
   private async prepareFreshSession(): Promise<WorkspaceRuntime> {
@@ -182,10 +252,7 @@ export class WorkspaceProjectManager {
     if (result.status === "not_found") throw new CoreError("PROJECT_NOT_FOUND", `找不到專案「${requested}」 (project was not found)`, true);
     if (result.status === "ambiguous") throw new CoreError("PROJECT_SELECTION_AMBIGUOUS", `發現多個符合「${requested}」的專案，請提供專案 ID 或完整路徑 (ambiguous project selection)`, true);
     const selected = result.target;
-    this.repositoryValue = new RecoverableProjectRepository(this.options.root, path.basename(selected.path), { layout: "project", materialize: true });
-    this.runtimeValue = this.options.createRuntime(this.repositoryValue);
-    this.placeholderReuseAllowed = false;
-    this.sessionPrepared = true;
+    this.activateProject(path.basename(selected.path), false);
     return selected;
   }
 
@@ -198,10 +265,7 @@ export class WorkspaceProjectManager {
     let sequence = 1;
     while (used.has(`project-${String(sequence).padStart(3, "0")}`)) sequence += 1;
     const id = `project-${String(sequence).padStart(3, "0")}`;
-    this.repositoryValue = new RecoverableProjectRepository(this.options.root, id, { layout: "project", materialize: true });
-    this.runtimeValue = this.options.createRuntime(this.repositoryValue);
-    this.placeholderReuseAllowed = false;
-    this.sessionPrepared = true;
+    this.activateProject(id, false);
     await this.repositoryValue.read();
     return this.runtimeValue;
   }
@@ -257,11 +321,10 @@ export class WorkspaceProjectManager {
 
   /**
    * Targeted interview flows (continue, existing-world, character expansion)
-   * ask for the target project up front. As soon as the target value has been
-   * answered the interview (and its operation) is migrated onto the target
-   * repository so every remaining question — and the Blueprint/precheck that a
-   * world or expansion completion produces — is applied to the real project
-   * instead of the hidden placeholder.
+   * ask for the target project up front. Source ownership is persisted in a
+   * durable migration intent before the manager switches active repositories.
+   * The target commit is idempotent by migration id; source cleanup is a second,
+   * retryable phase rather than being represented as physically atomic.
    */
   private async switchToTargetedProject(result: RequestResult, context: WorkspaceContext): Promise<RequestResult | undefined> {
     if (!this.placeholderReuseAllowed) return undefined;
@@ -285,7 +348,6 @@ export class WorkspaceProjectManager {
 
     const summaries = await this.listProjects();
     const targetResult = findTargetProject(targetName, summaries);
-
     const interviewOperation = [...placeholderState.operations].reverse().find((item) => item.kind === "interview");
 
     if (targetResult.status !== "found") {
@@ -337,97 +399,82 @@ export class WorkspaceProjectManager {
     const target = targetResult.target;
     if (target.project_id === placeholderState.project_id) return undefined;
 
-    await this.select(target.project_id);
-    const targetState = await this.repositoryValue.read();
-    const operationToMigrate = interviewOperation === undefined
-      ? undefined
-      : targetState.operations.some((item) => item.id === interviewOperation.id)
-        ? { ...interviewOperation, id: internalId("operation") }
-        : interviewOperation;
+    const targetRepository = new RecoverableProjectRepository(this.options.root, path.basename(target.path), { layout: "project", materialize: true });
+    const targetState = await targetRepository.read();
+    const intent = await prepareInterviewMigrationIntent({
+      root: this.options.root,
+      source: placeholderState,
+      target: targetState,
+      flow,
+      ...(interviewOperation === undefined ? {} : { sourceOperation: interviewOperation }),
+      actor: context.actor,
+    });
+
+    let migrated: ProjectState;
+    try {
+      await this.select(target.project_id);
+      this.injectInterviewMigrationFailure("after_target_selection");
+      migrated = await commitInterviewMigrationTarget(intent, placeholderRepository, this.repositoryValue);
+    } catch (error) {
+      if (error instanceof InterviewMigrationCrashInjection) throw error;
+      this.activateProject(placeholderState.project_id, true);
+      if (error instanceof CoreError && error.code === "INTERVIEW_MIGRATION_NOT_COMMITTED") throw error;
+      throw new CoreError(
+        "INTERVIEW_MIGRATION_NOT_COMMITTED",
+        "Target interview migration did not commit; the source project remains authoritative and the migration can be retried",
+        true,
+        { migration_id: intent.migration_id, cause: error },
+      );
+    }
+
+    let cleanupError: unknown;
+    try {
+      this.injectInterviewMigrationFailure("after_target_commit");
+      await cleanupInterviewMigrationSource(this.options.root, intent, placeholderRepository);
+    } catch (error) {
+      if (error instanceof InterviewMigrationCrashInjection) throw error;
+      cleanupError = error;
+    }
+
+    const continued = placeholderState.interview.status !== "complete";
+    const projectName = target.project_name ?? target.project_id;
+    if (cleanupError !== undefined) {
+      return {
+        ...result,
+        status: result.status === "completed" ? "partial" as const : result.status,
+        project_id: migrated.project_id,
+        ...(migrated.project_name === undefined ? {} : { project_name: migrated.project_name }),
+        project_path: this.repositoryValue.projectDirectory,
+        summary: `已切換至專案「${projectName}」，目標遷移已提交；來源暫存專案清理尚未完成，會在下次操作或重啟時自動恢復。${result.summary}`.trim(),
+      };
+    }
 
     if (flow === "continue") {
-      const migrated = await this.repositoryValue.commit(targetState.revision, (current) => ({
-        ...current,
-        project_status: current.project_status === "uninitialized" ? "ready" : current.project_status,
-        interview: placeholderState.interview,
-        operations: operationToMigrate === undefined ? current.operations : [...current.operations, operationToMigrate],
-        audit: [
-          ...current.audit,
-          {
-            id: internalId("audit"),
-            operation_id: operationToMigrate?.id ?? internalId("operation"),
-            event: "interview.target.migrated",
-            actor: context.actor,
-            occurred_at: now(),
-            project_revision: current.revision + 1,
-            details: { source_project: placeholderState.project_id, target_project: target.project_id, flow, target_revision: targetState.revision },
-          },
-        ],
-      }));
-
-      await placeholderRepository.commit(placeholderState.revision, (current) => ({
-        ...current,
-        project_status: "uninitialized",
-        interview: {
-          schema_version: 1,
-          status: "idle",
-          flow: "new_project",
-          answers: [],
-          values: {},
-        },
-        operations: interviewOperation === undefined ? current.operations : current.operations.filter((item) => item.id !== interviewOperation.id),
-      }));
-
       return {
         ...result,
         status: "completed" as const,
         project_id: migrated.project_id,
         ...(migrated.project_name === undefined ? {} : { project_name: migrated.project_name }),
         project_path: this.repositoryValue.projectDirectory,
-        summary: `已切換至專案「${target.project_name ?? target.project_id}」。`,
+        summary: `已切換至專案「${projectName}」。`,
       };
     }
 
-    const migrated = await this.repositoryValue.commit(targetState.revision, (current) => ({
-      ...current,
-      project_status: "interviewing",
-      interview: placeholderState.interview,
-      operations: operationToMigrate === undefined ? current.operations : [...current.operations, operationToMigrate],
-      audit: [
-        ...current.audit,
-        {
-          id: internalId("audit"),
-          operation_id: operationToMigrate?.id ?? internalId("operation"),
-          event: "interview.target.migrated",
-          actor: context.actor,
-          occurred_at: now(),
-          project_revision: current.revision + 1,
-          details: { source_project: placeholderState.project_id, target_project: target.project_id, flow, target_revision: targetState.revision },
-        },
-      ],
-    }));
-
-    await placeholderRepository.commit(placeholderState.revision, (current) => ({
-      ...current,
-      project_status: "uninitialized",
-      interview: {
-        schema_version: 1,
-        status: "idle",
-        flow: "new_project",
-        answers: [],
-        values: {},
-      },
-      operations: interviewOperation === undefined ? current.operations : current.operations.filter((item) => item.id !== interviewOperation.id),
-    }));
-
-    const continued = placeholderState.interview.status !== "complete";
     return {
       ...result,
       project_id: migrated.project_id,
       ...(migrated.project_name === undefined ? {} : { project_name: migrated.project_name }),
       project_path: this.repositoryValue.projectDirectory,
-      summary: `已切換至專案「${target.project_name ?? target.project_id}」（revision ${migrated.revision}）${continued ? "，訪談將於目標專案上繼續" : ""}。${result.summary}`.trim(),
+      summary: `已切換至專案「${projectName}」（revision ${migrated.revision}）${continued ? "，訪談將於目標專案上繼續" : ""}。${result.summary}`.trim(),
     };
+  }
+
+  private injectInterviewMigrationFailure(point: InterviewMigrationFailurePoint): void {
+    const injection = this.interviewMigrationFailureInjection;
+    if (injection === undefined || injection.point !== point) return;
+    if (injection.once !== false) this.interviewMigrationFailureInjection = undefined;
+    if (injection.mode === "crash") throw new InterviewMigrationCrashInjection(point);
+    throw new CoreError("INJECTED_FAILURE", `Injected interview migration failure at ${point}`, true, { point });
   }
 
   private async importLegacyCard(filePath: string, result: RequestResult, context: WorkspaceContext): Promise<RequestResult> {
