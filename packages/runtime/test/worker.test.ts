@@ -135,7 +135,11 @@ describe("background workspace worker", () => {
       expect(renew.mock.calls[0]?.[0]).toBe("op-renew");
       expect(renew.mock.calls[0]?.[1]).toBe("writer");
       expect(renew.mock.calls[0]?.[2]).toEqual(expect.any(String));
-      expect(recover).toHaveBeenCalledWith("op-renew", { actor: "writer", attachments: [] }, expect.objectContaining({ lease: expect.objectContaining({ owner: "writer", token: expect.any(String) }) }));
+      expect(recover).toHaveBeenCalledWith(
+        "op-renew",
+        expect.objectContaining({ actor: "writer", attachments: [], signal: expect.anything() }),
+        expect.objectContaining({ lease: expect.objectContaining({ owner: "writer", token: expect.any(String) }) }),
+      );
     } finally {
       worker.stop();
     }

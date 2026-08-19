@@ -2,7 +2,7 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { checkServerIdentity } from "node:tls";
-import { CoreError } from "@st-workspace/core";
+import { CoreError, currentWorkspaceAbortSignal } from "@st-workspace/core";
 import type { FetchResult, SourceFetcher } from "@st-workspace/domain";
 import { isBlockedIp, isIpLiteral, parseIpv4, parseIpv6, stripBrackets } from "./network-policy.js";
 
@@ -178,12 +178,22 @@ export class HttpSourceFetcher {
       throw new CoreError("SOURCE_URL_INVALID", "來源 URL 無法解析", true);
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const externalSignal = currentWorkspaceAbortSignal();
+    let timedOut = false;
+    const abortFromExternal = () => controller.abort(externalSignal?.reason);
+    if (externalSignal?.aborted) abortFromExternal();
+    else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.timeoutMs);
     try {
+      externalSignal?.throwIfAborted();
       let current = initial;
       let redirects = 0;
       while (true) {
         const addresses = await this.assertTargetAllowed(current);
+        externalSignal?.throwIfAborted();
         const response = await this.requestPinned(current, addresses, controller.signal);
         const status = response.status;
         if (status >= 300 && status < 400) {
@@ -212,6 +222,7 @@ export class HttpSourceFetcher {
           throw new CoreError("SOURCE_TOO_LARGE", "來源超過大小限制", true);
         }
         const content = await this.readBoundedBody(response, controller);
+        externalSignal?.throwIfAborted();
         const mediaType = response.headers.get("content-type");
         return {
           content,
@@ -221,11 +232,17 @@ export class HttpSourceFetcher {
         };
       }
     } catch (error) {
-      if (controller.signal.aborted) throw new CoreError("SOURCE_FETCH_TIMEOUT", "來源擷取逾時", true);
+      if (externalSignal?.aborted) {
+        throw externalSignal.reason instanceof Error
+          ? externalSignal.reason
+          : new DOMException("Operation aborted", "AbortError");
+      }
+      if (timedOut) throw new CoreError("SOURCE_FETCH_TIMEOUT", "來源擷取逾時", true);
       if (error instanceof CoreError) throw error;
       throw new CoreError("SOURCE_FETCH_FAILED", error instanceof Error ? error.message : String(error), true);
     } finally {
       clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", abortFromExternal);
     }
   }
 

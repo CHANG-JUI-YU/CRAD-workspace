@@ -1,4 +1,4 @@
-import { CoreError, internalId, type RequestResult, type WorkspaceContext } from "@st-workspace/core";
+import { CoreError, internalId, withWorkspaceAbortSignal, type RequestResult, type WorkspaceContext } from "@st-workspace/core";
 import type { WorkspaceRuntime } from "./index.js";
 
 export interface WorkspaceWorkerOptions {
@@ -18,6 +18,7 @@ export type WorkspaceWorkerEvent =
   | { type: "operation.completed"; operation_id: string; result: RequestResult }
   | { type: "operation.retry"; operation_id: string; attempt: number; error: string }
   | { type: "operation.failed"; operation_id: string; error: string }
+  | { type: "operation.lease_lost"; operation_id: string; error: string }
   | { type: "job.queued"; job_id: string }
   | { type: "worker.error"; error: string };
 
@@ -46,6 +47,29 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("Operation aborted", "AbortError");
+}
+
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      action();
+    };
+    const onAbort = () => finish(() => reject(abortReason(signal)));
+    signal.addEventListener("abort", onAbort, { once: true });
+    void promise.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
 /**
  * Keeps the workspace moving independently from the HTTP/MCP request lifecycle.
  * It recovers only persisted operations that are still executable; `needs_input`
@@ -65,6 +89,7 @@ export class WorkspaceWorker {
   private pumping = false;
   private currentPump: Promise<void> | undefined;
   private activeOperationId: string | undefined;
+  private activeAbortController: AbortController | undefined;
   private lastError: string | undefined;
 
   private readonly runtimeProvider: () => WorkspaceRuntime | Promise<WorkspaceRuntime> | undefined;
@@ -88,10 +113,11 @@ export class WorkspaceWorker {
     void this.pump();
   }
 
-  /** Stop polling and wait until any in-flight pump has settled. */
+  /** Stop polling, cancel active recovery, and wait until the pump has settled. */
   async stop(): Promise<void> {
     if (this.timer !== undefined) clearInterval(this.timer);
     this.timer = undefined;
+    this.activeAbortController?.abort(new Error("Workspace worker stopped"));
     await this.currentPump;
   }
 
@@ -205,24 +231,32 @@ export class WorkspaceWorker {
     this.activeOperationId = operationId;
     this.onEvent({ type: "operation.started", operation_id: operationId, attempt });
     let leaseLost = false;
+    let leaseLostEventEmitted = false;
     const abortController = new AbortController();
+    this.activeAbortController = abortController;
+    const abortForLeaseLoss = () => {
+      if (leaseLost) return;
+      leaseLost = true;
+      abortController.abort(new CoreError("OPERATION_LEASE_LOST", `Operation ${operationId} lost its lease during execution.`, true));
+    };
+    const emitLeaseLost = () => {
+      if (leaseLostEventEmitted) return;
+      leaseLostEventEmitted = true;
+      this.onEvent({ type: "operation.lease_lost", operation_id: operationId, error: `Operation ${operationId} lost its lease during execution.` });
+    };
     const renewer = setInterval(() => {
       runtime.renewOperationLease(operationId, actor, token)
         .then((renewed) => {
-          if (!renewed) {
-            leaseLost = true;
-            abortController.abort();
-          }
+          if (!renewed) abortForLeaseLoss();
         })
-        .catch(() => {
-          leaseLost = true;
-          abortController.abort();
-        });
+        .catch(() => abortForLeaseLoss());
     }, this.leaseRenewIntervalMs);
     try {
-      const result = await runtime.recoverOperation(operationId, { actor, attachments: [] }, { lease });
+      const context: WorkspaceContext = { actor, attachments: [], signal: abortController.signal };
+      const recovery = withWorkspaceAbortSignal(abortController.signal, () => runtime.recoverOperation(operationId, context, { lease }));
+      const result = await abortable(recovery, abortController.signal);
       if (leaseLost) {
-        this.onEvent({ type: "operation.failed", operation_id: operationId, error: `Operation ${operationId} lost its lease during execution.` });
+        emitLeaseLost();
         return;
       }
       await runtime.releaseOperationLease(operationId, actor, token);
@@ -231,7 +265,12 @@ export class WorkspaceWorker {
       this.onEvent({ type: "operation.completed", operation_id: operationId, result });
     } catch (error) {
       if (leaseLost) {
-        this.onEvent({ type: "operation.failed", operation_id: operationId, error: `Operation ${operationId} lost its lease during execution.` });
+        emitLeaseLost();
+        return;
+      }
+      if (abortController.signal.aborted && this.timer === undefined) {
+        await runtime.releaseOperationLease(operationId, actor, token);
+        this.attempts.delete(operationId);
         return;
       }
       const message = errorMessage(error);
@@ -247,6 +286,7 @@ export class WorkspaceWorker {
       }
     } finally {
       clearInterval(renewer);
+      if (this.activeAbortController === abortController) this.activeAbortController = undefined;
       this.activeOperationId = undefined;
     }
   }
