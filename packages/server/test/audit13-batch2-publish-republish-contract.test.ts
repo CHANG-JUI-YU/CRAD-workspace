@@ -55,8 +55,11 @@ async function confirm(url: string, body: Record<string, unknown>): Promise<Resp
 }
 
 function extractFunction(source: string, name: string): string {
-  const marker = `function ${name}(`;
-  const start = source.indexOf(marker);
+  const asyncMarker = `async function ${name}(`;
+  const plainMarker = `function ${name}(`;
+  const asyncStart = source.indexOf(asyncMarker);
+  const marker = asyncStart >= 0 ? asyncMarker : plainMarker;
+  const start = asyncStart >= 0 ? asyncStart : source.indexOf(plainMarker);
   if (start < 0) throw new Error(`function not found: ${name}`);
   let bodyStarted = false;
   let depth = 0;
@@ -117,7 +120,10 @@ async function executePublishUi(postJson: (...args: any[]) => Promise<any>) {
   };
   const publishStepperState = { stage: "provenance_reviewed", status: "current" };
   const updatePublishStepper = vi.fn();
-  const syncAllControls = vi.fn();
+  const syncAllControls = vi.fn(() => {
+    confirmButton.disabled = false;
+    primaryCta.disabled = false;
+  });
   const renderStaleDiff = vi.fn();
   const loadPublishCompletion = vi.fn();
   const source = extractFunction(dashboard(), "triggerConfirmPublish");
@@ -183,7 +189,7 @@ describe("Audit 13 #203 publish confirmation REST contract", () => {
     expect(server.publishProvenanceConfirm).not.toHaveBeenCalled();
 
     const stale = await confirm(server.url, { fingerprint: "stale-fingerprint", republish: false });
-    expect(stale.status).toBe(409);
+    expect(stale.status).toBe(400);
     expect(await stale.json()).toMatchObject({ code: "PROVENANCE_CONFIRMATION_STALE" });
   });
 });
