@@ -90,8 +90,8 @@ describe("Audit 11 #157 typed lint", () => {
     expect(packageJson.scripts["lint:only"]).toBe("tsx tools/typed-lint.ts");
     expect(packageJson.scripts["test:tools:coverage"]).toBe("pnpm build && pnpm test:tools:coverage:only");
     expect(packageJson.scripts["test:tools:coverage:only"]).toContain("vitest.tools.config.ts");
+    expect(packageJson.scripts.check).toBe("pnpm build && pnpm typecheck:only && pnpm test:only");
     expect(packageJson.scripts.check.match(/pnpm build/gu)?.length).toBe(1);
-    expect(packageJson.scripts.check).toContain("pnpm lint:only");
     expect(ci).toContain("run: pnpm lint:only");
     expect(ci).toContain("run: pnpm test:tools:coverage:only");
     for (const supportedTool of [
