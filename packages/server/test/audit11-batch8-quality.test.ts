@@ -24,7 +24,6 @@ async function lintFixture(source: string): Promise<{ root: string; configPath: 
           noEmit: true,
           skipLibCheck: true,
           noUnusedLocals: true,
-          noUnusedParameters: true,
           noFallthroughCasesInSwitch: true,
         },
         include: ["src/**/*.ts"],
@@ -38,10 +37,13 @@ async function lintFixture(source: string): Promise<{ root: string; configPath: 
 }
 
 describe("Audit 11 #157 typed lint", () => {
-  it("accepts awaited and explicitly discarded promises", async () => {
+  it("accepts awaited, stored, rejection-handled and explicitly discarded promises", async () => {
     const fixture = await lintFixture(`
       export async function clean(): Promise<void> {
-        await Promise.resolve();
+        const holder: { pending?: Promise<void> } = {};
+        holder.pending = Promise.resolve();
+        Promise.resolve().catch(() => undefined);
+        await holder.pending;
         void Promise.resolve();
       }
     `);
