@@ -14,6 +14,7 @@ export * from "./provenance.js";
 export * from "./output-plan.js";
 export * from "./coverage-command-identity.js";
 export * from "./project-state.js";
+export * from "./project-id.js";
 export * from "./fact-taxonomy.js";
 export * from "./entity-matcher.js";
 export * from "./operations.js";
