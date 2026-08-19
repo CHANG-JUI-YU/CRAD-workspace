@@ -202,13 +202,46 @@ pnpm test
 pnpm test:coverage
 pnpm build
 pnpm check
+pnpm verify
 pnpm agent:lint
 pnpm audit:truncation -- projects
 ```
 
 `pnpm typecheck`、`pnpm test` 與 `pnpm test:coverage` 都會先做 clean workspace
 build。`pnpm check` 會明確執行一次 `build → typecheck-only → test-only`，避免把
-typecheck 與 test 各自的 build 重複執行。
+typecheck 與 test 各自的 build 重複執行；`pnpm check` 不是完整的 pre-PR gate。
+
+### Pre-PR 驗證
+
+#### Local-equivalent required gates
+
+完整本機 preflight 使用：
+
+```text
+pnpm verify
+```
+
+`pnpm verify` 由 `tools/quality-gates.ts` 的單一 gate registry 驅動，依序執行
+`build → typecheck-only → typed lint → package coverage → maintenance-tool coverage → dependency audit`。
+CI correctness／coverage 也從同一 registry 選取各自 pipeline；Security dependency
+audit 與本機 preflight 共用 `audit:dependencies` script，因此不需要在 workflow 與
+本機入口維護兩份命令。
+
+Package coverage 本身會執行完整 test suite，所以 `pnpm verify` 不會先跑一次
+`test:only` 再立刻以 coverage 重跑同一 suite。任一 gate 回傳非零時 preflight 立即
+停止並原樣傳遞該 exit code。Dependency audit 需要可連線至套件 registry。
+
+`pnpm agent:lint` 與 `pnpm audit:truncation` 不納入 `pnpm verify`：前者是 Agent／Skill
+資產維護檢查、後者是針對指定 project tree 的診斷工具，兩者目前都不是 required PR
+check，且 truncation scanner 的輸入依本機資料而異；它們仍保留為明確的獨立維護命令。
+
+#### Remote-only required gates
+
+下列 required evidence 沒有單機等價執行方式，仍由 GitHub Actions 提供：
+
+- Ubuntu／Windows correctness matrix；`pnpm verify` 只驗證執行它的目前 OS。
+- CodeQL `javascript-typescript` security analysis。
+- PR Governance、Main provenance 與 Audit verify-and-close 等依賴 GitHub event/API 的治理檢查。
 
 ### 維護工具
 
