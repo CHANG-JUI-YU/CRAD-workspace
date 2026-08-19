@@ -17,6 +17,13 @@ jobs:
     if: github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
+      - name: Check out trusted Audit identity matcher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Verify Audit issue identity fixtures
+        run: python .github/scripts/audit_issue_identity.py --check-fixtures .github/scripts/audit_issue_identity_fixtures.json
       - name: Prevent Audit issues from closing at merge time
         env:
           GH_TOKEN: ${{ github.token }}
@@ -30,8 +37,13 @@ jobs:
           import json
           import os
           import re
+          import sys
           import urllib.parse
           import urllib.request
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path(".github/scripts").resolve()))
+          from audit_issue_identity import is_audit_issue_title
 
           repo = os.environ["REPOSITORY"]
           token = os.environ["GH_TOKEN"]
@@ -82,7 +94,7 @@ jobs:
           for number, found_in in sorted(references.items()):
               issue = get_json(f"https://api.github.com/repos/{repo}/issues/{number}")
               title = issue.get("title", "")
-              if title.startswith("[AUDIT"):
+              if is_audit_issue_title(title):
                   audit_closures.append((number, title, sorted(found_in)))
 
           if audit_closures:
@@ -102,6 +114,13 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
+      - name: Check out current main Audit identity matcher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify Audit issue identity fixtures
+        run: python .github/scripts/audit_issue_identity.py --check-fixtures .github/scripts/audit_issue_identity_fixtures.json
       - name: Verify main head came through a merged pull request
         env:
           GH_TOKEN: ${{ github.token }}

@@ -21,6 +21,18 @@ Direct pushes to `main` are not part of the normal development workflow. Changes
 
 Audit issues use a stricter close sequence because GitHub closing keywords can close an issue at merge time, before the `push` workflows for the merged commit have completed.
 
+### Audit issue title identity
+
+New Audit issues use exactly one canonical naming format:
+
+`<CATEGORY><ROUND>-<SEQUENCE>: <summary>`
+
+Examples include `BUG13-01: ...`, `DASHBOARD13-01: ...`, `USER13-01: ...`, and `WORKFLOW13-01: ...`. Writers use uppercase category names, a positive numeric Audit round, and a sequence of at least two digits. The supported category vocabulary is `AUDIT`, `BUG`, `DASHBOARD`, `UX`, `USER`, `RISK`, and `WORKFLOW`. The matcher is case-insensitive when reading titles so historical or manually edited case does not bypass governance, but lowercase is not the canonical writing style.
+
+Legacy bracketed titles are read-only compatibility. The matcher continues to recognize historical `[AUDITn-*]`, `[BUGn-*]`, `[UXn-*]`, `[USERn-*]`, and `[RISKn-*]` prefixes, including existing trailing classification brackets. Do not create new bracketed Audit titles.
+
+Only the issue title establishes Audit identity. Body text, labels, comments, PR text, and other mutable metadata do not turn a normal issue into an Audit issue. The canonical matcher lives in `.github/scripts/audit_issue_identity.py`; both the PR closing-keyword guard and the verify-and-close workflow use that same implementation. The PR guard loads the matcher from the PR target base SHA rather than executing a pull-request-controlled copy, and the close workflow loads it from `main` before using its issue-write permission.
+
 1. During development, reference an Audit issue with `Refs #<number>` or equivalent non-closing language.
 2. Do not use `Fixes`, `Closes`, or `Resolves` for an Audit issue in a pull-request body, title, or commit message. The `PR governance` check scans all three locations and rejects closing keywords that target an Audit-titled issue.
 3. Merge the pull request only after all required PR checks are green.
