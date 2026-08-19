@@ -17,6 +17,17 @@ export default defineConfig({
         "tools/structured-config.ts",
         "tools/typed-lint.ts",
       ],
+      // The measured weakest supported-tool baseline is 84.18% statements/lines,
+      // 64.38% branches and 90% functions. Keep per-file floors a few points
+      // below that baseline so ordinary line movement is tolerated without
+      // allowing any maintenance tool to fall out of meaningful coverage.
+      thresholds: {
+        perFile: true,
+        statements: 80,
+        branches: 60,
+        functions: 85,
+        lines: 80,
+      },
     },
   },
 });
