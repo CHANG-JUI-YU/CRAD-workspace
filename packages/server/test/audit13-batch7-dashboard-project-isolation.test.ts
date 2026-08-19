@@ -201,7 +201,7 @@ describe("Audit 13 Dashboard project isolation", () => {
       "/workspace/dashboard/data",
       "/workspace/dashboard/workflow",
       "/workspace/dashboard/invalidations",
-      "/workspace/dashboard/publishes",
+      "/workspace/dashboard/provenance",
       "/workspace/dashboard/artifacts",
       "/workspace/dashboard/sources",
       "/workspace/dashboard/facts",
