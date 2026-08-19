@@ -9,6 +9,8 @@ import { extractBearerToken, normalizeConfiguredAuthToken, parseRequestTarget, t
 import { JSONRPC_INTERNAL_ERROR, jsonRpcError } from "./jsonrpc.js";
 import { handleMcpRequest, handleRestRequest, type WorkspaceRouteDeps } from "./routes.js";
 import { computeRuntimeRevision } from "./runtime-revision.js";
+import { workspaceServerStartupMessage } from "./server-endpoint.js";
+export { resolveWorkspaceServerEndpoint, workspaceServerStartupMessage } from "./server-endpoint.js";
 
 const LOOPBACK_TRUSTED_HOSTNAMES = ["127.0.0.1", "localhost", "::1"] as const;
 
@@ -158,8 +160,8 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
   return server;
 }
 
-/* c8 ignore next 3 -- the server entrypoint is exercised through startWorkspaceServer tests. */
+/* c8 ignore next 4 -- the server entrypoint is exercised through startWorkspaceServer tests. */
 if (process.argv[1]?.endsWith("/server/dist/index.js") || process.argv[1]?.endsWith("\\server\\dist\\index.js")) {
-  await startWorkspaceServer();
-  console.log(`ST Workspace server listening on http://127.0.0.1:${process.env.ST_WORKSPACE_PORT ?? "8787"}`);
+  const server = await startWorkspaceServer();
+  console.log(workspaceServerStartupMessage(server));
 }
