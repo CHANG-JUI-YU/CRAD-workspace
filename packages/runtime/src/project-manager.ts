@@ -156,7 +156,7 @@ export class WorkspaceProjectManager {
       try {
         const relocationIntent = path.join(this.options.root, entry.name, PROJECT_RELOCATION_INTENT_PATH);
         const state = await exists(relocationIntent)
-          ? new RecoverableProjectRepository(this.options.root, entry.name, { layout: "project", materialize: true }).read()
+          ? await new RecoverableProjectRepository(this.options.root, entry.name, { layout: "project", materialize: true }).read()
           : JSON.parse(await readFile(primary, "utf8")) as ProjectState;
         summaries.push({
           project_id: state.project_id,
