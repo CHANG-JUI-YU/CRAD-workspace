@@ -128,13 +128,15 @@ class ProjectRelocationCrashInjection extends Error {
  */
 export class RecoverableProjectRepository extends FileProjectRepository {
   private relocationFailureInjection: RepositoryFailureInjection | undefined;
+  private readonly relocationRoot: string;
 
   constructor(
-    private readonly projectRoot: string,
+    projectRoot: string,
     projectId: string,
     options: FileProjectRepositoryOptions = {},
   ) {
     super(projectRoot, projectId, options);
+    this.relocationRoot = projectRoot;
     this.relocationFailureInjection = options.failure_injection?.point === "after_relocate"
       ? options.failure_injection
       : undefined;
@@ -192,7 +194,7 @@ export class RecoverableProjectRepository extends FileProjectRepository {
   }
 
   private intentFile(): string {
-    return path.join(this.projectRoot, this.projectId, PROJECT_RELOCATION_INTENT_PATH);
+    return path.join(this.relocationRoot, this.projectId, PROJECT_RELOCATION_INTENT_PATH);
   }
 
   private applyIdentity(state: ProjectState, targetProjectId: string, identity: ProjectRelocationIdentity): ProjectState {
