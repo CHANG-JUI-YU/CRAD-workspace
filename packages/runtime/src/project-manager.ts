@@ -199,7 +199,15 @@ export class WorkspaceProjectManager {
     // root, a fresh session must reserve rather than assume project-001 so two
     // managers/processes cannot observe the same candidate as free.
     const reservation = await reserveNextProjectDirectory(this.options.root);
-    this.activateProject(reservation.project_id, true);
+    if (reservation.project_id !== this.repositoryValue.projectId) {
+      this.activateProject(reservation.project_id, true);
+    } else {
+      // The constructor's lazy project already names the reservation we just
+      // won. Keep its repository/runtime objects so existing lazy-session
+      // identity semantics remain stable while ownership is still atomic.
+      this.placeholderReuseAllowed = true;
+      this.sessionPrepared = true;
+    }
     await this.repositoryValue.read();
     return this.runtimeValue;
   }
