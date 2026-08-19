@@ -150,7 +150,7 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
     };
     const failed = (error: Error): void => {
       server.off("listening", listening);
-      server.workspaceWorker.stop();
+      void server.workspaceWorker.stop().catch(() => undefined);
       reject(error);
     };
     server.once("error", failed);
