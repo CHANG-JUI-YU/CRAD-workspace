@@ -1,6 +1,7 @@
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import {
+  assertProjectId,
   canonicalJson,
   CoreError,
   FileProjectRepository,
@@ -20,14 +21,6 @@ interface ProjectRelocationIntent {
   readonly expected_revision: number;
   readonly identity: ProjectRelocationIdentity;
   readonly created_at: string;
-}
-
-function normalizedProjectId(projectId: string): string {
-  const normalized = projectId.trim();
-  if (normalized.length === 0 || normalized === "." || normalized === ".." || normalized.includes("/") || normalized.includes("\\")) {
-    throw new CoreError("PROJECT_ID_INVALID", "project id must be a single safe path segment", true);
-  }
-  return normalized;
 }
 
 async function syncDirectoryBestEffort(directory: string): Promise<void> {
@@ -158,7 +151,7 @@ export class RecoverableProjectRepository extends FileProjectRepository {
     expectedRevision: number,
     identity: ProjectRelocationIdentity,
   ): Promise<ProjectState> {
-    const targetProjectId = normalizedProjectId(newProjectId);
+    const targetProjectId = assertProjectId(newProjectId);
     const current = await this.read();
     if (current.revision !== expectedRevision) {
       throw new CoreError("REVISION_CONFLICT", `Expected project revision ${expectedRevision}, found ${current.revision}`, true);
