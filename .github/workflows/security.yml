@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: 20
       - name: Audit dependency lockfile
-        run: pnpm audit --audit-level=high
+        run: pnpm audit:dependencies
 
   codeql:
     name: CodeQL (javascript-typescript)
