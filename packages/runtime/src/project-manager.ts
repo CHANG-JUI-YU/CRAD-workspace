@@ -8,6 +8,7 @@ import {
   listInterviewMigrationIntents,
   prepareInterviewMigrationIntent,
 } from "./interview-migration.js";
+import { reserveNextProjectDirectory } from "./project-allocation.js";
 import { RecoverableProjectRepository } from "./project-relocation.js";
 
 export interface WorkspaceProjectSummary {
@@ -194,22 +195,20 @@ export class WorkspaceProjectManager {
   }
 
   private async prepareFreshSession(): Promise<WorkspaceRuntime> {
-    // The constructor intentionally does not read the conventional placeholder.
-    // If its directory already exists, it belongs to a previous session and must
-    // never become the implicit active project for this manager. The allocated
-    // placeholder stays re-usable by targeted interview flows (continue,
-    // existing-world, character expansion) that migrate onto a selected target.
-    if (await exists(this.repositoryValue.projectDirectory)) {
-      const existingDirectories = (await readdir(this.options.root, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => entry.name);
-      const used = new Set([...(await this.listProjects()).map((item) => item.project_id), ...existingDirectories]);
-      let sequence = 1;
-      while (used.has(`project-${String(sequence).padStart(3, "0")}`)) sequence += 1;
-      const id = `project-${String(sequence).padStart(3, "0")}`;
-      this.repositoryValue = new RecoverableProjectRepository(this.options.root, id, { layout: "project", materialize: true });
-      this.runtimeValue = this.options.createRuntime(this.repositoryValue);
+    // Directory creation is the durable allocation boundary. Even on an empty
+    // root, a fresh session must reserve rather than assume project-001 so two
+    // managers/processes cannot observe the same candidate as free.
+    const reservation = await reserveNextProjectDirectory(this.options.root);
+    if (reservation.project_id !== this.repositoryValue.projectId) {
+      this.activateProject(reservation.project_id, true);
+    } else {
+      // The constructor's lazy project already names the reservation we just
+      // won. Keep its repository/runtime objects so existing lazy-session
+      // identity semantics remain stable while ownership is still atomic.
+      this.placeholderReuseAllowed = true;
+      this.sessionPrepared = true;
     }
     await this.repositoryValue.read();
-    this.sessionPrepared = true;
     return this.runtimeValue;
   }
 
@@ -257,15 +256,8 @@ export class WorkspaceProjectManager {
   }
 
   async startNewProject(): Promise<WorkspaceRuntime> {
-    const summaries = await this.listProjects();
-    const existingDirectories = await exists(this.options.root)
-      ? (await readdir(this.options.root, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => entry.name)
-      : [];
-    const used = new Set([...summaries.map((item) => item.project_id), ...existingDirectories]);
-    let sequence = 1;
-    while (used.has(`project-${String(sequence).padStart(3, "0")}`)) sequence += 1;
-    const id = `project-${String(sequence).padStart(3, "0")}`;
-    this.activateProject(id, false);
+    const reservation = await reserveNextProjectDirectory(this.options.root);
+    this.activateProject(reservation.project_id, false);
     await this.repositoryValue.read();
     return this.runtimeValue;
   }
