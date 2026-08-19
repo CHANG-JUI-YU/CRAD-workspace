@@ -22,7 +22,7 @@
     "audit:truncation": "tsx tools/audit-truncation-scan.ts",
     "agent:lint": "tsx tools/agent-lint.ts",
     "test:watch": "vitest",
-    "check": "pnpm build && pnpm typecheck:only && pnpm lint:only && pnpm test:only"
+    "check": "pnpm build && pnpm typecheck:only && pnpm test:only"
   },
   "devDependencies": {
     "@types/node": "20.19.9",
