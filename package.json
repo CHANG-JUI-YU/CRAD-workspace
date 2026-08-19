@@ -19,8 +19,13 @@
     "test:coverage:only": "vitest run --coverage",
     "test:tools:coverage": "pnpm build && pnpm test:tools:coverage:only",
     "test:tools:coverage:only": "vitest run --config vitest.tools.config.ts --coverage",
+    "audit:dependencies": "pnpm audit --audit-level=high",
     "audit:truncation": "tsx tools/audit-truncation-scan.ts",
     "agent:lint": "tsx tools/agent-lint.ts",
+    "quality:correctness:only": "tsx tools/quality-gates.ts ci-correctness",
+    "quality:coverage:only": "tsx tools/quality-gates.ts ci-coverage",
+    "quality:dependency-audit:only": "tsx tools/quality-gates.ts ci-dependency-audit",
+    "verify": "tsx tools/quality-gates.ts local",
     "test:watch": "vitest",
     "check": "pnpm build && pnpm typecheck:only && pnpm test:only"
   },
