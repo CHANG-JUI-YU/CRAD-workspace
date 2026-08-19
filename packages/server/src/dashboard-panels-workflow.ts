@@ -21,13 +21,13 @@ function workflowStatusLabel(status) {
   return labels[status] || status || "未知";
 }
 
-function navigateWorkflowTarget(target) {
-  if (!target) return;
-  var anchor = target;
-  if (anchor.indexOf("#") === 0) anchor = anchor.slice(1);
-  var panel = byId(anchor);
-  if (panel === null) return;
-  panel.scrollIntoView({ behavior: typeof reducedMotion === "function" && reducedMotion() ? "auto" : "smooth", block: "start" });
+function navigateWorkflowTarget(stage) {
+  var target = dashboardWorkflowTarget(stage);
+  if (target === null) {
+    announceDashboardNavigationFallback("此工作流程階段目前沒有可用的導覽目標。");
+    return false;
+  }
+  return navigateDashboardTarget(target);
 }
 
 function workflowStageElement(stage) {
@@ -62,11 +62,11 @@ function workflowStageElement(stage) {
     });
     row.appendChild(blockerList);
   }
-  if (stage.target) {
+  if (dashboardWorkflowTarget(stage) !== null) {
     var nav = document.createElement("button");
     nav.type = "button";
     nav.textContent = "前往";
-    nav.addEventListener("click", function () { navigateWorkflowTarget(stage.target); });
+    nav.addEventListener("click", function () { navigateWorkflowTarget(stage); });
     row.appendChild(nav);
   }
   return row;

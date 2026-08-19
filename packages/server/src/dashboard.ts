@@ -1,6 +1,10 @@
 import { DASHBOARD_SHELL } from "./dashboard-shell.js";
 import { DASHBOARD_CSS } from "./dashboard-css.js";
 import { DASHBOARD_MARKUP } from "./dashboard-markup.js";
+import {
+  DASHBOARD_NAVIGATION_REGISTRY_JS,
+  prepareDashboardMarkup,
+} from "./dashboard-navigation-registry.js";
 import { DASHBOARD_STATE_JS } from "./dashboard-state.js";
 import { DASHBOARD_DRAFT_STORE_JS } from "./dashboard-draft-store.js";
 import { DASHBOARD_URL_JS } from "./dashboard-url.js";
@@ -28,7 +32,7 @@ export function dashboard(): string {
   return (
     DASHBOARD_SHELL
     + DASHBOARD_CSS
-    + DASHBOARD_MARKUP
+    + prepareDashboardMarkup(DASHBOARD_MARKUP)
     + DASHBOARD_STATE_JS
     + DASHBOARD_DRAFT_STORE_JS
     + DASHBOARD_URL_JS
@@ -38,6 +42,7 @@ export function dashboard(): string {
     + DASHBOARD_PANELS_PUBLISH_ROW_SAFE_JS
     + DASHBOARD_PANELS_REVIEW_ROW_SAFE_JS
     + DASHBOARD_PANELS_COVERAGE_JS
+    + DASHBOARD_NAVIGATION_REGISTRY_JS
     + DASHBOARD_PANELS_WORKFLOW_JS
     + DASHBOARD_PANELS_COLLECTIONS_JS
     + DASHBOARD_PANELS_MEDIA_ROW_SAFE_JS
