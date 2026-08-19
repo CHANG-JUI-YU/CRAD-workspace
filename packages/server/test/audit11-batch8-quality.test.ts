@@ -125,6 +125,7 @@ describe("Audit 11 #157 typed lint", () => {
       scripts: Record<string, string>;
     };
     const ci = await readFile(path.join(repositoryRoot, ".github", "workflows", "ci.yml"), "utf8");
+    const qualityGates = await readFile(path.join(repositoryRoot, "tools", "quality-gates.ts"), "utf8");
     const toolsCoverage = await readFile(path.join(repositoryRoot, "vitest.tools.config.ts"), "utf8");
     const baseline = JSON.parse(await readFile(path.join(repositoryRoot, "typed-lint-baseline.json"), "utf8")) as Array<{
       rule: string;
@@ -137,11 +138,14 @@ describe("Audit 11 #157 typed lint", () => {
     expect(packageJson.scripts["test:tools:coverage:only"]).toContain("vitest.tools.config.ts");
     expect(packageJson.scripts.check).toBe("pnpm build && pnpm typecheck:only && pnpm test:only");
     expect(packageJson.scripts.check.match(/pnpm build/gu)?.length).toBe(1);
-    expect(ci).toContain("run: pnpm lint:only");
-    expect(ci).toContain("run: pnpm test:tools:coverage:only");
+    expect(ci).toContain("run: pnpm quality:correctness:only");
+    expect(ci).toContain("run: pnpm quality:coverage:only");
+    expect(qualityGates).toContain('"typed-lint"');
+    expect(qualityGates).toContain('"maintenance-tool-coverage"');
     for (const supportedTool of [
       "tools/agent-lint.ts",
       "tools/audit-truncation-scan.ts",
+      "tools/quality-gates.ts",
       "tools/structured-config.ts",
       "tools/typed-lint.ts",
     ]) {
