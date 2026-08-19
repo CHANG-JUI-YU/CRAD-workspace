@@ -104,5 +104,14 @@ describe("Audit 11 #157 typed lint", () => {
     ]) {
       expect(toolsCoverage).toContain(`\"${supportedTool}\"`);
     }
+    for (const coverageFloor of [
+      "perFile: true",
+      "statements: 80",
+      "branches: 60",
+      "functions: 85",
+      "lines: 80",
+    ]) {
+      expect(toolsCoverage).toContain(coverageFloor);
+    }
   });
 });
