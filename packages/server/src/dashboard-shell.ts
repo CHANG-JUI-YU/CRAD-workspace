@@ -1,4 +1,4 @@
-export const DASHBOARD_SHELL = `<!doctype html><!doctype html>
+export const DASHBOARD_SHELL = `<!doctype html>
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
