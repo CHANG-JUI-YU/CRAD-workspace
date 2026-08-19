@@ -1,5 +1,12 @@
 import type { ProjectState } from "../project-state.js";
 
+export const PROJECT_RELOCATION_INTENT_PATH = ".workspace/project-relocation.json";
+
+export interface ProjectRelocationIdentity {
+  readonly project_name?: string;
+  readonly project_status: ProjectState["project_status"];
+}
+
 export interface ProjectRepository {
   readonly projectId?: string;
   read(): Promise<ProjectState>;
@@ -78,7 +85,8 @@ export type RepositoryFailureInjectionPoint =
   | "before_install"
   | "after_install"
   | "before_cleanup"
-  | "after_cleanup";
+  | "after_cleanup"
+  | "after_relocate";
 
 export interface RepositoryFailureInjection {
   readonly point: RepositoryFailureInjectionPoint;
