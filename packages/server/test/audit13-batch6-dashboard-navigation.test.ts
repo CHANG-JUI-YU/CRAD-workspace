@@ -90,13 +90,16 @@ describe("Audit 13 Dashboard navigation contract", () => {
   it("renders one structurally balanced production document with every canonical panel anchor", () => {
     const html = dashboard();
     expect(html.match(/<!doctype html>/giu)).toHaveLength(1);
-    expect(html.match(/<details\b/gu)?.length ?? 0).toBe(html.match(/<\/details>/gu)?.length ?? 0);
+    const scriptStart = html.indexOf("<script>");
+    expect(scriptStart).toBeGreaterThan(0);
+    const domMarkup = html.slice(0, scriptStart);
+    expect(domMarkup.match(/<details\b/gu)?.length ?? 0).toBe(domMarkup.match(/<\/details>/gu)?.length ?? 0);
 
-    const ids = [...html.matchAll(/\bid="([^"]+)"/gu)].map((match) => match[1]);
+    const ids = [...domMarkup.matchAll(/\bid="([^"]+)"/gu)].map((match) => match[1]);
     expect(new Set(ids).size).toBe(ids.length);
     for (const definition of DASHBOARD_PANEL_REGISTRY) {
-      expect(html).toContain(`id="${definition.anchor}"`);
-      expect(html).toContain(`aria-labelledby="${definition.heading}"`);
+      expect(domMarkup).toContain(`id="${definition.anchor}"`);
+      expect(domMarkup).toContain(`aria-labelledby="${definition.heading}"`);
     }
     expect(new Set(DASHBOARD_PANEL_REGISTRY.map((item) => item.anchor)).size).toBe(DASHBOARD_PANEL_REGISTRY.length);
   });
