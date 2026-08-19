@@ -9,6 +9,8 @@ import {
   type ProjectRelocationIdentity,
   type ProjectState,
   type RepositoryFailureInjection,
+  type RepositoryTransactionCommit,
+  type RepositoryTransactionWork,
 } from "@st-workspace/core";
 
 interface ProjectRelocationIntent {
@@ -143,6 +145,12 @@ export class RecoverableProjectRepository extends FileProjectRepository {
     return this.recoverRelocationIntent(state);
   }
 
+  /** Any managed transaction first resolves a relocation intent, if present. */
+  override async transaction<T>(expectedRevision: number, work: RepositoryTransactionWork<T>): Promise<RepositoryTransactionCommit<T>> {
+    await this.read();
+    return super.transaction(expectedRevision, work);
+  }
+
   async relocateAndCommitIdentity(
     newProjectId: string,
     expectedRevision: number,
@@ -155,7 +163,7 @@ export class RecoverableProjectRepository extends FileProjectRepository {
     }
 
     if (targetProjectId === this.projectId) {
-      return super.commit(expectedRevision, (state) => this.applyIdentity(state, targetProjectId, identity));
+      return this.commitIdentity(expectedRevision, targetProjectId, identity);
     }
 
     const intent: ProjectRelocationIntent = {
@@ -178,7 +186,7 @@ export class RecoverableProjectRepository extends FileProjectRepository {
 
     this.injectAfterRelocate();
 
-    const updated = await super.commit(expectedRevision, (state) => this.applyIdentity(state, targetProjectId, identity));
+    const updated = await this.commitIdentity(expectedRevision, targetProjectId, identity);
     await removeIntent(this.intentFile());
     return updated;
   }
@@ -195,6 +203,18 @@ export class RecoverableProjectRepository extends FileProjectRepository {
       project_slug: targetProjectId,
       project_status: identity.project_status,
     };
+  }
+
+  private async commitIdentity(
+    expectedRevision: number,
+    targetProjectId: string,
+    identity: ProjectRelocationIdentity,
+  ): Promise<ProjectState> {
+    const committed = await super.transaction(expectedRevision, (state) => ({
+      state: this.applyIdentity(state, targetProjectId, identity),
+      value: undefined,
+    }));
+    return committed.state;
   }
 
   private identityMatches(state: ProjectState, intent: ProjectRelocationIntent): boolean {
@@ -223,9 +243,10 @@ export class RecoverableProjectRepository extends FileProjectRepository {
     }
 
     if (state.revision === intent.expected_revision) {
-      const recovered = await super.commit(
+      const recovered = await this.commitIdentity(
         intent.expected_revision,
-        (current) => this.applyIdentity(current, intent.target_project_id, intent.identity),
+        intent.target_project_id,
+        intent.identity,
       );
       await removeIntent(filePath);
       return recovered;
