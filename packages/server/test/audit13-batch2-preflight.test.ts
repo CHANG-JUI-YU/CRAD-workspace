@@ -1,12 +1,13 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   executeQualityGate,
   qualityGateMain,
   qualityPipelineGateIds,
   runQualityPipeline,
   type QualityGate,
+  type QualityPipelineName,
 } from "../../../tools/quality-gates.js";
 
 const repositoryRoot = path.resolve(process.cwd());
@@ -51,10 +52,62 @@ describe("Audit 13 #212 local preflight", () => {
     expect(errors.join("\n")).toContain("Typed lint");
   });
 
+  it("completes successful pipelines and defaults the CLI to local", () => {
+    const output: string[] = [];
+    const seen: string[] = [];
+    const code = qualityGateMain([], {
+      execute: (gate) => {
+        seen.push(gate.id);
+        return 0;
+      },
+      out: (message) => output.push(message),
+      err: () => undefined,
+    });
+
+    expect(code).toBe(0);
+    expect(seen).toEqual(qualityPipelineGateIds("local"));
+    expect(output.at(-1)).toBe("Quality pipeline passed: local");
+  });
+
+  it("accepts every named pipeline through the CLI parser", () => {
+    const names: QualityPipelineName[] = [
+      "local",
+      "ci-correctness",
+      "ci-coverage",
+      "ci-dependency-audit",
+    ];
+    for (const name of names) {
+      const seen: string[] = [];
+      expect(qualityGateMain([name], {
+        execute: (gate) => {
+          seen.push(gate.id);
+          return 0;
+        },
+        out: () => undefined,
+        err: () => undefined,
+      })).toBe(0);
+      expect(seen).toEqual(qualityPipelineGateIds(name));
+    }
+  });
+
   it("reports invalid pipeline names with a non-zero exit code", () => {
     const errors: string[] = [];
     expect(qualityGateMain(["not-a-pipeline"], { err: (message) => errors.push(message) })).toBe(2);
     expect(errors.join("\n")).toContain("Unknown quality pipeline");
+  });
+
+  it("uses default reporters when callers do not override them", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      expect(runQualityPipeline("ci-dependency-audit", { execute: () => 0 })).toBe(0);
+      expect(runQualityPipeline("ci-dependency-audit", { execute: () => 9 })).toBe(9);
+      expect(log).toHaveBeenCalled();
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("Dependency audit"));
+    } finally {
+      log.mockRestore();
+      error.mockRestore();
+    }
   });
 
   it("can execute a pnpm gate cross-platform", () => {
@@ -64,6 +117,23 @@ describe("Audit 13 #212 local preflight", () => {
       args: ["--version"],
     };
     expect(executeQualityGate(gate)).toBe(0);
+  });
+
+  it("fails closed when invoked outside a pnpm script environment", () => {
+    const original = process.env.npm_execpath;
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    delete process.env.npm_execpath;
+    try {
+      expect(executeQualityGate({ id: "build", label: "probe", args: ["--version"] })).toBe(1);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("npm_execpath is unavailable"));
+    } finally {
+      if (original === undefined) {
+        delete process.env.npm_execpath;
+      } else {
+        process.env.npm_execpath = original;
+      }
+      error.mockRestore();
+    }
   });
 
   it("wires CI and local verification through the same gate registry", async () => {
