@@ -6,6 +6,20 @@ import { parse } from "yaml";
 
 const repositoryRoot = path.resolve(process.cwd());
 
+type WorkflowDocument = {
+  permissions: Record<string, string>;
+  jobs: Record<
+    string,
+    {
+      steps?: Array<{
+        name?: string;
+        env?: Record<string, string>;
+        run?: string;
+      }>;
+    }
+  >;
+};
+
 function runPython(args: string[]): SpawnSyncReturns<string> {
   for (const command of ["python", "python3"]) {
     const result = spawnSync(command, args, {
@@ -31,7 +45,7 @@ describe("Audit 13 #211 governance identity", () => {
     expect(result.stdout).toContain("Audit issue identity fixtures");
   });
 
-  it("keeps PR guard and verify-close on the same trusted matcher", async () => {
+  it("keeps PR guard and verify-close on the same matcher with minimal token exposure", async () => {
     const governance = await readFile(
       path.join(repositoryRoot, ".github", "workflows", "governance.yml"),
       "utf8",
@@ -40,15 +54,27 @@ describe("Audit 13 #211 governance identity", () => {
       path.join(repositoryRoot, ".github", "workflows", "close-audit-issue.yml"),
       "utf8",
     );
-    const governanceYaml = parse(governance) as { permissions: Record<string, string> };
-    const closeYaml = parse(closeWorkflow) as { permissions: Record<string, string> };
+    const governanceYaml = parse(governance) as WorkflowDocument;
+    const closeYaml = parse(closeWorkflow) as WorkflowDocument;
 
     for (const workflow of [governance, closeWorkflow]) {
       expect(workflow).toContain("from audit_issue_identity import is_audit_issue_title");
       expect(workflow).not.toContain('title.startswith("[AUDIT")');
     }
-    expect(governance).toContain("ref: ${{ github.event.pull_request.base.sha }}");
+
+    const prSteps = governanceYaml.jobs["pr-governance"]?.steps ?? [];
+    const collector = prSteps.find((step) => step.name === "Collect issue-closing candidates");
+    const classifier = prSteps.find(
+      (step) => step.name === "Prevent Audit issues from closing at merge time",
+    );
+    expect(collector?.env?.GH_TOKEN).toBe("${{ github.token }}");
+    expect(classifier?.env).toEqual({
+      CANDIDATE_PATH: "${{ runner.temp }}/audit-closing-candidates.json",
+    });
+    expect(classifier?.run).toContain("from audit_issue_identity import is_audit_issue_title");
+    expect(classifier?.env).not.toHaveProperty("GH_TOKEN");
     expect(closeWorkflow).toContain("ref: main");
+
     expect(governanceYaml.permissions).toEqual({
       contents: "read",
       issues: "read",
