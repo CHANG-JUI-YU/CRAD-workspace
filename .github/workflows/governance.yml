@@ -17,8 +17,15 @@ jobs:
     if: github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
-      - name: Prevent Audit issues from closing at merge time
+      - name: Check out Audit identity matcher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify Audit issue identity fixtures
+        run: python .github/scripts/audit_issue_identity.py --check-fixtures .github/scripts/audit_issue_identity_fixtures.json
+      - name: Collect issue-closing candidates
         env:
+          CANDIDATE_PATH: ${{ runner.temp }}/audit-closing-candidates.json
           GH_TOKEN: ${{ github.token }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -32,10 +39,12 @@ jobs:
           import re
           import urllib.parse
           import urllib.request
+          from pathlib import Path
 
           repo = os.environ["REPOSITORY"]
           token = os.environ["GH_TOKEN"]
           pr_number = os.environ["PR_NUMBER"]
+          candidate_path = Path(os.environ["CANDIDATE_PATH"])
           headers = {
               "Accept": "application/vnd.github+json",
               "Authorization": f"Bearer {token}",
@@ -74,22 +83,45 @@ jobs:
               for value in closing.findall(text):
                   references.setdefault(int(value), set()).add(source)
 
-          if not references:
-              print("No issue-closing keywords found in the PR body, title, or commit messages.")
-              raise SystemExit(0)
-
-          audit_closures = []
+          candidates = []
           for number, found_in in sorted(references.items()):
               issue = get_json(f"https://api.github.com/repos/{repo}/issues/{number}")
-              title = issue.get("title", "")
-              if title.startswith("[AUDIT"):
-                  audit_closures.append((number, title, sorted(found_in)))
+              candidates.append(
+                  {
+                      "number": number,
+                      "title": issue.get("title", ""),
+                      "found_in": sorted(found_in),
+                  }
+              )
+
+          candidate_path.write_text(json.dumps(candidates, ensure_ascii=False), encoding="utf-8")
+          if candidates:
+              print(f"Collected {len(candidates)} issue-closing candidate(s) for title classification.")
+          else:
+              print("No issue-closing keywords found in the PR body, title, or commit messages.")
+          PY
+      - name: Prevent Audit issues from closing at merge time
+        env:
+          CANDIDATE_PATH: ${{ runner.temp }}/audit-closing-candidates.json
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path(".github/scripts").resolve()))
+          from audit_issue_identity import is_audit_issue_title
+
+          candidates = json.loads(Path(os.environ["CANDIDATE_PATH"]).read_text(encoding="utf-8"))
+          audit_closures = [candidate for candidate in candidates if is_audit_issue_title(candidate["title"])]
 
           if audit_closures:
-              for number, title, found_in in audit_closures:
+              for candidate in audit_closures:
                   print(
-                      f"::error::Audit issue #{number} ({title}) would be auto-closed from "
-                      f"{', '.join(found_in)}. Use 'Refs #<number>' instead; Audit issues close only "
+                      f"::error::Audit issue #{candidate['number']} ({candidate['title']}) would be auto-closed from "
+                      f"{', '.join(candidate['found_in'])}. Use 'Refs #<number>' instead; Audit issues close only "
                       "after merged-main CI, Security, and Governance push evidence succeeds."
                   )
               raise SystemExit(1)
@@ -102,6 +134,13 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
+      - name: Check out current main Audit identity matcher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify Audit issue identity fixtures
+        run: python .github/scripts/audit_issue_identity.py --check-fixtures .github/scripts/audit_issue_identity_fixtures.json
       - name: Verify main head came through a merged pull request
         env:
           GH_TOKEN: ${{ github.token }}

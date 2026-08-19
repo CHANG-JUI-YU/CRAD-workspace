@@ -1,0 +1,136 @@
+[
+  {
+    "title": "BUG13-01:修正 Dashboard 發布確認與 republish 的 REST 契約漂移",
+    "audit": true,
+    "style": "canonical"
+  },
+  {
+    "title": "BUG13-02:阻止 projectId 逃逸專案根目錄",
+    "audit": true,
+    "style": "canonical"
+  },
+  {
+    "title": "BUG13-03:讓多實例新專案編號配置具備原子性",
+    "audit": true,
+    "style": "canonical"
+  },
+  {
+    "title": "BUG13-04:修正 Dashboard 多列操作誤指向最後一筆資料",
+    "audit": true,
+    "style": "canonical"
+  },
+  {
+    "title": "BUG13-05:補全 Dashboard 專案切換隔離並拒收逾期回應",
+    "audit": true,
+    "style": "canonical"
+  },
+  {
+    "title": "DASHBOARD13-01:修復真實 DOM 契約使跨區段導覽與工作流程前往按鈕可用",
+    "audit": true,
+    "style": "canonical"
+  },
+  {
+    "title": "DASHBOARD13-02:以二進位回應取代發布下載的 base64 JSON 解碼",
+    "audit": true,
+    "style": "canonical"
+  },
+  {
+    "title": "USER13-01:讓受保護的 Dashboard 在安全期限內可重新整理與恢復工作階段",
+    "audit": true,
+    "style": "canonical"
+  },
+  {
+    "title": "WORKFLOW13-01:讓 Audit 治理流程辨識實際的分類標題格式",
+    "audit": true,
+    "style": "canonical"
+  },
+  {
+    "title": "WORKFLOW13-02:提供與 CI 品質閘門對齊的單一本機驗證入口",
+    "audit": true,
+    "style": "canonical"
+  },
+  {
+    "title": "ux14-03: lower-case compatibility",
+    "audit": true,
+    "style": "canonical"
+  },
+  {
+    "title": "RISK14-100: sequence may grow beyond two digits",
+    "audit": true,
+    "style": "canonical"
+  },
+  {
+    "title": "[AUDIT11-07][P3][Architecture] legacy generic Audit title",
+    "audit": true,
+    "style": "legacy"
+  },
+  {
+    "title": "[BUG12-01][P2][Flow] legacy bug title",
+    "audit": true,
+    "style": "legacy"
+  },
+  {
+    "title": "[UX12-01][P3][Dashboard] legacy UX title",
+    "audit": true,
+    "style": "legacy"
+  },
+  {
+    "title": "[USER12-01] legacy user title",
+    "audit": true,
+    "style": "legacy"
+  },
+  {
+    "title": "[RISK12-02][P2][Workflow] legacy risk title",
+    "audit": true,
+    "style": "legacy"
+  },
+  {
+    "title": "Regular issue",
+    "body": "BUG13-01: appears only in the body",
+    "audit": false
+  },
+  {
+    "title": "BUG-01: missing audit round",
+    "audit": false
+  },
+  {
+    "title": "BUG13: missing sequence",
+    "audit": false
+  },
+  {
+    "title": "BUG13-: missing sequence digits",
+    "audit": false
+  },
+  {
+    "title": "BUG13-1: sequence is not canonical zero-padded width",
+    "audit": false
+  },
+  {
+    "title": "BUG0-01: round zero is not valid",
+    "audit": false
+  },
+  {
+    "title": "DEBUG13-01: similar category name",
+    "audit": false
+  },
+  {
+    "title": "PREFIX BUG13-01: identity is not at title start",
+    "audit": false
+  },
+  {
+    "title": " [BUG12-01][P2] leading whitespace is not an identity",
+    "audit": false
+  },
+  {
+    "title": "[BUG12-01x] malformed legacy identity",
+    "audit": false
+  },
+  {
+    "title": "[BUG12-01]suffix without legacy separator",
+    "audit": false
+  },
+  {
+    "title": "[DASHBOARD12-01] bracketed form was never a supported legacy identity",
+    "audit": false
+  }
+]
