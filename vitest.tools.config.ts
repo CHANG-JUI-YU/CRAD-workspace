@@ -5,6 +5,7 @@ export default defineConfig({
     include: [
       "packages/server/test/audit9-batch10-maintenance.test.ts",
       "packages/server/test/audit11-batch8-quality.test.ts",
+      "packages/server/test/audit13-batch2-preflight.test.ts",
     ],
     testTimeout: 30_000,
     maxWorkers: 1,
@@ -14,6 +15,7 @@ export default defineConfig({
       include: [
         "tools/agent-lint.ts",
         "tools/audit-truncation-scan.ts",
+        "tools/quality-gates.ts",
         "tools/structured-config.ts",
         "tools/typed-lint.ts",
       ],
