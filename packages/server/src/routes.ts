@@ -344,6 +344,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
           ...(input.mode_selection === undefined ? {} : { mode_selection: input.mode_selection }),
           ...(input.idempotency_key === undefined ? {} : { idempotency_key: input.idempotency_key }),
           ...(input.operation_id === undefined ? {} : { operation_id: input.operation_id }),
+          ...(input.republish === undefined ? {} : { republish: input.republish }),
           ...(input.prepared_snapshot === undefined ? {} : { prepared_snapshot: input.prepared_snapshot as unknown as Parameters<WorkspaceRuntime["publishProvenanceConfirm"]>[0]["prepared_snapshot"] }),
         }, { actor: deps.actor, attachments: [] });
         json(response, 200, result);

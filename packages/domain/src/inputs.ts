@@ -19,6 +19,7 @@ export const publishProvenanceConfirmSchema = z.object({
   mode_selection: z.enum(["zhuji", "palette", "both"]).optional(),
   idempotency_key: z.string().min(1).optional(),
   operation_id: z.string().min(1).optional(),
+  republish: z.boolean().optional(),
   prepared_snapshot: z.record(z.string(), z.unknown()).optional(),
 }).strict();
 export type PublishProvenanceConfirmInput = z.infer<typeof publishProvenanceConfirmSchema>;
@@ -346,7 +347,7 @@ export const coverageUrlIngestionRecoverInputSchema = z.object({
   url: z.string().url().optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.action === "change_url" && (value.url === undefined || value.url.trim() === "")) {
-    ctx.addIssue({ code: "custom", path: ["url"], message: "更換 URL 必須包含有效的新 url。" });
+    ctx.addIssue({ code: "custom", path: ["url"], message: "更換 URL 必須包含有效的 url。" });
   }
 });
 export type CoverageUrlIngestionRecoverInput = z.infer<typeof coverageUrlIngestionRecoverInputSchema>;
