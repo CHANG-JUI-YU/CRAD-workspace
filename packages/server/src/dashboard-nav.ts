@@ -132,12 +132,21 @@ function updateSectionNav() {
   applySectionVisibility(activeSection);
 }
 function switchPanel(panel) {
-  var anchor = panelAnchorId(panel);
-  if (anchor !== null && typeof document !== "undefined" && document.getElementById) {
-    var el = document.getElementById(anchor);
-    if (el !== null && el.scrollIntoView) { el.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" }); }
-  }
+  var own = sectionOfPanel(panel);
+  var crossSection = own !== undefined && own !== activeSection;
   syncSectionForPanel(panel);
+  var scrollToPanel = function () {
+    var anchor = panelAnchorId(panel);
+    if (anchor !== null && typeof document !== "undefined" && document.getElementById) {
+      var el = document.getElementById(anchor);
+      if (el !== null && el.scrollIntoView) { el.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" }); }
+    }
+  };
+  if (crossSection && typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+    window.requestAnimationFrame(scrollToPanel);
+    return;
+  }
+  scrollToPanel();
 }
 if (typeof window !== "undefined" && window.addEventListener) {
   window.addEventListener("popstate", function () {
