@@ -3,11 +3,6 @@ function reducedMotion() {
   return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-function panelAnchorId(panel) {
-  if (typeof panel !== "string" || panel.length === 0) return null;
-  return panel.indexOf("-panel") === -1 ? panel + "-panel" : panel;
-}
-
 var DASHBOARD_SECTIONS = [
   { id: "overview", label: "總覽" },
   { id: "define", label: "定義" },
@@ -18,18 +13,7 @@ var DASHBOARD_SECTIONS = [
 ];
 var activeSection = "overview";
 var sectionHistoryGuard = false;
-var SECTION_PANEL_MAP = {
-  "project": "overview", "status": "overview",
-  "agents": "overview", "latest": "overview",
-  "request": "define", "interview": "define", "precheck": "define",
-  "source-fact": "research", "coverage": "research", "workflow": "research",
-  "artifact": "create", "quality": "create",
-  "readiness": "publish", "build": "publish",
-  "operation": "operations", "repair": "operations", "tavern": "operations", "image": "operations"
-};
-function sectionOfPanel(panel) {
-  return Object.prototype.hasOwnProperty.call(SECTION_PANEL_MAP, panel) ? SECTION_PANEL_MAP[panel] : undefined;
-}
+
 function sectionLabel(sectionId) {
   for (var i = 0; i < DASHBOARD_SECTIONS.length; i += 1) {
     if (DASHBOARD_SECTIONS[i].id === sectionId) { return DASHBOARD_SECTIONS[i].label; }
@@ -64,10 +48,11 @@ function applySectionVisibility(section) {
           panel.hidden = false;
           continue;
         }
+        panel.hidden = true;
+        continue;
       }
-      var key = panel.id !== undefined && panel.id !== "" ? panel.id.replace(/-panel$/u, "") : String(panel.getAttribute("aria-labelledby") || "").replace(/-heading$/u, "");
-      var own = sectionOfPanel(key) === target;
-      panel.hidden = !own;
+      var definition = dashboardPanelFromElement(panel);
+      panel.hidden = definition === null || definition.section !== target;
     }
     for (var j = 0; j < DASHBOARD_SECTIONS.length; j += 1) {
       var button = document.getElementById("section-nav-" + DASHBOARD_SECTIONS[j].id);
@@ -132,21 +117,28 @@ function updateSectionNav() {
   applySectionVisibility(activeSection);
 }
 function switchPanel(panel) {
-  var own = sectionOfPanel(panel);
-  var crossSection = own !== undefined && own !== activeSection;
-  syncSectionForPanel(panel);
+  var definition = dashboardPanelDefinition(panel);
+  if (definition === null) {
+    announceDashboardNavigationFallback("此面板目前不可用。");
+    return false;
+  }
+  var crossSection = definition.section !== activeSection;
+  syncSectionForPanel(definition.key);
   var scrollToPanel = function () {
-    var anchor = panelAnchorId(panel);
-    if (anchor !== null && typeof document !== "undefined" && document.getElementById) {
-      var el = document.getElementById(anchor);
-      if (el !== null && el.scrollIntoView) { el.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" }); }
+    if (typeof document === "undefined" || !document.getElementById) return;
+    var el = document.getElementById(definition.anchor);
+    if (el === null) {
+      announceDashboardNavigationFallback("找不到此面板；請重新整理後再試。");
+      return;
     }
+    if (el.scrollIntoView) { el.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" }); }
   };
   if (crossSection && typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
     window.requestAnimationFrame(scrollToPanel);
-    return;
+    return true;
   }
   scrollToPanel();
+  return true;
 }
 if (typeof window !== "undefined" && window.addEventListener) {
   window.addEventListener("popstate", function () {
