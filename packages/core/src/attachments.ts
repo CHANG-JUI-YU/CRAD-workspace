@@ -4,6 +4,7 @@ import type { FileProjectRepository } from "./repository/file-project-repository
 import type { OperationAttachmentRef } from "./project-state.js";
 import type { SourceAttachment } from "./core-utilities.js";
 import { contentHash, CoreError, internalId } from "./core-utilities.js";
+import { resolveProjectDirectory } from "./project-id.js";
 
 const SAFE_OPERATION_ID_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 const MAX_OPERATION_ID_LENGTH = 200;
@@ -161,8 +162,10 @@ export class FileAttachmentStore implements AttachmentStore {
       this.projectRoot = "";
       this.projectId = "";
     } else {
+      const resolvedProjectId = projectId ?? "default";
+      resolveProjectDirectory(rootOrRepository, resolvedProjectId);
       this.projectRoot = rootOrRepository;
-      this.projectId = projectId ?? "default";
+      this.projectId = resolvedProjectId;
     }
   }
 

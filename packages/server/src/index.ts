@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { HttpSourceFetcher } from "@st-workspace/adapters";
-import { CoreError, FileAttachmentStore, FileProjectRepository } from "@st-workspace/core";
+import { assertProjectId, CoreError, FileAttachmentStore, FileProjectRepository } from "@st-workspace/core";
 import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
 import { dashboard } from "./dashboard.js";
 export { toolDefinitions } from "./mcp-tools.js";
@@ -124,24 +124,29 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
   if (!isLocalHost && configuredAuthToken === undefined) {
     throw new CoreError("EXTERNAL_HOST_AUTH_REQUIRED", `Host ${host} exposes every read/write endpoint; refusing to start without an auth token.`, true);
   }
-  const runtimeRevision = options.runtimeRevision ?? await computeRuntimeRevision(options.workspaceRoot ?? process.cwd());
   const projectRoot = options.projectRoot ?? process.env.ST_WORKSPACE_PROJECT_ROOT ?? "projects";
-  const fetcher = new HttpSourceFetcher();
   // An explicitly supplied root is already a complete workspace selection;
   // do not let an inherited project environment variable silently redirect it.
   // Environment-based project selection remains available for the default root
   // and for callers that pass projectId explicitly.
   const requestedProject = options.projectId ?? (options.projectRoot === undefined ? process.env.ST_WORKSPACE_PROJECT : undefined);
-  const selectedProject = typeof requestedProject === "string" && requestedProject.trim().length > 0 ? requestedProject.trim() : undefined;
+  const selectedProject = typeof requestedProject === "string" ? assertProjectId(requestedProject) : undefined;
+  // Validate caller-controlled project identity before runtime revision probing or
+  // any filesystem-backed repository/attachment object can perform I/O.
+  const runtimeRevision = options.runtimeRevision ?? await computeRuntimeRevision(options.workspaceRoot ?? process.cwd());
+  const fetcher = new HttpSourceFetcher();
   // Loopback mode uses an explicit Host allowlist to resist browser DNS rebinding.
   // Non-loopback mode keeps the mandatory auth-token boundary and does not infer DNS/reverse-proxy hostnames.
   const hostPolicy = isLocalHost ? { trustedHostnames: LOOPBACK_TRUSTED_HOSTNAMES } : {};
   const manager = selectedProject === undefined
     ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true, attachmentStore: new FileAttachmentStore(repository) }) })
     : undefined;
+  const selectedRepository = selectedProject === undefined
+    ? undefined
+    : new FileProjectRepository(projectRoot, selectedProject, { layout: "project", materialize: true });
   const serverOptions: WorkspaceServerOptions = manager !== undefined
     ? { projectManager: manager, actor: options.actor ?? "server", runtimeRevision, ...hostPolicy, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) }
-    : { runtime: new WorkspaceRuntime(new FileProjectRepository(projectRoot, selectedProject!, { layout: "project", materialize: true }), { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(projectRoot, selectedProject!) }), actor: options.actor ?? "server", runtimeRevision, ...hostPolicy, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) };
+    : { runtime: new WorkspaceRuntime(selectedRepository!, { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(selectedRepository!) }), actor: options.actor ?? "server", runtimeRevision, ...hostPolicy, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) };
   const server = createWorkspaceServer(serverOptions);
   await new Promise<void>((resolve, reject) => {
     const listening = (): void => {
