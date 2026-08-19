@@ -1,7 +1,8 @@
 import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { CoreError, FileProjectRepository, internalId, type ProjectState, type RequestResult, type WorkspaceContext } from "@st-workspace/core";
+import { CoreError, FileProjectRepository, PROJECT_RELOCATION_INTENT_PATH, internalId, type ProjectState, type RequestResult, type WorkspaceContext } from "@st-workspace/core";
 import type { WorkspaceRuntime } from "./index.js";
+import { RecoverableProjectRepository } from "./project-relocation.js";
 
 function now(): string {
   return new Date().toISOString();
@@ -72,7 +73,7 @@ export function findTargetProject(requested: string, summaries: WorkspaceProject
 }
 
 export class WorkspaceProjectManager {
-  private repositoryValue: FileProjectRepository;
+  private repositoryValue: RecoverableProjectRepository;
   private runtimeValue: WorkspaceRuntime;
   private placeholderReuseAllowed = true;
   private readonly freshByDefault: boolean;
@@ -81,7 +82,7 @@ export class WorkspaceProjectManager {
 
   constructor(private readonly options: WorkspaceProjectManagerOptions) {
     const initialProjectId = options.initialProjectId ?? "project-001";
-    this.repositoryValue = new FileProjectRepository(options.root, initialProjectId, { layout: "project", materialize: true });
+    this.repositoryValue = new RecoverableProjectRepository(options.root, initialProjectId, { layout: "project", materialize: true });
     this.runtimeValue = options.createRuntime(this.repositoryValue);
     this.freshByDefault = options.freshByDefault ?? true;
     this.sessionPrepared = options.initialProjectId !== undefined;
@@ -134,7 +135,7 @@ export class WorkspaceProjectManager {
       let sequence = 1;
       while (used.has(`project-${String(sequence).padStart(3, "0")}`)) sequence += 1;
       const id = `project-${String(sequence).padStart(3, "0")}`;
-      this.repositoryValue = new FileProjectRepository(this.options.root, id, { layout: "project", materialize: true });
+      this.repositoryValue = new RecoverableProjectRepository(this.options.root, id, { layout: "project", materialize: true });
       this.runtimeValue = this.options.createRuntime(this.repositoryValue);
     }
     await this.repositoryValue.read();
@@ -153,8 +154,10 @@ export class WorkspaceProjectManager {
       const primary = (await exists(stateFile)) ? stateFile : (await exists(legacyStateFile)) ? legacyStateFile : undefined;
       if (primary === undefined) continue;
       try {
-        const raw = await readFile(primary, "utf8");
-        const state = JSON.parse(raw) as ProjectState;
+        const relocationIntent = path.join(this.options.root, entry.name, PROJECT_RELOCATION_INTENT_PATH);
+        const state = await exists(relocationIntent)
+          ? await new RecoverableProjectRepository(this.options.root, entry.name, { layout: "project", materialize: true }).read()
+          : JSON.parse(await readFile(primary, "utf8")) as ProjectState;
         summaries.push({
           project_id: state.project_id,
           ...(state.project_name === undefined ? {} : { project_name: state.project_name }),
@@ -179,7 +182,7 @@ export class WorkspaceProjectManager {
     if (result.status === "not_found") throw new CoreError("PROJECT_NOT_FOUND", `找不到專案「${requested}」 (project was not found)`, true);
     if (result.status === "ambiguous") throw new CoreError("PROJECT_SELECTION_AMBIGUOUS", `發現多個符合「${requested}」的專案，請提供專案 ID 或完整路徑 (ambiguous project selection)`, true);
     const selected = result.target;
-    this.repositoryValue = new FileProjectRepository(this.options.root, path.basename(selected.path), { layout: "project", materialize: true });
+    this.repositoryValue = new RecoverableProjectRepository(this.options.root, path.basename(selected.path), { layout: "project", materialize: true });
     this.runtimeValue = this.options.createRuntime(this.repositoryValue);
     this.placeholderReuseAllowed = false;
     this.sessionPrepared = true;
@@ -195,7 +198,7 @@ export class WorkspaceProjectManager {
     let sequence = 1;
     while (used.has(`project-${String(sequence).padStart(3, "0")}`)) sequence += 1;
     const id = `project-${String(sequence).padStart(3, "0")}`;
-    this.repositoryValue = new FileProjectRepository(this.options.root, id, { layout: "project", materialize: true });
+    this.repositoryValue = new RecoverableProjectRepository(this.options.root, id, { layout: "project", materialize: true });
     this.runtimeValue = this.options.createRuntime(this.repositoryValue);
     this.placeholderReuseAllowed = false;
     this.sessionPrepared = true;
@@ -214,14 +217,10 @@ export class WorkspaceProjectManager {
       target = `${base}-${suffix}`;
       suffix += 1;
     }
-    if (target !== this.repositoryValue.projectId) await this.repositoryValue.relocate(target);
-    const updated = await this.repositoryValue.commit(state.revision, (current) => ({
-      ...current,
-      project_id: target,
+    const updated = await this.repositoryValue.relocateAndCommitIdentity(target, state.revision, {
       project_name: projectName,
-      project_slug: target,
       project_status: "ready",
-    }));
+    });
     return {
       ...result,
       project_id: updated.project_id,
