@@ -79,7 +79,7 @@ describe("project manager HTTP and MCP boundary", () => {
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
-  }, 60_000);
+  }, process.platform === "win32" ? 120_000 : 60_000);
 
   it("does not load an existing project when the server starts without a selection", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-server-fresh-session-"));

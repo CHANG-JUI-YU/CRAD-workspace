@@ -3,7 +3,10 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["packages/*/test/**/*.test.ts", "apps/*/test/**/*.test.ts"],
-    testTimeout: 30_000,
+    // Windows CI performs substantially more fsync/rename work in the file-repository
+    // integration suites. Keep the normal 30s budget elsewhere while allowing those
+    // bounded filesystem operations to finish instead of timing out mid-transaction.
+    testTimeout: process.platform === "win32" ? 120_000 : 30_000,
     maxWorkers: 4,
     coverage: {
       provider: "v8",

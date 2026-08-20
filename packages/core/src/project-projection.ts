@@ -20,6 +20,7 @@ export interface ProjectIntentProjection {
 }
 
 export type CardModeSelection = "zhuji" | "palette" | "both";
+export type ProjectBlueprintRelationshipScope = "none" | "full_roster" | "participant_subset";
 
 export interface BuildPlanEntry {
   key: string;
@@ -68,6 +69,8 @@ export interface ProjectBlueprintProjection {
   world_enabled: boolean;
   world_authoring_timing?: string;
   relationships_enabled: boolean;
+  relationship_scope?: ProjectBlueprintRelationshipScope;
+  relationship_character_ids: string[];
   source_adaptation: boolean;
   artifact_value?: Record<string, unknown>;
   precheck_value?: Record<string, unknown>;
@@ -89,7 +92,7 @@ const NON_PLAN_ARTIFACT_KINDS: ReadonlySet<ArtifactRecord["kind"]> = new Set([
 
 type MaterializedArtifactValue = {
   character_id?: unknown;
-  document?: { id?: unknown; display_name?: unknown };
+  document?: { id?: unknown; display_name?: unknown; character_ids?: unknown };
   module?: { module?: unknown };
   plugin_id?: unknown;
 };
@@ -114,6 +117,17 @@ function textValue(value: unknown): string | undefined {
 
 function stringValues(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()) : [];
+}
+
+function relationshipScope(value: unknown): ProjectBlueprintRelationshipScope | undefined {
+  const scope = textValue(value);
+  return scope === "none" || scope === "full_roster" || scope === "participant_subset" ? scope : undefined;
+}
+
+function relationshipArtifactParticipants(artifact: ArtifactRecord): string[] | undefined {
+  if (artifact.kind !== "relationship") return undefined;
+  const document = planRecord(parseArtifactValue(artifact).document);
+  return document === undefined || !Array.isArray(document.character_ids) ? undefined : stringValues(document.character_ids);
 }
 
 function parseBlueprintYaml(content: string): Record<string, unknown> | undefined {
@@ -206,6 +220,10 @@ function parseBlueprintProjection(value: Record<string, unknown> | undefined, re
   const precheck = refs.precheck;
   const primary = textValue(value.primary_character_id);
   const timing = textValue(world?.authoring_timing);
+  const relationshipsEnabled = relationships === undefined ? precheck !== undefined ? false : true : relationships.enabled === true;
+  const configuredRelationshipScope = relationshipScope(relationships?.scope);
+  const effectiveRelationshipScope = relationships === undefined ? undefined : relationshipsEnabled ? configuredRelationshipScope : "none";
+  const relationshipCharacterIds = stringValues(relationships?.character_ids);
   const artifactRaw = artifact === undefined ? undefined : parseBlueprintArtifact(artifact);
   const precheckRaw = precheck?.candidate_blueprint;
   return {
@@ -216,7 +234,9 @@ function parseBlueprintProjection(value: Record<string, unknown> | undefined, re
     primary_character_id_explicit: primary !== undefined,
     world_enabled: world === undefined ? precheck !== undefined ? false : true : world.enabled === true,
     ...(timing === undefined ? {} : { world_authoring_timing: timing }),
-    relationships_enabled: relationships === undefined ? precheck !== undefined ? false : true : relationships.enabled === true,
+    relationships_enabled: relationshipsEnabled,
+    ...(effectiveRelationshipScope === undefined ? {} : { relationship_scope: effectiveRelationshipScope }),
+    relationship_character_ids: relationshipCharacterIds,
     source_adaptation: value.flow === "source_adaptation" || value.intent === "source_adaptation" || value.intent_kind === "source_adaptation" || value.source_adaptation !== undefined,
     ...(artifactRaw === undefined ? {} : { artifact_value: artifactRaw }),
     ...(precheckRaw === undefined ? {} : { precheck_value: precheckRaw }),
@@ -268,6 +288,43 @@ function publishPlanFromProjection(projection: ProjectProjection, modeSelection?
   const explicitPrimary = blueprint?.primary_character_id_explicit === true ? blueprint.primary_character_id : undefined;
   const fallbackPrimary = exportRoster[0]?.id ?? (hasBlueprintRoster ? undefined : sourceCharacterIds[0]);
   const diagnostics: PublishPlanDiagnostic[] = [];
+  const relationshipScopeValue = blueprint?.relationship_scope;
+  const relationshipConfiguredIds = blueprint?.relationship_character_ids ?? [];
+  const relationshipRequiredIds = !relationshipsEnabled || !hasBlueprintRoster
+    ? []
+    : relationshipScopeValue === "participant_subset"
+      ? relationshipConfiguredIds
+      : blueprint!.characters.map((character) => character.id);
+  if (relationshipsEnabled && hasBlueprintRoster && relationshipScopeValue === "participant_subset") {
+    const invalid = relationshipRequiredIds.filter((characterId) => rosterIds?.has(characterId) !== true);
+    if (relationshipRequiredIds.length === 0) {
+      diagnostics.push({
+        code: "BLUEPRINT_RELATIONSHIP_PARTICIPANTS_MISSING",
+        severity: "error",
+        message: "Blueprint participant_subset relationship scope must declare participant character_ids.",
+      });
+    }
+    if (invalid.length > 0) {
+      diagnostics.push({
+        code: "BLUEPRINT_RELATIONSHIP_PARTICIPANT_INVALID",
+        severity: "error",
+        message: `Blueprint relationship scope references characters outside the current roster: ${invalid.join(", ")}.`,
+      });
+    }
+  }
+  if (relationshipsEnabled && hasBlueprintRoster && relationshipScopeValue === "full_roster" && relationshipConfiguredIds.length > 0) {
+    const configured = new Set(relationshipConfiguredIds);
+    const currentRosterIds = blueprint!.characters.map((character) => character.id);
+    const missing = currentRosterIds.filter((characterId) => !configured.has(characterId));
+    const extra = relationshipConfiguredIds.filter((characterId) => rosterIds?.has(characterId) !== true);
+    if (missing.length > 0 || extra.length > 0) {
+      diagnostics.push({
+        code: "BLUEPRINT_RELATIONSHIP_FULL_ROSTER_SNAPSHOT_STALE",
+        severity: "warning",
+        message: `Stored full_roster character_ids no longer match the current Blueprint roster; current roster is authoritative. Missing: ${missing.join(", ") || "none"}; extra: ${extra.join(", ") || "none"}.`,
+      });
+    }
+  }
   let primaryCharacterId: string | undefined;
   if (explicitPrimary !== undefined) {
     const excludedByMode = hasBlueprintRoster && effectiveMode !== undefined && rosterIds?.has(explicitPrimary) === true && !exportRosterIds.has(explicitPrimary);
@@ -299,7 +356,50 @@ function publishPlanFromProjection(projection: ProjectProjection, modeSelection?
   const includesArtifact = (artifact: ArtifactRecord): boolean => {
     if (NON_PLAN_ARTIFACT_KINDS.has(artifact.kind)) return false;
     if (artifact.kind === "world_lore") return worldEnabled;
-    if (artifact.kind === "relationship") return relationshipsEnabled;
+    if (artifact.kind === "relationship") {
+      if (!relationshipsEnabled) return false;
+      if (relationshipScopeValue === undefined || !hasBlueprintRoster || rosterIds === undefined) return true;
+      const participants = relationshipArtifactParticipants(artifact);
+      if (participants === undefined) {
+        diagnostics.push({
+          code: "RELATIONSHIP_PARTICIPANTS_INVALID",
+          severity: "error",
+          message: `Relationship artifact ${artifact.id} must expose document.character_ids before it can satisfy the Blueprint relationship scope.`,
+        });
+        return false;
+      }
+      const outsideRoster = participants.filter((characterId) => !rosterIds.has(characterId));
+      if (outsideRoster.length > 0) {
+        diagnostics.push({
+          code: "RELATIONSHIP_PARTICIPANT_OUTSIDE_BLUEPRINT",
+          severity: "error",
+          message: `Relationship artifact ${artifact.id} includes participants outside the current Blueprint roster: ${outsideRoster.join(", ")}.`,
+        });
+        return false;
+      }
+      const participantSet = new Set(participants);
+      const missing = relationshipRequiredIds.filter((characterId) => !participantSet.has(characterId));
+      if (missing.length > 0) {
+        diagnostics.push({
+          code: "RELATIONSHIP_SCOPE_PARTICIPANTS_MISSING",
+          severity: "error",
+          message: `Relationship artifact ${artifact.id} does not cover the required ${relationshipScopeValue ?? "full_roster"} participants: ${missing.join(", ")}.`,
+        });
+        return false;
+      }
+      if (relationshipScopeValue === "participant_subset") {
+        const required = new Set(relationshipRequiredIds);
+        const extras = participants.filter((characterId) => !required.has(characterId));
+        if (extras.length > 0) {
+          diagnostics.push({
+            code: "RELATIONSHIP_SCOPE_EXTRA_PARTICIPANTS",
+            severity: "warning",
+            message: `participant_subset allows additional current-roster participants; artifact ${artifact.id} also includes: ${extras.join(", ")}.`,
+          });
+        }
+      }
+      return true;
+    }
     const binding = artifactBinding(artifact);
     if (artifact.kind === "zhuji" || artifact.kind === "palette") {
       if (effectiveMode === undefined || (effectiveMode !== "both" && effectiveMode !== artifact.kind)) return false;
