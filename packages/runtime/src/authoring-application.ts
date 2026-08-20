@@ -9,6 +9,7 @@ import {
   sourceContextFromRecord,
   templateJsonSchemaFor,
   zhujiProposalJsonSchema,
+  type ArtifactKind,
   type AuthoringKnowledgeContext,
   type FactRecord,
   type FactReviewContext,
@@ -21,6 +22,28 @@ import {
   type ZhujiModuleKind,
 } from "@st-workspace/core";
 import { latestBlueprintSnapshot, objectValue } from "./interview-application.js";
+
+const TEMPLATE_ARTIFACT_KINDS: Readonly<Record<TemplateKind, ArtifactKind>> = {
+  character: "character",
+  zhuji: "zhuji",
+  palette: "palette",
+  wardrobe: "wardrobe",
+  greetings: "greeting",
+  relationships: "relationship",
+  world: "world_lore",
+  conversion: "conversion",
+  import_analysis: "import_analysis",
+  review: "review",
+  source_research: "source_research",
+  fact_curation: "fact_curation",
+  fact_review: "fact_review",
+  plugin: "plugin",
+  director_routing: "director_routing",
+};
+
+function artifactMatchesTemplateKind(kind: TemplateKind, artifactKind: ArtifactKind): boolean {
+  return TEMPLATE_ARTIFACT_KINDS[kind] === artifactKind;
+}
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -101,10 +124,10 @@ export async function templateContext(deps: AuthoringApplicationDeps, kind: Temp
       const parsed = parseWardrobeMarkdown(content);
       return [{ artifact_id: artifact.id, kind, name: artifact.name, value: { kind: "wardrobe", character_id: characterId, content }, content: parsed.document, markdown: content, revision: artifact.revision }];
     }
+    if (!artifactMatchesTemplateKind(kind, artifact.kind)) return [];
     try {
       const value = JSON.parse(artifact.content) as { kind?: unknown; document?: unknown };
-      const kindMatch = kind === "character" ? value.document !== undefined || value.kind === "character" : value.kind === kind;
-      if (!kindMatch) return [];
+      if (value.kind !== kind) return [];
       const name = artifact.name;
       return [{ artifact_id: artifact.id, kind, name, value, content: value, revision: artifact.revision }];
     } catch {
