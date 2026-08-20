@@ -3,6 +3,7 @@ import { MemoryProjectRepository } from "@st-workspace/core";
 import { WorkspaceRuntime } from "@st-workspace/runtime";
 import { dashboard } from "../src/dashboard.js";
 import { DASHBOARD_API_SESSION_SAFE_JS } from "../src/dashboard-session-client.js";
+import { DASHBOARD_PANELS_PUBLISH_ROW_SAFE_JS } from "../src/dashboard-row-scope.js";
 import { DASHBOARD_SESSION_COOKIE } from "../src/dashboard-session.js";
 import { createWorkspaceServer } from "../src/index.js";
 
@@ -50,6 +51,9 @@ describe("#234 Dashboard browser session lifecycle", () => {
     expect(DASHBOARD_API_SESSION_SAFE_JS).toContain('credentials: "same-origin"');
     expect(DASHBOARD_API_SESSION_SAFE_JS).toContain('window.location.replace("/")');
     expect(DASHBOARD_API_SESSION_SAFE_JS).toContain('logoutButton.textContent = "登出"');
+    expect(DASHBOARD_PANELS_PUBLISH_ROW_SAFE_JS).toContain('credentials: "same-origin"');
+    expect(DASHBOARD_PANELS_PUBLISH_ROW_SAFE_JS).toContain('response.status === 401');
+    expect(DASHBOARD_PANELS_PUBLISH_ROW_SAFE_JS).toContain("redirectToDashboardReauthentication");
 
     const protectedHtml = dashboard({ authenticationRequired: true });
     expect(protectedHtml).toContain("var dashboardAuthenticationEnabled = true;");
