@@ -50,7 +50,7 @@ function artifact(id: string, artifactKind: ArtifactKind, value: unknown) {
 }
 
 describe("#224 template context artifact kind integrity", () => {
-  it("keeps character context free of greetings and relationships that also contain document", async () => {
+  it("keeps character context free of greetings and relationships while preserving character-shaped legacy artifacts", async () => {
     const repository = new MemoryProjectRepository("audit14-issue224-mixed");
     await repository.commit(0, (state) => ({
       ...state,
@@ -59,16 +59,22 @@ describe("#224 template context artifact kind integrity", () => {
         artifact("greetings-valid", "greeting", { kind: "greetings", document: { greetings: [{ character_ids: ["character-valid"] }] } }),
         artifact("relationships-valid", "relationship", { kind: "relationships", document: { character_ids: ["character-valid", "character-two"] } }),
         artifact("character-stored-but-greetings-proposal", "character", { kind: "greetings", document: { greetings: [{ character_ids: ["character-valid"] }] } }),
+        artifact("character-stored-but-raw-greetings", "character", { document: { greetings: [{ character_ids: ["character-valid"] }] } }),
+        artifact("character-stored-but-raw-relationships", "character", { document: { character_ids: ["character-valid", "character-two"] } }),
         artifact("legacy-character-without-proposal-kind", "character", { document: { id: "legacy-character", display_name: "Legacy" } }),
       ],
     }));
 
     const context = await new WorkspaceRuntime(repository).templateContext("character");
-    expect(context.context.existing.map((item) => item.artifact_id)).toEqual(["character-valid"]);
+    expect(context.context.existing.map((item) => item.artifact_id)).toEqual([
+      "character-valid",
+      "legacy-character-without-proposal-kind",
+    ]);
     expect(context.context.existing[0]?.value).toMatchObject({ kind: "character", document: { id: "character-valid" } });
+    expect(context.context.existing[1]?.value).toMatchObject({ document: { id: "legacy-character", display_name: "Legacy" } });
   });
 
-  it("requires both the stored artifact kind and parsed proposal kind for every JSON template context", async () => {
+  it("requires both the stored artifact kind and parsed proposal kind for every typed JSON template context", async () => {
     const repository = new MemoryProjectRepository("audit14-issue224-all-kinds");
     const artifacts = JSON_CONTEXT_CASES.flatMap((entry) => {
       const mismatchKind = entry.templateKind === "character" ? "greetings" : "character";
