@@ -49,6 +49,15 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
+function legacyCharacterValue(value: { kind?: unknown; document?: unknown }): boolean {
+  if (value.kind !== undefined) return false;
+  const document = record(value.document);
+  return typeof document?.id === "string"
+    && document.id.trim().length > 0
+    && typeof document.display_name === "string"
+    && document.display_name.trim().length > 0;
+}
+
 function stringValues(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
@@ -127,7 +136,7 @@ export async function templateContext(deps: AuthoringApplicationDeps, kind: Temp
     if (!artifactMatchesTemplateKind(kind, artifact.kind)) return [];
     try {
       const value = JSON.parse(artifact.content) as { kind?: unknown; document?: unknown };
-      if (value.kind !== kind) return [];
+      if (value.kind !== kind && !(kind === "character" && legacyCharacterValue(value))) return [];
       const name = artifact.name;
       return [{ artifact_id: artifact.id, kind, name, value, content: value, revision: artifact.revision }];
     } catch {
