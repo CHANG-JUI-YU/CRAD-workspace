@@ -11,10 +11,10 @@ import { DASHBOARD_URL_JS } from "./dashboard-url.js";
 import { DASHBOARD_PANELS_CORE_JS } from "./dashboard-panels-core.js";
 import { DASHBOARD_ACTIONS_JS } from "./dashboard-actions.js";
 import {
-  DASHBOARD_API_PROJECT_SAFE_JS,
   DASHBOARD_PANELS_MEDIA_PROJECT_SAFE_JS,
   DASHBOARD_PROJECT_CONTEXT_JS,
 } from "./dashboard-project-context.js";
+import { DASHBOARD_API_SESSION_SAFE_JS } from "./dashboard-session-client.js";
 import {
   DASHBOARD_PANELS_PUBLISH_ROW_SAFE_JS,
   DASHBOARD_PANELS_REVIEW_ROW_SAFE_JS,
@@ -31,16 +31,25 @@ const DASHBOARD_FOOTER = `    }());
 </html>
 `;
 
-export function dashboard(): string {
+export interface DashboardRenderOptions {
+  authenticationRequired?: boolean;
+}
+
+function dashboardAuthenticationConfig(authenticationRequired: boolean): string {
+  return `      var dashboardAuthenticationEnabled = ${authenticationRequired ? "true" : "false"};\n`;
+}
+
+export function dashboard(options: DashboardRenderOptions = {}): string {
   return (
     DASHBOARD_SHELL
     + DASHBOARD_CSS
     + prepareDashboardMarkup(DASHBOARD_MARKUP)
+    + dashboardAuthenticationConfig(options.authenticationRequired === true)
     + DASHBOARD_STATE_JS
     + DASHBOARD_DRAFT_STORE_JS
     + DASHBOARD_URL_JS
     + DASHBOARD_PANELS_CORE_JS
-    + DASHBOARD_API_PROJECT_SAFE_JS
+    + DASHBOARD_API_SESSION_SAFE_JS
     + DASHBOARD_ACTIONS_JS
     + DASHBOARD_PANELS_PUBLISH_ROW_SAFE_JS
     + DASHBOARD_PANELS_REVIEW_ROW_SAFE_JS

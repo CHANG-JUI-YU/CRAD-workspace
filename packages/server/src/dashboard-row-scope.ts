@@ -50,9 +50,12 @@ function useBinaryPublishDownload(source: string): string {
           var path = "/workspace/publish/download?publish_id=" + encodeURIComponent(publishId) + "&kind=" + encodeURIComponent(kind);
           var headers = Object.assign({ accept: "application/json, image/png, application/octet-stream" }, authHeaders());
           var requestContext = typeof projectContextSnapshot === "function" ? projectContextSnapshot() : null;
-          return fetch(path, { headers: headers }).then(async function (response) {
+          return fetch(path, { headers: headers, credentials: "same-origin" }).then(async function (response) {
             if (requestContext !== null && typeof projectContextMatches === "function" && !projectContextMatches(requestContext)) {
               throw staleProjectContextError();
+            }
+            if (response.status === 401 && typeof redirectToDashboardReauthentication === "function") {
+              redirectToDashboardReauthentication();
             }
             if (!response.ok) {
               var payload = {};
