@@ -20,6 +20,7 @@ export interface ProjectIntentProjection {
 }
 
 export type CardModeSelection = "zhuji" | "palette" | "both";
+export type ProjectBlueprintRelationshipScope = "none" | "full_roster" | "participant_subset";
 
 export interface BuildPlanEntry {
   key: string;
@@ -68,6 +69,8 @@ export interface ProjectBlueprintProjection {
   world_enabled: boolean;
   world_authoring_timing?: string;
   relationships_enabled: boolean;
+  relationship_scope?: ProjectBlueprintRelationshipScope;
+  relationship_character_ids: string[];
   source_adaptation: boolean;
   artifact_value?: Record<string, unknown>;
   precheck_value?: Record<string, unknown>;
@@ -114,6 +117,11 @@ function textValue(value: unknown): string | undefined {
 
 function stringValues(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()) : [];
+}
+
+function relationshipScope(value: unknown): ProjectBlueprintRelationshipScope | undefined {
+  const scope = textValue(value);
+  return scope === "none" || scope === "full_roster" || scope === "participant_subset" ? scope : undefined;
 }
 
 function parseBlueprintYaml(content: string): Record<string, unknown> | undefined {
@@ -206,6 +214,10 @@ function parseBlueprintProjection(value: Record<string, unknown> | undefined, re
   const precheck = refs.precheck;
   const primary = textValue(value.primary_character_id);
   const timing = textValue(world?.authoring_timing);
+  const relationshipsEnabled = relationships === undefined ? precheck !== undefined ? false : true : relationships.enabled === true;
+  const configuredRelationshipScope = relationshipScope(relationships?.scope);
+  const effectiveRelationshipScope = configuredRelationshipScope ?? (relationshipsEnabled ? "full_roster" : relationships === undefined ? undefined : "none");
+  const relationshipCharacterIds = stringValues(relationships?.character_ids);
   const artifactRaw = artifact === undefined ? undefined : parseBlueprintArtifact(artifact);
   const precheckRaw = precheck?.candidate_blueprint;
   return {
@@ -216,7 +228,9 @@ function parseBlueprintProjection(value: Record<string, unknown> | undefined, re
     primary_character_id_explicit: primary !== undefined,
     world_enabled: world === undefined ? precheck !== undefined ? false : true : world.enabled === true,
     ...(timing === undefined ? {} : { world_authoring_timing: timing }),
-    relationships_enabled: relationships === undefined ? precheck !== undefined ? false : true : relationships.enabled === true,
+    relationships_enabled: relationshipsEnabled,
+    ...(effectiveRelationshipScope === undefined ? {} : { relationship_scope: effectiveRelationshipScope }),
+    relationship_character_ids: relationshipCharacterIds,
     source_adaptation: value.flow === "source_adaptation" || value.intent === "source_adaptation" || value.intent_kind === "source_adaptation" || value.source_adaptation !== undefined,
     ...(artifactRaw === undefined ? {} : { artifact_value: artifactRaw }),
     ...(precheckRaw === undefined ? {} : { precheck_value: precheckRaw }),
