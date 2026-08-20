@@ -222,7 +222,7 @@ function parseBlueprintProjection(value: Record<string, unknown> | undefined, re
   const timing = textValue(world?.authoring_timing);
   const relationshipsEnabled = relationships === undefined ? precheck !== undefined ? false : true : relationships.enabled === true;
   const configuredRelationshipScope = relationshipScope(relationships?.scope);
-  const effectiveRelationshipScope = configuredRelationshipScope ?? (relationshipsEnabled ? "full_roster" : relationships === undefined ? undefined : "none");
+  const effectiveRelationshipScope = relationships === undefined ? undefined : relationshipsEnabled ? configuredRelationshipScope : "none";
   const relationshipCharacterIds = stringValues(relationships?.character_ids);
   const artifactRaw = artifact === undefined ? undefined : parseBlueprintArtifact(artifact);
   const precheckRaw = precheck?.candidate_blueprint;
@@ -358,7 +358,7 @@ function publishPlanFromProjection(projection: ProjectProjection, modeSelection?
     if (artifact.kind === "world_lore") return worldEnabled;
     if (artifact.kind === "relationship") {
       if (!relationshipsEnabled) return false;
-      if (!hasBlueprintRoster || rosterIds === undefined) return true;
+      if (relationshipScopeValue === undefined || !hasBlueprintRoster || rosterIds === undefined) return true;
       const participants = relationshipArtifactParticipants(artifact);
       if (participants === undefined) {
         diagnostics.push({
