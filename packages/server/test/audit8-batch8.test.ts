@@ -353,14 +353,14 @@ describe("#120/#118 publish intent and completion handoff (server)", () => {
     expect(jsonResponse.headers.get("content-disposition")).toContain("attachment;");
     expect(jsonResponse.headers.get("content-disposition")).toContain("filename*=UTF-8''");
     expect(Number(jsonResponse.headers.get("content-length"))).toBe(expectedJson.content.byteLength);
-    expect(new Uint8Array(await jsonResponse.arrayBuffer())).toEqual(expectedJson.content);
+    expect(new Uint8Array(await jsonResponse.arrayBuffer())).toEqual(new Uint8Array(expectedJson.content));
 
     const expectedPng = await runtime.publishDownload(publishId as string, "png");
     const pngResponse = await fetch(`${url}/workspace/publish/download?publish_id=${encodeURIComponent(publishId as string)}&kind=png`);
     expect(pngResponse.status).toBe(200);
     expect(pngResponse.headers.get("content-type")).toBe("image/png");
     expect(Number(pngResponse.headers.get("content-length"))).toBe(expectedPng.content.byteLength);
-    expect(new Uint8Array(await pngResponse.arrayBuffer())).toEqual(expectedPng.content);
+    expect(new Uint8Array(await pngResponse.arrayBuffer())).toEqual(new Uint8Array(expectedPng.content));
   });
 
   it("rejects invalid download kind", async () => {
