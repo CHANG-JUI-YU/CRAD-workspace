@@ -42,6 +42,7 @@ function useCookieOnlyBrowserSession(source: string): string {
       }
 
       function redirectToDashboardReauthentication() {
+        if (typeof dashboardAuthenticationEnabled === "undefined" || dashboardAuthenticationEnabled !== true) return;
         if (dashboardReauthenticationPending) return;
         dashboardReauthenticationPending = true;
         window.location.replace("/");
