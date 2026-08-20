@@ -114,7 +114,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       if (request.method === "GET" && url.pathname === "/") {
         response.statusCode = 200;
         response.setHeader("content-type", "text/html; charset=utf-8");
-        response.end(dashboard());
+        response.end(dashboard({ authenticationRequired: authToken !== undefined }));
         return;
       }
       if (request.method === "GET" && url.pathname === "/workspace/dashboard/operations" && options.projectManager !== undefined && !options.projectManager.sessionSelected()) {
