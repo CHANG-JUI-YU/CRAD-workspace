@@ -50,7 +50,7 @@ function serializeCookie(value: string, maxAgeSeconds: number, secure: boolean):
   ].join("; ");
 }
 
-export function dashboardReauthenticationHtml(reason: Exclude<DashboardSessionStatus, "valid"> | "invalid-token"): string {
+export function dashboardReauthenticationHtml(reason: DashboardSessionStatus | "invalid-token"): string {
   const heading = reason === "expired"
     ? "Dashboard 工作階段已過期"
     : reason === "invalid" || reason === "invalid-token"
