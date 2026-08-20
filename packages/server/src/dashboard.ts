@@ -8,7 +8,7 @@ import {
 import { DASHBOARD_STATE_JS } from "./dashboard-state.js";
 import { DASHBOARD_DRAFT_STORE_JS } from "./dashboard-draft-store.js";
 import { DASHBOARD_URL_JS } from "./dashboard-url.js";
-import { DASHBOARD_PANELS_CORE_JS } from "./dashboard-panels-core.js";
+import { DASHBOARD_PANELS_PROJECT_SELECTOR_UX_JS } from "./dashboard-project-selector-ux.js";
 import { DASHBOARD_ACTIONS_JS } from "./dashboard-actions.js";
 import {
   DASHBOARD_PANELS_MEDIA_PROJECT_SAFE_JS,
@@ -48,7 +48,7 @@ export function dashboard(options: DashboardRenderOptions = {}): string {
     + DASHBOARD_STATE_JS
     + DASHBOARD_DRAFT_STORE_JS
     + DASHBOARD_URL_JS
-    + DASHBOARD_PANELS_CORE_JS
+    + DASHBOARD_PANELS_PROJECT_SELECTOR_UX_JS
     + DASHBOARD_API_SESSION_SAFE_JS
     + DASHBOARD_ACTIONS_JS
     + DASHBOARD_PANELS_PUBLISH_ROW_SAFE_JS

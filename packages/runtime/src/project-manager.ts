@@ -457,7 +457,7 @@ export class WorkspaceProjectManager {
       project_id: migrated.project_id,
       ...(migrated.project_name === undefined ? {} : { project_name: migrated.project_name }),
       project_path: this.repositoryValue.projectDirectory,
-      summary: `已切換至專案「${projectName}」（revision ${migrated.revision}）${continued ? "，訪談將於目標專案上繼續" : ""}。${result.summary}`.trim(),
+      summary: `已切換至專案「${projectName}」${continued ? "，訪談將於目標專案上繼續" : ""}。${result.summary}`.trim(),
     };
   }
 
