@@ -121,7 +121,7 @@ describe("Audit 14 #231 legacy-card browser upload", () => {
     try {
       const unsupported = await upload(base, "legacy.txt", Buffer.from("not supported"), "text/plain");
       expect(unsupported.status).toBe(400);
-      expect(await unsupported.json()).toMatchObject({ code: "LEGACY_CARD_FORMAT_UNSUPPORTED", recoverable: true });
+      expect(await unsupported.json()).toMatchObject({ code: "LEGACY_CARD_UNREADABLE", category: "import", recoverable: true });
 
       const malformed = await upload(base, "legacy.json", Buffer.from("{not-json"), "application/json");
       expect(malformed.status).toBe(200);
@@ -131,7 +131,7 @@ describe("Audit 14 #231 legacy-card browser upload", () => {
 
       const oversized = await upload(base, "legacy.json", Buffer.alloc(MAX_LEGACY_CARD_BYTES + 1, 0x20), "application/json");
       expect(oversized.status).toBe(400);
-      expect(await oversized.json()).toMatchObject({ code: "LEGACY_CARD_TOO_LARGE", recoverable: true });
+      expect(await oversized.json()).toMatchObject({ code: "ATTACHMENT_TOO_LARGE", recoverable: true, details: { max_bytes: MAX_LEGACY_CARD_BYTES } });
     } finally {
       await close(server);
     }

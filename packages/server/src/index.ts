@@ -124,20 +124,20 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       }
       if (request.method === "POST" && url.pathname === "/workspace/legacy-card/import") {
         const parsed = await body(request);
-        const input = parseRequest(legacyCardUploadSchema, parsed, "LEGACY_CARD_UPLOAD_REQUIRED");
+        const input = parseRequest(legacyCardUploadSchema, parsed, "ATTACHMENT_REQUIRED");
         const attachments = decodeAttachments(input.attachments);
         if (attachments.length !== 1) {
-          throw new CoreError("LEGACY_CARD_ATTACHMENT_REQUIRED", "舊卡審核需要一個可讀取的 PNG、JSON 或 YAML 附件。", true);
+          throw new CoreError("ATTACHMENT_REQUIRED", "舊卡審核需要一個可讀取的 PNG、JSON 或 YAML 附件。", true);
         }
         const attachment = attachments[0]!;
         if (attachment.name === "." || attachment.name === ".." || /[\\/]/u.test(attachment.name)) {
-          throw new CoreError("LEGACY_CARD_FILENAME_INVALID", "舊卡上傳只接受檔名，不接受 filesystem path。", true);
+          throw new CoreError("LEGACY_CARD_UNREADABLE", "舊卡上傳只接受檔名，不接受 filesystem path。", true);
         }
         if (!/\.(?:png|json|ya?ml)$/iu.test(attachment.name)) {
-          throw new CoreError("LEGACY_CARD_FORMAT_UNSUPPORTED", "舊卡審核僅支援 PNG、JSON、YAML（.yaml/.yml）檔案。", true);
+          throw new CoreError("LEGACY_CARD_UNREADABLE", "舊卡審核僅支援 PNG、JSON、YAML（.yaml/.yml）檔案。", true);
         }
         if (attachment.content.byteLength > LEGACY_CARD_MAX_BYTES) {
-          throw new CoreError("LEGACY_CARD_TOO_LARGE", "舊卡檔案超過 5 MiB 上限，請縮小檔案後重試。", true, { max_bytes: LEGACY_CARD_MAX_BYTES });
+          throw new CoreError("ATTACHMENT_TOO_LARGE", "舊卡檔案超過 5 MiB 上限，請縮小檔案後重試。", true, { max_bytes: LEGACY_CARD_MAX_BYTES });
         }
         const requestText = `匯入舊卡 ${attachment.name}`;
         let result;
