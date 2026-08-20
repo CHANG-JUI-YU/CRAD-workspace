@@ -158,14 +158,20 @@ describe("Audit 14 issues #226 + #233 project selector UX", () => {
     };
 
     renderFields({}, record);
-    const visible = JSON.stringify(rows);
-    expect(visible).toContain("Alice");
-    expect(visible).toContain("ready");
-    expect(visible).not.toContain("revision");
-    expect(visible).not.toContain("Alice-2\"");
-    expect(visible).not.toContain("operation-123");
-    expect(visible).not.toContain("lease-secret");
-    expect(visible).not.toContain("opaque-cas");
+    const labels = rows.map((row) => row.label);
+    const values = rows.map((row) => row.value);
+    expect(values).toContain("Alice");
+    expect(values).toContain("ready");
+    expect(values).toContain("/projects/Alice-2");
+    expect(labels).not.toContain("revision");
+    expect(labels).not.toContain("project_id");
+    expect(labels).not.toContain("operation_id");
+    expect(labels).not.toContain("lease_token");
+    expect(labels).not.toContain("lease_expires_at");
+    expect(labels).not.toContain("cas");
+    expect(values).not.toContain("operation-123");
+    expect(values).not.toContain("lease-secret");
+    expect(values).not.toContain("opaque-cas");
 
     const raw = JSON.stringify(record);
     expect(raw).toContain('"revision":7');
