@@ -157,7 +157,7 @@ describe("Audit 14 issues #226 + #233 project selector UX", () => {
       cas: "opaque-cas",
     };
 
-    renderFields({}, record);
+    renderFields({ replaceChildren: () => undefined }, record);
     const labels = rows.map((row) => row.label);
     const values = rows.map((row) => row.value);
     expect(values).toContain("Alice");
@@ -184,8 +184,8 @@ describe("Audit 14 issues #226 + #233 project selector UX", () => {
   it("selects missing, unique-name, duplicate-name and explicit-folder cases through the server boundary", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "st-workspace-v3-audit14-selector-"));
     roots.push(root);
-    await createProject(root, "Alice", "Alice");
-    await createProject(root, "Alice-2", "Alice");
+    await createProject(root, "Alice-folder", "Alice");
+    await createProject(root, "Alice-folder-2", "Alice");
     await createProject(root, "Bob-folder", "Bob");
 
     const server = await startWorkspaceServer({ port: 0, projectRoot: root, actor: "user" }) as WorkspaceServer;
@@ -215,9 +215,9 @@ describe("Audit 14 issues #226 + #233 project selector UX", () => {
       expect(ambiguous.ok).toBe(false);
       expect((await ambiguous.json() as { code?: string }).code).toBe("PROJECT_SELECTION_AMBIGUOUS");
 
-      const explicitFolder = await select("Alice-2");
+      const explicitFolder = await select("Alice-folder-2");
       expect(explicitFolder.ok).toBe(true);
-      expect((await explicitFolder.json() as { project_id?: string; project_name?: string }).project_id).toBe("Alice-2");
+      expect((await explicitFolder.json() as { project_id?: string; project_name?: string }).project_id).toBe("Alice-folder-2");
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
