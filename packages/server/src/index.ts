@@ -6,6 +6,7 @@ import { dashboard } from "./dashboard.js";
 export { toolDefinitions } from "./mcp-tools.js";
 import { applyBrowserSecurityHeaders, dashboardQuery, json, restError } from "./http-utils.js";
 import { extractBearerToken, normalizeConfiguredAuthToken, parseRequestTarget, timingSafeTextEqual, assertMutationRequestAllowed, assertRequestHostAllowed } from "./http-security.js";
+import { DashboardBrowserSessionStore, dashboardReauthenticationHtml, isDashboardSessionScope, type DashboardSessionAuthentication } from "./dashboard-session.js";
 import { JSONRPC_INTERNAL_ERROR, jsonRpcError } from "./jsonrpc.js";
 import { handlePublishDownloadRequest } from "./publish-download-http.js";
 import { handleMcpRequest, handleRestRequest, type WorkspaceRouteDeps } from "./routes.js";
@@ -25,6 +26,9 @@ export interface WorkspaceServerOptions {
   authToken?: string;
   runtimeRevision?: string;
   trustedHostnames?: readonly string[];
+  browserSessionTtlMs?: number;
+  browserSessionNow?: () => number;
+  browserSessionSecure?: boolean;
 }
 
 export interface WorkspaceServer extends Server {
@@ -37,6 +41,13 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
   const runtimeRevision = options.runtimeRevision ?? "manual";
   if (options.runtime === undefined && options.projectManager === undefined) throw new Error("workspace server requires a runtime or project manager");
   const authToken = normalizeConfiguredAuthToken(options.authToken);
+  const browserSessions = authToken === undefined
+    ? undefined
+    : new DashboardBrowserSessionStore({
+        ...(options.browserSessionTtlMs === undefined ? {} : { ttlMs: options.browserSessionTtlMs }),
+        ...(options.browserSessionNow === undefined ? {} : { now: options.browserSessionNow }),
+        secure: options.browserSessionSecure ?? false,
+      });
   const router = new AgentRouter();
   const runtimeForWorker = options.projectManager === undefined
     ? options.runtime
@@ -58,6 +69,7 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       if (trustedHostnames !== undefined) {
         assertRequestHostAllowed(request.headers.host, trustedHostnames, request.socket.localPort);
       }
+      let sessionAuthentication: DashboardSessionAuthentication = { status: "missing" };
       if (authToken !== undefined) {
         const headerToken = extractBearerToken(request.headers.authorization);
         const queryToken = url.searchParams.get("token");
@@ -68,14 +80,36 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         }
         const headerOk = headerToken !== undefined && timingSafeTextEqual(headerToken, authToken);
         const queryOk = isDashboardBootstrap && queryToken !== null && timingSafeTextEqual(queryToken, authToken);
-        if (!headerOk && !queryOk) {
-          restError(response, new CoreError("UNAUTHORIZED", "Missing or invalid bearer token", true));
+        sessionAuthentication = browserSessions!.authenticate(request.headers.cookie);
+        const sessionOk = isDashboardSessionScope(url.pathname) && sessionAuthentication.status === "valid";
+        if (!headerOk && !queryOk && !sessionOk) {
+          if (sessionAuthentication.status === "expired" || sessionAuthentication.status === "invalid") {
+            response.setHeader("set-cookie", browserSessions!.clearCookie());
+          }
+          if (isDashboardBootstrap) {
+            response.statusCode = 401;
+            response.setHeader("content-type", "text/html; charset=utf-8");
+            response.end(dashboardReauthenticationHtml(queryToken !== null ? "invalid-token" : sessionAuthentication.status));
+            return;
+          }
+          restError(response, new CoreError("UNAUTHORIZED", "Missing or invalid bearer token or Dashboard session", true));
           return;
+        }
+        if (queryOk) {
+          response.setHeader("set-cookie", browserSessions!.issue().cookie);
+        } else if (headerOk && (sessionAuthentication.status === "expired" || sessionAuthentication.status === "invalid")) {
+          response.setHeader("set-cookie", browserSessions!.clearCookie());
         }
       }
       const isMutation = request.method !== undefined && request.method !== "GET" && request.method !== "HEAD";
       if (isMutation) {
         assertMutationRequestAllowed(request.headers, request.headers.host);
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/auth/logout" && browserSessions !== undefined) {
+        const revoked = browserSessions.revoke(request.headers.cookie);
+        response.setHeader("set-cookie", browserSessions.clearCookie());
+        json(response, 200, { status: "logged_out", revoked });
+        return;
       }
       if (request.method === "GET" && url.pathname === "/") {
         response.statusCode = 200;
@@ -140,6 +174,7 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
   // Loopback mode uses an explicit Host allowlist to resist browser DNS rebinding.
   // Non-loopback mode keeps the mandatory auth-token boundary and does not infer DNS/reverse-proxy hostnames.
   const hostPolicy = isLocalHost ? { trustedHostnames: LOOPBACK_TRUSTED_HOSTNAMES } : {};
+  const browserSessionPolicy = configuredAuthToken === undefined ? {} : { browserSessionSecure: !isLocalHost };
   const manager = selectedProject === undefined
     ? new WorkspaceProjectManager({ root: projectRoot, createRuntime: (repository) => new WorkspaceRuntime(repository, { fetcher: fetcher.fetch, interviewRequired: true, attachmentStore: new FileAttachmentStore(repository) }) })
     : undefined;
@@ -147,8 +182,8 @@ export async function startWorkspaceServer(options: { port?: number; host?: stri
     ? undefined
     : new FileProjectRepository(projectRoot, selectedProject, { layout: "project", materialize: true });
   const serverOptions: WorkspaceServerOptions = manager !== undefined
-    ? { projectManager: manager, actor: options.actor ?? "server", runtimeRevision, ...hostPolicy, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) }
-    : { runtime: new WorkspaceRuntime(selectedRepository!, { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(selectedRepository!) }), actor: options.actor ?? "server", runtimeRevision, ...hostPolicy, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) };
+    ? { projectManager: manager, actor: options.actor ?? "server", runtimeRevision, ...hostPolicy, ...browserSessionPolicy, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) }
+    : { runtime: new WorkspaceRuntime(selectedRepository!, { fetcher: fetcher.fetch, attachmentStore: new FileAttachmentStore(selectedRepository!) }), actor: options.actor ?? "server", runtimeRevision, ...hostPolicy, ...browserSessionPolicy, ...(configuredAuthToken === undefined ? {} : { authToken: configuredAuthToken }) };
   const server = createWorkspaceServer(serverOptions);
   await new Promise<void>((resolve, reject) => {
     const listening = (): void => {
