@@ -15,8 +15,8 @@ type RelationshipScope = "full_roster" | "participant_subset";
 
 type RelationshipConfig = {
   enabled: true;
-  scope: RelationshipScope;
-  character_ids: string[];
+  scope?: RelationshipScope;
+  character_ids?: string[];
 };
 
 function recordedPrecheck(projectId: string, roster: readonly string[], relationships: RelationshipConfig): BlueprintPrecheckRecord {
@@ -37,7 +37,14 @@ function recordedPrecheck(projectId: string, roster: readonly string[], relation
     collaboration_mode: "assisted",
     candidate_blueprint: candidateBlueprint,
     candidate_blueprint_revision: contentHash(JSON.stringify(candidateBlueprint)),
-    checks: [],
+    checks: [{
+      subject_id: roster[0] ?? projectId,
+      dimension: "relationships_boundaries",
+      uncertainty: "low",
+      impact: "low",
+      basis: "Relationship scope explicitly configured for Audit 14 #227 regression.",
+      action: "preserve_explicit",
+    }],
     status: "recorded",
     created_at: NOW,
     created_by: "director",
@@ -59,6 +66,25 @@ function relationshipArtifact(id: string, key: string, participants: readonly st
     media_type: "application/json",
     content_hash: contentHash(content),
     revision,
+    status: "draft",
+    created_at: NOW,
+    updated_at: NOW,
+    created_by: "audit14",
+    operation_id: "audit14-issue227",
+  };
+}
+
+function relationshipArtifactWithoutParticipants(id: string, key: string): ArtifactRecord {
+  const content = JSON.stringify({ kind: "relationships", document: {} });
+  return {
+    id,
+    key,
+    kind: "relationship",
+    name: "relationships",
+    content,
+    media_type: "application/json",
+    content_hash: contentHash(content),
+    revision: contentHash(`${id}:${content}`),
     status: "draft",
     created_at: NOW,
     updated_at: NOW,
@@ -99,6 +125,20 @@ describe("#227 relationship manifest participant scope", () => {
     expect(projection.blueprint?.relationships_enabled).toBe(true);
     expect(projection.blueprint?.relationship_scope).toBe("participant_subset");
     expect(projection.blueprint?.relationship_character_ids).toEqual(["a", "c"]);
+  });
+
+  it("preserves legacy enabled relationship planning when the Blueprint has no explicit scope", async () => {
+    const relationship = relationshipArtifactWithoutParticipants("relationship-legacy", "relationship:legacy");
+    const repository = await repositoryFor(
+      "relationship-legacy-scope",
+      ["a", "b"],
+      { enabled: true },
+      [relationship],
+    );
+
+    const projection = computeProjectProjection(await repository.read());
+    expect(projection.blueprint?.relationship_scope).toBeUndefined();
+    expect(projection.publishPlan("zhuji").relationship_artifact_ids).toContain(relationship.id);
   });
 
   it("requires one current full-roster relationship artifact to cover every current Blueprint character", async () => {
@@ -164,6 +204,31 @@ describe("#227 relationship manifest participant scope", () => {
     expect(codes(manifest?.diagnostics ?? [])).not.toContain("RELATIONSHIP_SCOPE_PARTICIPANTS_MISSING");
   });
 
+  it("rejects an empty participant_subset configuration", async () => {
+    const repository = await repositoryFor(
+      "relationship-subset-empty",
+      ["a", "b"],
+      { enabled: true, scope: "participant_subset", character_ids: [] },
+      [],
+    );
+
+    const manifest = buildRequiredArtifactManifest(await repository.read());
+    expect(manifest?.relationships.complete).toBe(false);
+    expect(codes(manifest?.diagnostics ?? [])).toContain("BLUEPRINT_RELATIONSHIP_PARTICIPANTS_MISSING");
+  });
+
+  it("rejects participant_subset configuration that references a character outside the current roster", async () => {
+    const repository = await repositoryFor(
+      "relationship-subset-invalid",
+      ["a", "b"],
+      { enabled: true, scope: "participant_subset", character_ids: ["a", "ghost"] },
+      [relationshipArtifact("relationship-a", "relationship:team", ["a"])],
+    );
+
+    const manifest = buildRequiredArtifactManifest(await repository.read());
+    expect(codes(manifest?.diagnostics ?? [])).toContain("BLUEPRINT_RELATIONSHIP_PARTICIPANT_INVALID");
+  });
+
   it("rejects relationship participants outside the current Blueprint roster", async () => {
     const repository = await repositoryFor(
       "relationship-outside-roster",
@@ -176,6 +241,19 @@ describe("#227 relationship manifest participant scope", () => {
     expect(manifest?.relationships.complete).toBe(false);
     expect(manifest?.relationships.artifact_ids).toEqual([]);
     expect(codes(manifest?.diagnostics ?? [])).toContain("RELATIONSHIP_PARTICIPANT_OUTSIDE_BLUEPRINT");
+  });
+
+  it("rejects a scoped relationship artifact that does not expose document.character_ids", async () => {
+    const repository = await repositoryFor(
+      "relationship-participants-missing",
+      ["a", "b"],
+      { enabled: true, scope: "full_roster", character_ids: ["a", "b"] },
+      [relationshipArtifactWithoutParticipants("relationship-invalid", "relationship:team")],
+    );
+
+    const manifest = buildRequiredArtifactManifest(await repository.read());
+    expect(manifest?.relationships.complete).toBe(false);
+    expect(codes(manifest?.diagnostics ?? [])).toContain("RELATIONSHIP_PARTICIPANTS_INVALID");
   });
 
   it("does not let a stale same-key relationship revision satisfy the current participant requirement", async () => {
