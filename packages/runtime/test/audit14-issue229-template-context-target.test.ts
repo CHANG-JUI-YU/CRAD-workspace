@@ -123,7 +123,7 @@ describe("#229 explicit template context target identity", () => {
     );
 
     const { context } = await characterContext(runtime, "b");
-    expect(context.target).toEqual({ character_id: "b" });
+    expect(context).toMatchObject({ target: { character_id: "b" } });
     expect(context.existing.map((item) => item.artifact_id)).toEqual(["character-b-current"]);
     expect(context.knowledge?.accepted_facts.map((item) => item.id)).toEqual(["accepted-b"]);
     expect(context.knowledge?.unresolved_facts.map((item) => item.id)).toEqual(["conflict-b"]);
@@ -154,7 +154,7 @@ describe("#229 explicit template context target identity", () => {
     );
 
     const { context } = await characterContext(runtime, "c");
-    expect(context.target).toEqual({ character_id: "c" });
+    expect(context).toMatchObject({ target: { character_id: "c" } });
     expect(context.existing).toEqual([]);
     expect(context.knowledge?.accepted_facts.map((item) => item.id)).toEqual(["accepted-c"]);
     expect(context.knowledge?.unresolved_facts.map((item) => item.id)).toEqual(["candidate-c"]);
@@ -163,7 +163,7 @@ describe("#229 explicit template context target identity", () => {
   it("keeps single-character callers backward compatible through the authoritative Blueprint roster", async () => {
     const runtime = await runtimeFor("target-single", ["solo"], [], [fact("accepted-solo", "solo", "accepted")]);
     const { context } = await runtime.templateContext("character");
-    expect(context.target).toEqual({ character_id: "solo" });
+    expect(context).toMatchObject({ target: { character_id: "solo" } });
     expect(context.knowledge?.accepted_facts.map((item) => item.id)).toEqual(["accepted-solo"]);
   });
 });
