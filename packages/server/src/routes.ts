@@ -699,7 +699,7 @@ export async function handleMcpRequest(request: IncomingMessage, response: Serve
 async function dispatchMcpMethod(method: string, params: unknown, id: JsonRpcId, deps: WorkspaceRouteDeps): Promise<JsonRpcSuccessResponse | JsonRpcErrorResponse> {
   try {
     if (method === "initialize") {
-      return { jsonrpc: "2.0", id, result: { protocolVersion: mcpProtocolVersion(params), capabilities: { tools: { listChanged: false } }, serverInfo: { name: "st-workspace-v3", version: "0.1.0" } };
+      return { jsonrpc: "2.0", id, result: { protocolVersion: mcpProtocolVersion(params), capabilities: { tools: { listChanged: false } }, serverInfo: { name: "st-workspace-v3", version: "0.1.0" } } };
     }
     if (method === "tools/list") {
       return { jsonrpc: "2.0", id, result: { tools: toolDefinitions } };
