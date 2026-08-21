@@ -29,7 +29,7 @@ function recordedPrecheck(): BlueprintPrecheckRecord {
     candidate_blueprint_revision: contentHash(JSON.stringify(candidateBlueprint)),
     checks: [{
       subject_id: "a",
-      dimension: "character_direction",
+      dimension: "character_core",
       uncertainty: "low",
       impact: "low",
       basis: "Explicit two-character roster for template target boundary regression.",
