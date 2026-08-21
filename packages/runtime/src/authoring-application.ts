@@ -137,7 +137,7 @@ function resolveTemplateTarget(state: ProjectState, kind: TemplateKind, requeste
     if (requested.character_id !== undefined) {
       return { character_id: validateRosterTarget(requested.character_id, rosterIds) };
     }
-    if (rosterIds.length === 1) return { character_id: rosterIds[0] };
+    if (rosterIds.length === 1) return { character_id: rosterIds[0]! };
     if (rosterIds.length > 1) {
       throw new CoreError("TEMPLATE_CHARACTER_TARGET_REQUIRED", `${kind} requires character_id for a multi-character Blueprint.`, true);
     }
