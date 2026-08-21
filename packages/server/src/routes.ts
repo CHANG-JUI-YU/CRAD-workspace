@@ -47,6 +47,11 @@ const operationAttachmentReuploadSchema = z.object({
   })).min(1).max(MAX_ATTACHMENT_COUNT),
 }).strict();
 
+const templateContextInputSchema = templateKindSchema.extend({
+  character_id: z.string().trim().min(1).optional(),
+  participant_ids: z.array(z.string().trim().min(1)).min(1).optional(),
+}).strict();
+
 export async function handleRestRequest(request: IncomingMessage, response: ServerResponse, url: URL, deps: WorkspaceRouteDeps): Promise<boolean> {
       if (request.method === "GET" && url.pathname === "/workspace/status") {
         if (deps.projectManager === undefined) {
@@ -249,12 +254,25 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         return true;
       }
       if (request.method === "GET" && url.pathname === "/workspace/template/context") {
-        const kind = url.searchParams.get("kind");
-        if (kind === null || !templateKindSchema.safeParse({ kind }).success) {
+        const rawInput = {
+          kind: url.searchParams.get("kind"),
+          ...(url.searchParams.get("character_id") === null ? {} : { character_id: url.searchParams.get("character_id") }),
+          ...(url.searchParams.getAll("participant_id").length === 0 ? {} : { participant_ids: url.searchParams.getAll("participant_id") }),
+        };
+        const parsed = templateContextInputSchema.safeParse(rawInput);
+        if (!parsed.success) {
           restError(response, new CoreError("TEMPLATE_KIND_REQUIRED", "TEMPLATE_KIND_REQUIRED", true));
           return true;
         }
-        json(response, 200, await (await deps.getRuntime()).templateContext(kind as Parameters<WorkspaceRuntime["templateContext"]>[0]));
+        const runtime = await deps.getRuntime();
+        const target = {
+          ...(parsed.data.character_id === undefined ? {} : { character_id: parsed.data.character_id }),
+          ...(parsed.data.participant_ids === undefined ? {} : { participant_ids: parsed.data.participant_ids }),
+        };
+        const result = Object.keys(target).length === 0
+          ? await runtime.templateContext(parsed.data.kind)
+          : await runtime.templateContext(parsed.data.kind, target as unknown as Parameters<WorkspaceRuntime["templateContext"]>[1]);
+        json(response, 200, result);
         return true;
       }
       if (request.method === "GET" && url.pathname === "/workspace/authoring/context") {
@@ -740,8 +758,15 @@ async function callWorkspaceTool(name: string, args: unknown, deps: WorkspaceRou
     case "workspace_zhuji_submit":
       return (await deps.getRuntime()).submitZhujiProposal(parsedArguments, { actor: deps.actor, attachments: [] });
     case "workspace_template_context": {
-      const input = parseRequest(templateKindSchema, parsedArguments, "TEMPLATE_KIND_REQUIRED");
-      return (await deps.getRuntime()).templateContext(input.kind);
+      const input = parseRequest(templateContextInputSchema, parsedArguments, "TEMPLATE_KIND_REQUIRED");
+      const runtime = await deps.getRuntime();
+      const target = {
+        ...(input.character_id === undefined ? {} : { character_id: input.character_id }),
+        ...(input.participant_ids === undefined ? {} : { participant_ids: input.participant_ids }),
+      };
+      return Object.keys(target).length === 0
+        ? runtime.templateContext(input.kind)
+        : runtime.templateContext(input.kind, target as unknown as Parameters<WorkspaceRuntime["templateContext"]>[1]);
     }
     case "workspace_template_submit":
       return (await deps.getRuntime()).submitTemplateProposal(parsedArguments, { actor: deps.actor, attachments: [] });
