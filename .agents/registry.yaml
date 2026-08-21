@@ -49,19 +49,19 @@ agents:
     prompt: .agents/agents/zhuji-creator.md
     personality: zhuji-creator
     skills: [zhuji-creation]
-    intents: [character-authoring, zhuji]
+    intents: [zhuji]
   - id: palette-creator
     role: creator
     prompt: .agents/agents/palette-creator.md
     personality: palette-creator
     skills: [palette-creation]
-    intents: [character-authoring, palette]
+    intents: [palette]
   - id: wardrobe-creator
     role: creator
     prompt: .agents/agents/wardrobe-creator.md
     personality: wardrobe-creator
     skills: [wardrobe-creation]
-    intents: [character-authoring, wardrobe]
+    intents: [wardrobe]
   - id: character-critic
     role: critic
     prompt: .agents/agents/character-critic.md
