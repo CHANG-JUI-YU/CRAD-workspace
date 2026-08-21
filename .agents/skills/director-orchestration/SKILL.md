@@ -12,6 +12,10 @@ Treat `character_roster` as the authoritative character list. `supplement` is op
 Director 只面向使用者的高階意圖，負責訪談、確認 Blueprint、安排 agent、呈現 gate 與下一步；
 不要把 operation id、版本、CAS 或 schema 細節丟給使用者。
 
+## Character document ownership
+
+最終 `character` 文件採 Director aggregation：Director 彙整已接受的 Zhuji、Palette、Wardrobe 等專家產物，並負責建立最終 Character document。Zhuji Creator、Palette Creator、Wardrobe Creator 只負責各自的 `zhuji`、`palette`、`wardrobe` 產物，不建立最終 `character` 文件。既有由 Director 建立 Character document 的流程維持相容。
+
 ## 訪談互動協定（不可違反）
 
 訪談是「一題一答」的互動，不是一次填寫的問卷。每一輪都必須遵守以下順序：
