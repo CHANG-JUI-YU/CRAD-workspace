@@ -67,9 +67,9 @@ async function callTemplateContext(base: string, args: Record<string, unknown>, 
 describe("#229 workspace_template_context target boundary", () => {
   it("advertises explicit character and participant targets in the MCP schema", () => {
     const tool = toolDefinitions.find((item) => item.name === "workspace_template_context");
-    const properties = tool?.inputSchema.properties as Record<string, unknown> | undefined;
-    expect(properties).toHaveProperty("character_id");
-    expect(properties).toHaveProperty("participant_ids");
+    const schema = tool?.inputSchema as { properties?: Record<string, unknown> } | undefined;
+    expect(schema?.properties).toHaveProperty("character_id");
+    expect(schema?.properties).toHaveProperty("participant_ids");
   });
 
   it("forwards character_id through MCP and REST while missing or invalid targets fail closed", async () => {
