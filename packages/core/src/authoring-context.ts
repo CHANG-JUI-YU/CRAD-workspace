@@ -41,6 +41,20 @@ export interface AuthoringSourceContext {
   revision?: string;
 }
 
+export interface AuthoringUnresolvedFactReviewContext {
+  fact_id: string;
+  candidate_occurrence_id: string;
+  state: "pending_review" | "needs_evidence" | "conflict";
+  latest_decision?: {
+    id: string;
+    review_run_id: string;
+    reviewer_identity: string;
+    decision: "accepted" | "rejected" | "needs_evidence" | "conflict";
+    reason: string;
+    created_at: string;
+  };
+}
+
 export interface FactReviewCandidateContext {
   candidate_occurrence_id: string;
   fact_id: string;
@@ -93,6 +107,8 @@ export interface AuthoringKnowledgeContext {
   source_adaptation?: SourceAdaptationIntent;
   accepted_facts: FactRecord[];
   unresolved_facts: FactRecord[];
+  /** Review-state metadata for unresolved_facts. Omitted by legacy producers. */
+  unresolved_fact_reviews?: AuthoringUnresolvedFactReviewContext[];
   sources: AuthoringSourceContext[];
   fact_register_revision: string;
   adaptation_decisions: AdaptationDecision[];
@@ -102,11 +118,12 @@ export interface AuthoringKnowledgeContext {
 export const AUTHORING_KNOWLEDGE_RULES = [
   "Treat Blueprint as the user's creative intent and do not silently overwrite it with source facts.",
   "Use accepted_facts as optional creative evidence; unresolved_facts are not confirmed canon.",
+  "Use unresolved_fact_reviews to distinguish pending review, needs_evidence, and conflict states without treating a review decision as a Fact status.",
   "When a Fact shapes authored content, record its id in provenance or fact_refs.",
   "When authored content intentionally differs from a Fact or Blueprint, preserve an adaptation decision.",
 ] as const;
 
-export type AuthoringKnowledgeSource = Pick<AuthoringKnowledgeContext, "blueprint" | "source_adaptation" | "accepted_facts" | "unresolved_facts" | "sources" | "fact_register_revision" | "adaptation_decisions" | "fact_review">;
+export type AuthoringKnowledgeSource = Pick<AuthoringKnowledgeContext, "blueprint" | "source_adaptation" | "accepted_facts" | "unresolved_facts" | "unresolved_fact_reviews" | "sources" | "fact_register_revision" | "adaptation_decisions" | "fact_review">;
 
 export function sourceContextFromRecord(source: SourceRecord, candidate?: { url?: string; status?: string }): AuthoringSourceContext {
   return {

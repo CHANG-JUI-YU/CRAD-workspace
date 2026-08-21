@@ -25,6 +25,7 @@ import {
   type ZhujiModuleKind,
 } from "@st-workspace/core";
 import { latestBlueprintSnapshot, objectValue } from "./interview-application.js";
+import { unresolvedFactReviewContext } from "./unresolved-fact-context.js";
 
 const TEMPLATE_ARTIFACT_KINDS: Readonly<Record<TemplateKind, ArtifactKind>> = {
   character: "character",
@@ -296,8 +297,12 @@ function buildAuthoringKnowledgeContext(state: ProjectState, options?: { scope?:
     ...(objectValue(blueprint?.source_adaptation)?.subject_name === undefined ? {} : { source_adaptation: blueprint?.source_adaptation as SourceAdaptationIntent }),
     accepted_facts: acceptedFacts,
     unresolved_facts: unresolvedFacts,
+    unresolved_fact_reviews: unresolvedFactReviewContext(state, unresolvedFacts),
     sources: options?.include_sources === false ? [] : state.sources.map((source) => sourceContextFromRecord(source, candidateById.get(source.candidate_id))),
-    fact_register_revision: contentHash(canonicalJson(state.facts.map((fact) => ({ id: fact.id, status: fact.status, updated_at: fact.updated_at })))),
+    fact_register_revision: contentHash(canonicalJson({
+      facts: state.facts.map((fact) => ({ id: fact.id, status: fact.status, updated_at: fact.updated_at })),
+      review_decisions: state.fact_review_decisions.map((decision) => ({ id: decision.id, fact_id: decision.fact_id, candidate_occurrence_id: decision.candidate_occurrence_id, decision: decision.decision, created_at: decision.created_at })),
+    })),
     adaptation_decisions: [...state.adaptation_decisions],
   };
 }
