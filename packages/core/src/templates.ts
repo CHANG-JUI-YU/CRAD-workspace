@@ -568,7 +568,7 @@ export type PluginSource = z.infer<typeof pluginSourceSchema>;
 export type WardrobeProposalValue = WardrobeProposal;
 
 export const TEMPLATE_BINDINGS: Readonly<Record<string, TemplateKind[]>> = {
-  "director-orchestration": ["director_routing"],
+  "director-orchestration": ["character", "director_routing"],
   "source-research": ["source_research"],
   "fact-curation": ["fact_curation"],
   "fact-review": ["fact_review"],
@@ -592,7 +592,7 @@ export const TEMPLATE_BINDINGS: Readonly<Record<string, TemplateKind[]>> = {
 };
 
 export const TEMPLATE_GUIDES: Readonly<Record<TemplateKind, { skill: string; title: string; required: readonly string[]; example: unknown }>> = {
-  character: { skill: "character-authoring", title: "Character document", required: ["document.schema_version", "document.id", "document.display_name", "document.summary"], example: { kind: "character", document: { schema_version: 1, id: "demo", display_name: "Demo", summary: "A concise character summary" } } },
+  character: { skill: "director-orchestration", title: "Character document (Director aggregation)", required: ["document.schema_version", "document.id", "document.display_name", "document.summary"], example: { kind: "character", document: { schema_version: 1, id: "demo", display_name: "Demo", summary: "A concise character summary" } } },
   zhuji: { skill: "zhuji-creation", title: "Zhuji seven-module character mode", required: ["character_id", "module.module", "module.data"], example: { kind: "zhuji", character_id: "demo", module: "read workspace_zhuji_context for a module-specific example" } },
   palette: { skill: "palette-creation", title: "Palette module", required: ["character_id", "module.module", "module.title", "module.content"], example: { kind: "palette", character_id: "demo", module: { schema_version: 1, mode: "palette", module: "basic_information", title: "Basic information", content: "A compact palette description" } } },
   wardrobe: { skill: "wardrobe-creation", title: "Cross-mode wardrobe", required: ["character_id", "content"], example: { kind: "wardrobe", character_id: "demo", content: "wardrobe.md tables must include 款式、顏色、材質、數量、主要場合、狀態、備註; same cut in different colors must be separate rows with concrete fit, care, storage and use notes" } },
