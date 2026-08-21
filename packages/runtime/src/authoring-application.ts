@@ -8,6 +8,7 @@ import {
   createEntityMatcher,
   factReferencesAnyEntity,
   parseWardrobeMarkdown,
+  resolveEntityReferences,
   sourceContextFromRecord,
   templateJsonSchemaFor,
   zhujiProposalJsonSchema,
@@ -87,20 +88,17 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
 }
 
 function blueprintRosterIds(state: ProjectState): string[] {
-  const blueprint = latestBlueprintSnapshot(state);
-  if (!Array.isArray(blueprint?.characters)) return [];
-  return uniqueStrings(blueprint.characters.flatMap((candidate) => {
-    const id = record(candidate)?.id;
-    return typeof id === "string" ? [id] : [];
-  }));
+  return uniqueStrings((computeProjectProjection(state).blueprint?.characters ?? []).map((character) => character.id));
 }
 
 function validateRosterTarget(characterId: string, rosterIds: readonly string[]): string {
   const normalized = characterId.trim();
-  if (normalized.length === 0 || !rosterIds.includes(normalized)) {
+  if (normalized.length === 0 || (rosterIds.length > 0 && !rosterIds.includes(normalized))) {
     throw new CoreError(
       "TEMPLATE_CHARACTER_TARGET_INVALID",
-      `Character target ${normalized || "(empty)"} is not in the current Blueprint roster.`,
+      rosterIds.length > 0
+        ? `Character target ${normalized || "(empty)"} is not in the current Blueprint roster.`
+        : "Character target must be non-empty.",
       true,
     );
   }
@@ -109,7 +107,7 @@ function validateRosterTarget(characterId: string, rosterIds: readonly string[])
 
 function validateParticipantTargets(participantIds: readonly string[], rosterIds: readonly string[]): string[] {
   const normalized = uniqueStrings(participantIds);
-  const invalid = normalized.filter((characterId) => !rosterIds.includes(characterId));
+  const invalid = rosterIds.length === 0 ? [] : normalized.filter((characterId) => !rosterIds.includes(characterId));
   if (normalized.length === 0 || invalid.length > 0) {
     throw new CoreError(
       "TEMPLATE_PARTICIPANT_TARGET_INVALID",
@@ -122,44 +120,13 @@ function validateParticipantTargets(participantIds: readonly string[], rosterIds
   return normalized;
 }
 
-function relationshipBlueprintParticipants(state: ProjectState, rosterIds: readonly string[]): string[] {
-  const relationships = objectValue(latestBlueprintSnapshot(state)?.relationships);
-  const configured = stringValues(relationships?.character_ids);
-  return relationships?.scope === "participant_subset" && configured.length > 0 ? configured : [...rosterIds];
-}
-
-function resolveTemplateTarget(state: ProjectState, kind: TemplateKind, requested: TemplateContextTarget = {}): TemplateContextTarget {
-  const rosterIds = blueprintRosterIds(state);
-  if (CHARACTER_SCOPED_TEMPLATE_KINDS.has(kind)) {
-    if (requested.participant_ids !== undefined) {
-      throw new CoreError("TEMPLATE_CHARACTER_TARGET_INVALID", `${kind} requires character_id, not participant_ids.`, true);
-    }
-    if (requested.character_id !== undefined) {
-      return { character_id: validateRosterTarget(requested.character_id, rosterIds) };
-    }
-    if (rosterIds.length === 1) return { character_id: rosterIds[0]! };
-    if (rosterIds.length > 1) {
-      throw new CoreError("TEMPLATE_CHARACTER_TARGET_REQUIRED", `${kind} requires character_id for a multi-character Blueprint.`, true);
-    }
-    return {};
+function relationshipBlueprintParticipants(state: ProjectState, rosterIds: readonly string[]): string[] | undefined {
+  const blueprint = computeProjectProjection(state).blueprint;
+  if (blueprint?.relationship_scope === "participant_subset" && blueprint.relationship_character_ids.length > 0) {
+    return [...blueprint.relationship_character_ids];
   }
-
-  if (PARTICIPANT_SCOPED_TEMPLATE_KINDS.has(kind)) {
-    if (requested.character_id !== undefined) {
-      throw new CoreError("TEMPLATE_PARTICIPANT_TARGET_INVALID", `${kind} requires participant_ids, not character_id.`, true);
-    }
-    if (requested.participant_ids !== undefined) {
-      return { participant_ids: validateParticipantTargets(requested.participant_ids, rosterIds) };
-    }
-    if (rosterIds.length === 0) return {};
-    const participantIds = kind === "relationships" ? relationshipBlueprintParticipants(state, rosterIds) : rosterIds;
-    return { participant_ids: validateParticipantTargets(participantIds, rosterIds) };
-  }
-
-  if (requested.character_id !== undefined || requested.participant_ids !== undefined) {
-    throw new CoreError("TEMPLATE_TARGET_NOT_APPLICABLE", `${kind} does not accept a character or participant target.`, true);
-  }
-  return {};
+  if (blueprint?.relationship_scope === "full_roster") return [...rosterIds];
+  return undefined;
 }
 
 function characterIdFromTemplateValue(kind: TemplateKind, value: unknown, name: string): string | undefined {
@@ -188,11 +155,99 @@ function participantIdsFromTemplateValue(kind: TemplateKind, value: unknown): st
   return [];
 }
 
+function currentCharacterTarget(state: ProjectState, kind: TemplateKind): string | undefined {
+  const ids = uniqueStrings(computeProjectProjection(state).currentArtifacts.flatMap((artifact) => {
+    if (!artifactMatchesTemplateKind(kind, artifact.kind)) return [];
+    if (kind === "wardrobe") {
+      const id = artifact.name.split("/")[0]?.trim();
+      return id === undefined || id.length === 0 ? [] : [id];
+    }
+    try {
+      const value = JSON.parse(artifact.content) as { kind?: unknown; document?: unknown };
+      if (value.kind !== kind && !(kind === "character" && legacyCharacterValue(value))) return [];
+      const id = characterIdFromTemplateValue(kind, value, artifact.name);
+      return id === undefined || id.length === 0 ? [] : [id];
+    } catch {
+      return [];
+    }
+  }));
+  return ids.length === 1 ? ids[0] : undefined;
+}
+
+function currentParticipantTarget(state: ProjectState, kind: TemplateKind): string[] | undefined {
+  const matcher = createEntityMatcher(state);
+  const scopes = computeProjectProjection(state).currentArtifacts.flatMap((artifact) => {
+    if (!artifactMatchesTemplateKind(kind, artifact.kind)) return [];
+    try {
+      const value = JSON.parse(artifact.content) as { kind?: unknown };
+      if (value.kind !== kind) return [];
+      const ids = resolveEntityReferences(matcher, participantIdsFromTemplateValue(kind, value));
+      return ids.length === 0 ? [] : [uniqueStrings(ids)];
+    } catch {
+      return [];
+    }
+  });
+  if (scopes.length === 0) return undefined;
+  const first = scopes[0]!;
+  return scopes.every((scope) => sameStringSet(scope, first)) ? first : undefined;
+}
+
+function resolveTemplateTarget(state: ProjectState, kind: TemplateKind, requested: TemplateContextTarget = {}): TemplateContextTarget {
+  const rosterIds = blueprintRosterIds(state);
+  if (CHARACTER_SCOPED_TEMPLATE_KINDS.has(kind)) {
+    if (requested.participant_ids !== undefined) {
+      throw new CoreError("TEMPLATE_CHARACTER_TARGET_INVALID", `${kind} requires character_id, not participant_ids.`, true);
+    }
+    if (requested.character_id !== undefined) {
+      return { character_id: validateRosterTarget(requested.character_id, rosterIds) };
+    }
+    if (rosterIds.length === 1) return { character_id: rosterIds[0]! };
+    const currentTarget = currentCharacterTarget(state, kind);
+    if (currentTarget !== undefined) {
+      return { character_id: validateRosterTarget(currentTarget, rosterIds) };
+    }
+    if (rosterIds.length > 1) {
+      throw new CoreError("TEMPLATE_CHARACTER_TARGET_REQUIRED", `${kind} requires character_id when the current projection does not identify one unambiguous target.`, true);
+    }
+    return {};
+  }
+
+  if (PARTICIPANT_SCOPED_TEMPLATE_KINDS.has(kind)) {
+    if (requested.character_id !== undefined) {
+      throw new CoreError("TEMPLATE_PARTICIPANT_TARGET_INVALID", `${kind} requires participant_ids, not character_id.`, true);
+    }
+    if (requested.participant_ids !== undefined) {
+      return { participant_ids: validateParticipantTargets(requested.participant_ids, rosterIds) };
+    }
+    const blueprintParticipants = kind === "relationships" ? relationshipBlueprintParticipants(state, rosterIds) : undefined;
+    if (blueprintParticipants !== undefined && blueprintParticipants.length > 0) {
+      return { participant_ids: validateParticipantTargets(blueprintParticipants, rosterIds) };
+    }
+    const currentParticipants = currentParticipantTarget(state, kind);
+    if (currentParticipants !== undefined) {
+      return { participant_ids: validateParticipantTargets(currentParticipants, rosterIds) };
+    }
+    if (rosterIds.length === 0) return {};
+    return { participant_ids: validateParticipantTargets(rosterIds, rosterIds) };
+  }
+
+  if (requested.character_id !== undefined || requested.participant_ids !== undefined) {
+    throw new CoreError("TEMPLATE_TARGET_NOT_APPLICABLE", `${kind} does not accept a character or participant target.`, true);
+  }
+  return {};
+}
+
 function instanceMatchesTarget(kind: TemplateKind, value: unknown, name: string, target: TemplateContextTarget): boolean {
   if (target.character_id !== undefined) return characterIdFromTemplateValue(kind, value, name) === target.character_id;
   if (target.participant_ids === undefined) return true;
   const participants = participantIdsFromTemplateValue(kind, value);
-  if (kind === "relationships") return sameStringSet(participants, target.participant_ids);
+  if (kind === "relationships") {
+    const targetSet = new Set(target.participant_ids);
+    return participants.length === target.participant_ids.length && participants.every((characterId) => {
+      const resolved = targetSet.has(characterId) ? characterId : undefined;
+      return resolved !== undefined;
+    });
+  }
   if (kind === "greetings") {
     const targetSet = new Set(target.participant_ids);
     return participants.length > 0 && participants.every((characterId) => targetSet.has(characterId));
@@ -275,6 +330,7 @@ export async function templateContext(
   const requestedTarget = hasRequestedTarget ? targetOrExecutionAgent : {};
   const executionAgent = hasRequestedTarget ? explicitExecutionAgent : targetOrExecutionAgent;
   const target = resolveTemplateTarget(state, kind, requestedTarget);
+  const matcher = createEntityMatcher(state);
   const existing = computeProjectProjection(state).currentArtifacts.flatMap<TemplateInstance>((artifact): TemplateInstance[] => {
     if (kind === "wardrobe" && artifact.kind === "wardrobe") {
       const characterId = artifact.name.split("/")[0]?.trim();
@@ -290,7 +346,17 @@ export async function templateContext(
       const value = JSON.parse(artifact.content) as { kind?: unknown; document?: unknown };
       if (value.kind !== kind && !(kind === "character" && legacyCharacterValue(value))) return [];
       const name = artifact.name;
-      if (!instanceMatchesTarget(kind, value, name, target)) return [];
+      if (target.participant_ids !== undefined) {
+        const canonicalParticipants = resolveEntityReferences(matcher, participantIdsFromTemplateValue(kind, value));
+        const canonicalValue = kind === "relationships"
+          ? { ...value, document: { ...record(value.document), character_ids: canonicalParticipants } }
+          : kind === "greetings"
+            ? { ...value, document: { ...record(value.document), greetings: [{ character_ids: canonicalParticipants }] } }
+            : value;
+        if (!instanceMatchesTarget(kind, canonicalValue, name, target)) return [];
+      } else if (!instanceMatchesTarget(kind, value, name, target)) {
+        return [];
+      }
       return [{ artifact_id: artifact.id, kind, name, value, content: value, revision: artifact.revision }];
     } catch {
       return [];
