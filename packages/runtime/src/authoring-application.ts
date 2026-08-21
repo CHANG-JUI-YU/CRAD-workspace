@@ -2,6 +2,7 @@ import {
   buildTemplateContext,
   buildZhujiTemplateContext,
   canonicalJson,
+  computeProjectProjection,
   contentHash,
   CoreError,
   createEntityMatcher,
@@ -161,18 +162,6 @@ function resolveTemplateTarget(state: ProjectState, kind: TemplateKind, requeste
   return {};
 }
 
-function currentArtifactProjection(state: ProjectState): ProjectState["artifacts"] {
-  const seenKeys = new Set<string>();
-  const current: ProjectState["artifacts"][number][] = [];
-  for (let index = state.artifacts.length - 1; index >= 0; index -= 1) {
-    const artifact = state.artifacts[index];
-    if (artifact === undefined || seenKeys.has(artifact.key)) continue;
-    seenKeys.add(artifact.key);
-    current.push(artifact);
-  }
-  return current.reverse();
-}
-
 function characterIdFromTemplateValue(kind: TemplateKind, value: unknown, name: string): string | undefined {
   const root = record(value);
   if (kind === "wardrobe") return name.split("/")[0]?.trim();
@@ -209,6 +198,10 @@ function instanceMatchesTarget(kind: TemplateKind, value: unknown, name: string,
     return participants.length > 0 && participants.every((characterId) => targetSet.has(characterId));
   }
   return true;
+}
+
+function isTemplateContextTarget(value: TemplateContextTarget | ExecutionContext["executionAgent"] | undefined): value is TemplateContextTarget {
+  return value !== undefined && ("character_id" in value || "participant_ids" in value);
 }
 
 export interface AuthoringApplicationDeps {
@@ -278,12 +271,11 @@ export async function templateContext(
   explicitExecutionAgent?: ExecutionContext["executionAgent"],
 ): Promise<{ schema: Record<string, unknown>; context: TemplateContextResult }> {
   const state = await deps.repository.read();
-  const requestedTarget = targetOrExecutionAgent !== undefined && ("character_id" in targetOrExecutionAgent || "participant_ids" in targetOrExecutionAgent)
-    ? targetOrExecutionAgent as TemplateContextTarget
-    : {};
-  const executionAgent = requestedTarget === targetOrExecutionAgent ? explicitExecutionAgent : targetOrExecutionAgent as ExecutionContext["executionAgent"] | undefined;
+  const hasRequestedTarget = isTemplateContextTarget(targetOrExecutionAgent);
+  const requestedTarget = hasRequestedTarget ? targetOrExecutionAgent : {};
+  const executionAgent = hasRequestedTarget ? explicitExecutionAgent : targetOrExecutionAgent;
   const target = resolveTemplateTarget(state, kind, requestedTarget);
-  const existing = currentArtifactProjection(state).flatMap<TemplateInstance>((artifact): TemplateInstance[] => {
+  const existing = computeProjectProjection(state).currentArtifacts.flatMap<TemplateInstance>((artifact): TemplateInstance[] => {
     if (kind === "wardrobe" && artifact.kind === "wardrobe") {
       const characterId = artifact.name.split("/")[0]?.trim();
       if (characterId === undefined || characterId.length === 0) return [];
