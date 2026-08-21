@@ -118,6 +118,7 @@ export interface AuthoringKnowledgeContext {
 export const AUTHORING_KNOWLEDGE_RULES = [
   "Treat Blueprint as the user's creative intent and do not silently overwrite it with source facts.",
   "Use accepted_facts as optional creative evidence; unresolved_facts are not confirmed canon.",
+  "Use unresolved_fact_reviews to distinguish pending review, needs_evidence, and conflict states without treating a review decision as a Fact status.",
   "When a Fact shapes authored content, record its id in provenance or fact_refs.",
   "When authored content intentionally differs from a Fact or Blueprint, preserve an adaptation decision.",
 ] as const;
