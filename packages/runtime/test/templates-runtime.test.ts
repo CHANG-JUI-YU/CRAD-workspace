@@ -145,7 +145,7 @@ describe("runtime template boundary", () => {
 
     const characterKnowledge = (await runtime.templateContext("character")).context.knowledge!;
     expect(characterKnowledge.accepted_facts.map((item) => item.id)).toEqual(["fact-entity-ref", "fact-legacy-alias", "fact-world"]);
-    expect(characterKnowledge.unresolved_facts).toEqual([]);
+    expect(characterKnowledge.unresolved_facts.map((item) => item.id)).toEqual(["fact-unresolved"]);
 
     const relationshipKnowledge = (await runtime.templateContext("relationships")).context.knowledge!;
     expect(relationshipKnowledge.accepted_facts.map((item) => item.id)).toEqual(["fact-entity-ref", "fact-legacy-alias", "fact-bob"]);

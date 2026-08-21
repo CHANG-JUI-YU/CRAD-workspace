@@ -66,7 +66,7 @@ export const toolDefinitions = [
   },
   {
     name: "workspace_template_context",
-    description: "Read the fixed template contract, JSON Schema, guide and existing examples for one Agent/Skill output kind.",
+    description: "Read one fixed template contract scoped to an explicit Blueprint character or participant selection when the template is character-scoped.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -74,6 +74,17 @@ export const toolDefinitions = [
         kind: {
           type: "string",
           enum: ["character", "zhuji", "palette", "wardrobe", "greetings", "relationships", "world", "conversion", "import_analysis", "review", "source_research", "fact_curation", "fact_review", "plugin", "director_routing"],
+        },
+        character_id: {
+          type: "string",
+          description: "Explicit current Blueprint character id for character, zhuji, palette, wardrobe, or conversion context.",
+        },
+        participant_ids: {
+          type: "array",
+          minItems: 1,
+          uniqueItems: true,
+          items: { type: "string" },
+          description: "Explicit current Blueprint participant ids for relationships or greetings context.",
         },
       },
       required: ["kind"],

@@ -2,18 +2,21 @@ import {
   buildTemplateContext,
   buildZhujiTemplateContext,
   canonicalJson,
+  computeProjectProjection,
   contentHash,
+  CoreError,
   createEntityMatcher,
   factReferencesAnyEntity,
   parseWardrobeMarkdown,
+  resolveEntityReferences,
   sourceContextFromRecord,
   templateJsonSchemaFor,
   zhujiProposalJsonSchema,
   type ArtifactKind,
   type AuthoringKnowledgeContext,
+  type ExecutionContext,
   type FactRecord,
   type FactReviewContext,
-  type ExecutionContext,
   type ProjectRepository,
   type ProjectState,
   type SourceAdaptationIntent,
@@ -41,6 +44,16 @@ const TEMPLATE_ARTIFACT_KINDS: Readonly<Record<TemplateKind, ArtifactKind>> = {
   director_routing: "director_routing",
 };
 
+const CHARACTER_SCOPED_TEMPLATE_KINDS = new Set<TemplateKind>(["character", "zhuji", "palette", "wardrobe", "conversion"]);
+const PARTICIPANT_SCOPED_TEMPLATE_KINDS = new Set<TemplateKind>(["relationships", "greetings"]);
+
+export interface TemplateContextTarget {
+  readonly character_id?: string;
+  readonly participant_ids?: readonly string[];
+}
+
+export type TemplateContextResult = ReturnType<typeof buildTemplateContext> & { readonly target?: TemplateContextTarget };
+
 function artifactMatchesTemplateKind(kind: TemplateKind, artifactKind: ArtifactKind): boolean {
   return TEMPLATE_ARTIFACT_KINDS[kind] === artifactKind;
 }
@@ -60,8 +73,190 @@ function legacyCharacterValue(value: { kind?: unknown; document?: unknown }): bo
 
 function stringValues(value: unknown): string[] {
   return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
     : [];
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))];
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return left.every((value) => rightSet.has(value));
+}
+
+function blueprintRosterIds(state: ProjectState): string[] {
+  return uniqueStrings((computeProjectProjection(state).blueprint?.characters ?? []).map((character) => character.id));
+}
+
+function validateRosterTarget(characterId: string, rosterIds: readonly string[]): string {
+  const normalized = characterId.trim();
+  if (normalized.length === 0 || (rosterIds.length > 0 && !rosterIds.includes(normalized))) {
+    throw new CoreError(
+      "TEMPLATE_CHARACTER_TARGET_INVALID",
+      rosterIds.length > 0
+        ? `Character target ${normalized || "(empty)"} is not in the current Blueprint roster.`
+        : "Character target must be non-empty.",
+      true,
+    );
+  }
+  return normalized;
+}
+
+function validateParticipantTargets(participantIds: readonly string[], rosterIds: readonly string[]): string[] {
+  const normalized = uniqueStrings(participantIds);
+  const invalid = rosterIds.length === 0 ? [] : normalized.filter((characterId) => !rosterIds.includes(characterId));
+  if (normalized.length === 0 || invalid.length > 0) {
+    throw new CoreError(
+      "TEMPLATE_PARTICIPANT_TARGET_INVALID",
+      invalid.length > 0
+        ? `Participant targets are not in the current Blueprint roster: ${invalid.join(", ")}.`
+        : "At least one participant target is required.",
+      true,
+    );
+  }
+  return normalized;
+}
+
+function relationshipBlueprintParticipants(state: ProjectState, rosterIds: readonly string[]): string[] | undefined {
+  const blueprint = computeProjectProjection(state).blueprint;
+  if (blueprint?.relationship_scope === "participant_subset" && blueprint.relationship_character_ids.length > 0) {
+    return [...blueprint.relationship_character_ids];
+  }
+  if (blueprint?.relationship_scope === "full_roster") return [...rosterIds];
+  return undefined;
+}
+
+function characterIdFromTemplateValue(kind: TemplateKind, value: unknown, name: string): string | undefined {
+  const root = record(value);
+  if (kind === "wardrobe") return name.split("/")[0]?.trim();
+  if (kind === "character") {
+    const id = record(root?.document)?.id;
+    return typeof id === "string" ? id.trim() : undefined;
+  }
+  if (kind === "zhuji" || kind === "palette" || kind === "conversion") {
+    const id = root?.character_id;
+    return typeof id === "string" ? id.trim() : undefined;
+  }
+  return undefined;
+}
+
+function participantIdsFromTemplateValue(kind: TemplateKind, value: unknown): string[] {
+  const root = record(value);
+  const document = record(root?.document);
+  if (kind === "relationships") return uniqueStrings(stringValues(document?.character_ids));
+  if (kind === "greetings") {
+    return uniqueStrings(Array.isArray(document?.greetings)
+      ? document.greetings.flatMap((greeting) => stringValues(record(greeting)?.character_ids))
+      : []);
+  }
+  return [];
+}
+
+function currentCharacterTarget(state: ProjectState, kind: TemplateKind): string | undefined {
+  const ids = uniqueStrings(computeProjectProjection(state).currentArtifacts.flatMap((artifact) => {
+    if (!artifactMatchesTemplateKind(kind, artifact.kind)) return [];
+    if (kind === "wardrobe") {
+      const id = artifact.name.split("/")[0]?.trim();
+      return id === undefined || id.length === 0 ? [] : [id];
+    }
+    try {
+      const value = JSON.parse(artifact.content) as { kind?: unknown; document?: unknown };
+      if (value.kind !== kind && !(kind === "character" && legacyCharacterValue(value))) return [];
+      const id = characterIdFromTemplateValue(kind, value, artifact.name);
+      return id === undefined || id.length === 0 ? [] : [id];
+    } catch {
+      return [];
+    }
+  }));
+  return ids.length === 1 ? ids[0] : undefined;
+}
+
+function currentParticipantTarget(state: ProjectState, kind: TemplateKind): string[] | undefined {
+  const matcher = createEntityMatcher(state);
+  const scopes = computeProjectProjection(state).currentArtifacts.flatMap((artifact) => {
+    if (!artifactMatchesTemplateKind(kind, artifact.kind)) return [];
+    try {
+      const value = JSON.parse(artifact.content) as { kind?: unknown };
+      if (value.kind !== kind) return [];
+      const ids = resolveEntityReferences(matcher, participantIdsFromTemplateValue(kind, value));
+      return ids.length === 0 ? [] : [uniqueStrings(ids)];
+    } catch {
+      return [];
+    }
+  });
+  if (scopes.length === 0) return undefined;
+  const first = scopes[0]!;
+  return scopes.every((scope) => sameStringSet(scope, first)) ? first : undefined;
+}
+
+function resolveTemplateTarget(state: ProjectState, kind: TemplateKind, requested: TemplateContextTarget = {}): TemplateContextTarget {
+  const rosterIds = blueprintRosterIds(state);
+  if (CHARACTER_SCOPED_TEMPLATE_KINDS.has(kind)) {
+    if (requested.participant_ids !== undefined) {
+      throw new CoreError("TEMPLATE_CHARACTER_TARGET_INVALID", `${kind} requires character_id, not participant_ids.`, true);
+    }
+    if (requested.character_id !== undefined) {
+      return { character_id: validateRosterTarget(requested.character_id, rosterIds) };
+    }
+    if (rosterIds.length === 1) return { character_id: rosterIds[0]! };
+    const currentTarget = currentCharacterTarget(state, kind);
+    if (currentTarget !== undefined) {
+      return { character_id: validateRosterTarget(currentTarget, rosterIds) };
+    }
+    if (rosterIds.length > 1) {
+      throw new CoreError("TEMPLATE_CHARACTER_TARGET_REQUIRED", `${kind} requires character_id when the current projection does not identify one unambiguous target.`, true);
+    }
+    return {};
+  }
+
+  if (PARTICIPANT_SCOPED_TEMPLATE_KINDS.has(kind)) {
+    if (requested.character_id !== undefined) {
+      throw new CoreError("TEMPLATE_PARTICIPANT_TARGET_INVALID", `${kind} requires participant_ids, not character_id.`, true);
+    }
+    if (requested.participant_ids !== undefined) {
+      return { participant_ids: validateParticipantTargets(requested.participant_ids, rosterIds) };
+    }
+    const blueprintParticipants = kind === "relationships" ? relationshipBlueprintParticipants(state, rosterIds) : undefined;
+    if (blueprintParticipants !== undefined && blueprintParticipants.length > 0) {
+      return { participant_ids: validateParticipantTargets(blueprintParticipants, rosterIds) };
+    }
+    const currentParticipants = currentParticipantTarget(state, kind);
+    if (currentParticipants !== undefined) {
+      return { participant_ids: validateParticipantTargets(currentParticipants, rosterIds) };
+    }
+    if (rosterIds.length === 0) return {};
+    return { participant_ids: validateParticipantTargets(rosterIds, rosterIds) };
+  }
+
+  if (requested.character_id !== undefined || requested.participant_ids !== undefined) {
+    throw new CoreError("TEMPLATE_TARGET_NOT_APPLICABLE", `${kind} does not accept a character or participant target.`, true);
+  }
+  return {};
+}
+
+function instanceMatchesTarget(kind: TemplateKind, value: unknown, name: string, target: TemplateContextTarget): boolean {
+  if (target.character_id !== undefined) return characterIdFromTemplateValue(kind, value, name) === target.character_id;
+  if (target.participant_ids === undefined) return true;
+  const participants = participantIdsFromTemplateValue(kind, value);
+  if (kind === "relationships") {
+    const targetSet = new Set(target.participant_ids);
+    return participants.length === target.participant_ids.length && participants.every((characterId) => {
+      const resolved = targetSet.has(characterId) ? characterId : undefined;
+      return resolved !== undefined;
+    });
+  }
+  if (kind === "greetings") {
+    const targetSet = new Set(target.participant_ids);
+    return participants.length > 0 && participants.every((characterId) => targetSet.has(characterId));
+  }
+  return true;
+}
+
+function isTemplateContextTarget(value: TemplateContextTarget | ExecutionContext["executionAgent"] | undefined): value is TemplateContextTarget {
+  return value !== undefined && ("character_id" in value || "participant_ids" in value);
 }
 
 export interface AuthoringApplicationDeps {
@@ -95,11 +290,12 @@ function buildAuthoringKnowledgeContext(state: ProjectState, options?: { scope?:
   };
   const includeFacts = options?.include_facts !== false;
   const acceptedFacts = includeFacts ? state.facts.filter((fact) => fact.status === "accepted" && factRelevant(fact) && coverageFiltered(fact)) : [];
+  const unresolvedFacts = includeFacts ? state.facts.filter((fact) => (fact.status === "candidate" || fact.status === "conflict") && factRelevant(fact) && coverageFiltered(fact)) : [];
   return {
     ...(blueprint === undefined ? {} : { blueprint }),
     ...(objectValue(blueprint?.source_adaptation)?.subject_name === undefined ? {} : { source_adaptation: blueprint?.source_adaptation as SourceAdaptationIntent }),
     accepted_facts: acceptedFacts,
-    unresolved_facts: [],
+    unresolved_facts: unresolvedFacts,
     sources: options?.include_sources === false ? [] : state.sources.map((source) => sourceContextFromRecord(source, candidateById.get(source.candidate_id))),
     fact_register_revision: contentHash(canonicalJson(state.facts.map((fact) => ({ id: fact.id, status: fact.status, updated_at: fact.updated_at })))),
     adaptation_decisions: [...state.adaptation_decisions],
@@ -123,21 +319,44 @@ export async function zhujiContext(deps: AuthoringApplicationDeps, characterId?:
   return { schema: zhujiProposalJsonSchema as Record<string, unknown>, context: buildZhujiTemplateContext(existing, knowledge) };
 }
 
-export async function templateContext(deps: AuthoringApplicationDeps, kind: TemplateKind, executionAgent?: ExecutionContext["executionAgent"]): Promise<{ schema: Record<string, unknown>; context: ReturnType<typeof buildTemplateContext> }> {
+export async function templateContext(
+  deps: AuthoringApplicationDeps,
+  kind: TemplateKind,
+  targetOrExecutionAgent?: TemplateContextTarget | ExecutionContext["executionAgent"],
+  explicitExecutionAgent?: ExecutionContext["executionAgent"],
+): Promise<{ schema: Record<string, unknown>; context: TemplateContextResult }> {
   const state = await deps.repository.read();
-  const existing = state.artifacts.flatMap<TemplateInstance>((artifact): TemplateInstance[] => {
+  const hasRequestedTarget = isTemplateContextTarget(targetOrExecutionAgent);
+  const requestedTarget = hasRequestedTarget ? targetOrExecutionAgent : {};
+  const executionAgent = hasRequestedTarget ? explicitExecutionAgent : targetOrExecutionAgent;
+  const target = resolveTemplateTarget(state, kind, requestedTarget);
+  const matcher = createEntityMatcher(state);
+  const existing = computeProjectProjection(state).currentArtifacts.flatMap<TemplateInstance>((artifact): TemplateInstance[] => {
     if (kind === "wardrobe" && artifact.kind === "wardrobe") {
       const characterId = artifact.name.split("/")[0]?.trim();
       if (characterId === undefined || characterId.length === 0) return [];
       const content = artifact.content;
       const parsed = parseWardrobeMarkdown(content);
-      return [{ artifact_id: artifact.id, kind, name: artifact.name, value: { kind: "wardrobe", character_id: characterId, content }, content: parsed.document, markdown: content, revision: artifact.revision }];
+      const value = { kind: "wardrobe", character_id: characterId, content };
+      if (!instanceMatchesTarget(kind, value, artifact.name, target)) return [];
+      return [{ artifact_id: artifact.id, kind, name: artifact.name, value, content: parsed.document, markdown: content, revision: artifact.revision }];
     }
     if (!artifactMatchesTemplateKind(kind, artifact.kind)) return [];
     try {
       const value = JSON.parse(artifact.content) as { kind?: unknown; document?: unknown };
       if (value.kind !== kind && !(kind === "character" && legacyCharacterValue(value))) return [];
       const name = artifact.name;
+      if (target.participant_ids !== undefined) {
+        const canonicalParticipants = resolveEntityReferences(matcher, participantIdsFromTemplateValue(kind, value));
+        const canonicalValue = kind === "relationships"
+          ? { ...value, document: { ...record(value.document), character_ids: canonicalParticipants } }
+          : kind === "greetings"
+            ? { ...value, document: { ...record(value.document), greetings: [{ character_ids: canonicalParticipants }] } }
+            : value;
+        if (!instanceMatchesTarget(kind, canonicalValue, name, target)) return [];
+      } else if (!instanceMatchesTarget(kind, value, name, target)) {
+        return [];
+      }
       return [{ artifact_id: artifact.id, kind, name, value, content: value, revision: artifact.revision }];
     } catch {
       return [];
@@ -146,38 +365,23 @@ export async function templateContext(deps: AuthoringApplicationDeps, kind: Temp
   const factReview = kind === "fact_review"
     ? await deps.knowledge.factReviewContext(executionAgent === undefined ? {} : { reviewer_identity: executionAgent.id })
     : undefined;
-  const firstInstance = existing[0];
-  const rawValue = firstInstance?.value as { character_id?: unknown; document?: { id?: unknown } } | undefined;
-  const instanceCharacterId = typeof rawValue?.character_id === "string"
-    ? rawValue.character_id
-    : typeof rawValue?.document?.id === "string"
-      ? rawValue.document.id
-      : typeof firstInstance?.name === "string" && firstInstance.name.includes("/")
-        ? firstInstance.name.split("/")[0]
-        : undefined;
-  const firstValue = record(firstInstance?.value);
-  const document = record(firstValue?.document);
-  const relatedCharacterIds = kind === "relationships"
-    ? stringValues(document?.character_ids)
-    : kind === "greetings"
-      ? (Array.isArray(document?.greetings) ? document.greetings.flatMap((greeting) => stringValues(record(greeting)?.character_ids)) : [])
-      : [];
   const knowledgeOptions = kind === "fact_review"
     ? { include_facts: false, include_sources: false }
     : kind === "world"
       ? { scope: "world" as const }
-      : kind === "relationships"
-        ? { scope: "relationship" as const, related_character_ids: relatedCharacterIds }
-        : kind === "greetings"
-          ? { scope: "greeting" as const, related_character_ids: relatedCharacterIds }
-          : instanceCharacterId === undefined
-            ? undefined
-            : { scope: "character" as const, character_id: instanceCharacterId };
+      : target.participant_ids !== undefined
+        ? { scope: kind === "relationships" ? "relationship" as const : "greeting" as const, related_character_ids: target.participant_ids }
+        : target.character_id !== undefined
+          ? { scope: "character" as const, character_id: target.character_id }
+          : undefined;
   const knowledge: AuthoringKnowledgeContext = {
     ...buildAuthoringKnowledgeContext(state, knowledgeOptions),
     ...(factReview === undefined ? {} : { fact_review: factReview as FactReviewContext }),
   };
-  const context = buildTemplateContext(kind, existing, knowledge);
+  const baseContext = buildTemplateContext(kind, existing, knowledge);
+  const context: TemplateContextResult = target.character_id === undefined && target.participant_ids === undefined
+    ? baseContext
+    : { ...baseContext, target };
   return { schema: templateJsonSchemaFor(kind), context };
 }
 
