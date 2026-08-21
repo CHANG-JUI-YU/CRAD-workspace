@@ -30,7 +30,7 @@ function recordedPrecheck(projectId: string, roster: readonly string[]): Bluepri
     candidate_blueprint_revision: contentHash(JSON.stringify(candidateBlueprint)),
     checks: [{
       subject_id: roster[0] ?? projectId,
-      dimension: "character_direction",
+      dimension: "character_core",
       uncertainty: "low",
       impact: "low",
       basis: "Explicit Blueprint roster for Audit 14 #229 regression.",
