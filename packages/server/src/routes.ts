@@ -7,6 +7,7 @@ import { body, compact, dashboardPathId, dashboardQuery, json, parseRequest, res
 import { assertHighImpactConfirmed } from "./http-security.js";
 import { mcpProtocolVersion, toolDefinitions } from "./mcp-tools.js";
 import { JSONRPC_INTERNAL_ERROR, JSONRPC_INVALID_PARAMS, JSONRPC_INVALID_REQUEST, JSONRPC_METHOD_NOT_FOUND, JSONRPC_PARSE_ERROR, jsonRpcError, parseJsonRpcMessage, type JsonRpcErrorResponse, type JsonRpcId, type JsonRpcSuccessResponse } from "./jsonrpc.js";
+import { handlePublishDownloadRequest } from "./publish-download-http.js";
 import { WORKSPACE_SERVICE } from "./runtime-revision.js";
 
 export interface WorkspaceRouteDeps {
@@ -197,27 +198,7 @@ export async function handleRestRequest(request: IncomingMessage, response: Serv
         return true;
       }
       if (request.method === "GET" && url.pathname === "/workspace/publish/download") {
-        const publishId = url.searchParams.get("publish_id");
-        const rawKind = url.searchParams.get("kind");
-        if (publishId === null || publishId === "") {
-          restError(response, new CoreError("PUBLISH_ID_REQUIRED", "publish_id 參數為必填。", true));
-          return true;
-        }
-        if (rawKind !== "json" && rawKind !== "png") {
-          restError(response, new CoreError("PUBLISH_DOWNLOAD_KIND_INVALID", `Invalid download kind: ${rawKind ?? "null"}`, true));
-          return true;
-        }
-        try {
-          const result = await (await deps.getRuntime()).publishDownload(publishId, rawKind);
-          json(response, 200, {
-            media_type: result.media_type,
-            filename: result.filename,
-            content: Buffer.from(result.content.buffer, result.content.byteOffset, result.content.byteLength).toString("base64"),
-          });
-        } catch (error) {
-          restError(response, error);
-        }
-        return true;
+        return handlePublishDownloadRequest(request.method, response, url, deps.getRuntime);
       }
       if (request.method === "GET" && url.pathname === "/workspace/tavern/compat") {
         json(response, 200, await (await deps.getRuntime()).tavernCompat());
@@ -718,7 +699,7 @@ export async function handleMcpRequest(request: IncomingMessage, response: Serve
 async function dispatchMcpMethod(method: string, params: unknown, id: JsonRpcId, deps: WorkspaceRouteDeps): Promise<JsonRpcSuccessResponse | JsonRpcErrorResponse> {
   try {
     if (method === "initialize") {
-      return { jsonrpc: "2.0", id, result: { protocolVersion: mcpProtocolVersion(params), capabilities: { tools: { listChanged: false } }, serverInfo: { name: "st-workspace-v3", version: "0.1.0" } } };
+      return { jsonrpc: "2.0", id, result: { protocolVersion: mcpProtocolVersion(params), capabilities: { tools: { listChanged: false } }, serverInfo: { name: "st-workspace-v3", version: "0.1.0" } };
     }
     if (method === "tools/list") {
       return { jsonrpc: "2.0", id, result: { tools: toolDefinitions } };
