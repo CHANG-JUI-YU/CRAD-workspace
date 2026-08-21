@@ -1,10 +1,11 @@
 import { createServer, type Server } from "node:http";
 import { HttpSourceFetcher } from "@st-workspace/adapters";
-import { assertProjectId, CoreError, FileAttachmentStore, FileProjectRepository } from "@st-workspace/core";
+import { assertProjectId, CoreError, FileAttachmentStore, FileProjectRepository, z } from "@st-workspace/core";
+import { decodeAttachments } from "@st-workspace/domain";
 import { AgentAdapter, AgentRouter, WorkspaceProjectManager, WorkspaceRuntime, WorkspaceWorker, type WorkspaceWorkerOptions } from "@st-workspace/runtime";
 import { dashboard } from "./dashboard.js";
 export { toolDefinitions } from "./mcp-tools.js";
-import { applyBrowserSecurityHeaders, dashboardQuery, json, restError } from "./http-utils.js";
+import { applyBrowserSecurityHeaders, body, dashboardQuery, json, parseRequest, restError } from "./http-utils.js";
 import { extractBearerToken, normalizeConfiguredAuthToken, parseRequestTarget, timingSafeTextEqual, assertMutationRequestAllowed, assertRequestHostAllowed } from "./http-security.js";
 import { DashboardBrowserSessionStore, dashboardReauthenticationHtml, isDashboardSessionScope, type DashboardSessionAuthentication } from "./dashboard-session.js";
 import { JSONRPC_INTERNAL_ERROR, jsonRpcError } from "./jsonrpc.js";
@@ -15,6 +16,10 @@ import { workspaceServerStartupMessage } from "./server-endpoint.js";
 export { resolveWorkspaceServerEndpoint, workspaceServerStartupMessage } from "./server-endpoint.js";
 
 const LOOPBACK_TRUSTED_HOSTNAMES = ["127.0.0.1", "localhost", "::1"] as const;
+const LEGACY_CARD_MAX_BYTES = 5 * 1024 * 1024;
+const legacyCardUploadSchema = z.object({
+  attachments: z.array(z.unknown()).length(1),
+}).strict();
 
 export interface WorkspaceServerOptions {
   runtime?: WorkspaceRuntime;
@@ -115,6 +120,39 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         response.statusCode = 200;
         response.setHeader("content-type", "text/html; charset=utf-8");
         response.end(dashboard({ authenticationRequired: authToken !== undefined }));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/workspace/legacy-card/import") {
+        const parsed = await body(request);
+        const input = parseRequest(legacyCardUploadSchema, parsed, "ATTACHMENT_REQUIRED");
+        const attachments = decodeAttachments(input.attachments);
+        if (attachments.length !== 1) {
+          throw new CoreError("ATTACHMENT_REQUIRED", "舊卡審核需要一個可讀取的 PNG、JSON 或 YAML 附件。", true);
+        }
+        const attachment = attachments[0]!;
+        if (attachment.name === "." || attachment.name === ".." || /[\\/]/u.test(attachment.name)) {
+          throw new CoreError("LEGACY_CARD_UNREADABLE", "舊卡上傳只接受檔名，不接受 filesystem path。", true);
+        }
+        if (!/\.(?:png|json|ya?ml)$/iu.test(attachment.name)) {
+          throw new CoreError("LEGACY_CARD_UNREADABLE", "舊卡審核僅支援 PNG、JSON、YAML（.yaml/.yml）檔案。", true);
+        }
+        if (attachment.content.byteLength > LEGACY_CARD_MAX_BYTES) {
+          throw new CoreError("ATTACHMENT_TOO_LARGE", "舊卡檔案超過 5 MiB 上限，請縮小檔案後重試。", true, { max_bytes: LEGACY_CARD_MAX_BYTES });
+        }
+        const requestText = `匯入舊卡 ${attachment.name}`;
+        let result;
+        if (options.projectManager !== undefined) {
+          await options.projectManager.ensureRuntime();
+          const repository = options.projectManager.repository;
+          const directRuntime = new WorkspaceRuntime(repository, {
+            interviewRequired: false,
+            attachmentStore: new FileAttachmentStore(repository),
+          });
+          result = await options.projectManager.finalizeIfNamed(await directRuntime.request(requestText, { actor, attachments }));
+        } else {
+          result = await (await getRuntime()).request(requestText, { actor, attachments });
+        }
+        json(response, 200, result);
         return;
       }
       if (request.method === "GET" && url.pathname === "/workspace/dashboard/operations" && options.projectManager !== undefined && !options.projectManager.sessionSelected()) {
