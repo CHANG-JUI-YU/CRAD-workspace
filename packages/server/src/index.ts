@@ -8,7 +8,6 @@ import { applyBrowserSecurityHeaders, dashboardQuery, json, restError } from "./
 import { extractBearerToken, normalizeConfiguredAuthToken, parseRequestTarget, timingSafeTextEqual, assertMutationRequestAllowed, assertRequestHostAllowed } from "./http-security.js";
 import { DashboardBrowserSessionStore, dashboardReauthenticationHtml, isDashboardSessionScope, type DashboardSessionAuthentication } from "./dashboard-session.js";
 import { JSONRPC_INTERNAL_ERROR, jsonRpcError } from "./jsonrpc.js";
-import { handlePublishDownloadRequest } from "./publish-download-http.js";
 import { handleMcpRequest, handleRestRequest, type WorkspaceRouteDeps } from "./routes.js";
 import { computeRuntimeRevision } from "./runtime-revision.js";
 import { workspaceServerStartupMessage } from "./server-endpoint.js";
@@ -137,7 +136,6 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
       };
       if (options.projectManager !== undefined) deps.projectManager = options.projectManager;
       if (options.runtime !== undefined) deps.runtime = options.runtime;
-      if (await handlePublishDownloadRequest(request.method, response, url, getRuntime)) return;
       if (await handleRestRequest(request, response, url, deps)) return;
       if (await handleMcpRequest(request, response, url, deps)) return;
       restError(response, new CoreError("NOT_FOUND", "Not found", false));
