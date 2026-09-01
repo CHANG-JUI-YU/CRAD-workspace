@@ -10,6 +10,7 @@ import { extractBearerToken, normalizeConfiguredAuthToken, parseRequestTarget, t
 import { DashboardBrowserSessionStore, dashboardReauthenticationHtml, isDashboardSessionScope, type DashboardSessionAuthentication } from "./dashboard-session.js";
 import { JSONRPC_INTERNAL_ERROR, jsonRpcError } from "./jsonrpc.js";
 import { handleMcpRequest, handleRestRequest, type WorkspaceRouteDeps } from "./routes.js";
+import { parsePublishReadinessMode, publishReadinessSnapshot } from "./publish-readiness.js";
 import { computeRuntimeRevision } from "./runtime-revision.js";
 import { workspaceServerStartupMessage } from "./server-endpoint.js";
 export { resolveWorkspaceServerEndpoint, workspaceServerStartupMessage } from "./server-endpoint.js";
@@ -119,6 +120,11 @@ export function createWorkspaceServer(options: WorkspaceServerOptions): Workspac
         response.statusCode = 200;
         response.setHeader("content-type", "text/html; charset=utf-8");
         response.end(dashboard({ authenticationRequired: authToken !== undefined }));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/workspace/publish/readiness") {
+        const mode = parsePublishReadinessMode(url.searchParams.get("mode"));
+        json(response, 200, await publishReadinessSnapshot(await getRuntime(), mode));
         return;
       }
       if (request.method === "POST" && url.pathname === "/workspace/legacy-card/import") {

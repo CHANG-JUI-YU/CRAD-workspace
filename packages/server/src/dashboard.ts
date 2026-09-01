@@ -23,7 +23,7 @@ import { DASHBOARD_PANELS_COVERAGE_JS } from "./dashboard-panels-coverage.js";
 import { DASHBOARD_PANELS_WORKFLOW_JS } from "./dashboard-panels-workflow.js";
 import { DASHBOARD_PANELS_COLLECTIONS_JS } from "./dashboard-panels-collections.js";
 import { DASHBOARD_NAV_JS } from "./dashboard-nav.js";
-import { DASHBOARD_LISTENERS_LEGACY_UPLOAD_JS } from "./dashboard-legacy-card-upload.js";
+import { DASHBOARD_LISTENERS_REVISION_SAFE_JS } from "./dashboard-publish-readiness.js";
 
 const DASHBOARD_FOOTER = `    }());
   </script>
@@ -60,7 +60,7 @@ export function dashboard(options: DashboardRenderOptions = {}): string {
     + DASHBOARD_PANELS_MEDIA_PROJECT_SAFE_JS
     + DASHBOARD_PROJECT_CONTEXT_JS
     + DASHBOARD_NAV_JS
-    + DASHBOARD_LISTENERS_LEGACY_UPLOAD_JS
+    + DASHBOARD_LISTENERS_REVISION_SAFE_JS
     + DASHBOARD_FOOTER
   );
 }
